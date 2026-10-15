@@ -1,5 +1,5 @@
 diff --git a/backends/aurora/aurora_backend.cpp b/backends/aurora/aurora_backend.cpp
-index d94f811..c6381cd 100644
+index d94f811..3f6e02b 100644
 --- a/backends/aurora/aurora_backend.cpp
 +++ b/backends/aurora/aurora_backend.cpp
 @@ -19,7 +19,9 @@
@@ -484,7 +484,28 @@ index d94f811..c6381cd 100644
  
      const bool low_queue =
          queued >= 0 && queued < bytes_per_second / 100;
-@@ -1886,6 +2188,169 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1876,6 +2178,20 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+                      g_audio_push_count, queued, queued + bytes,
+                      g_audio_playing ? 1u : 0u, g_audio_throttle_count);
+     }
++    // Dynamic rate control: the output device's clock and our wall-clock
++    // production never match exactly, so the queue drifted until it ran dry
++    // (an audible stutter every so often). Nudge the playback rate, at most
++    // +-0.5% (inaudible), to hold the queue at the prebuffer target.
++    if (g_audio_playing && (g_audio_push_count & 63u) == 0u && prebuffer_bytes > 0) {
++        static float ratio = 1.f;
++        const float error = static_cast<float>(queued - prebuffer_bytes) / prebuffer_bytes;
++        const float want = 1.f + std::clamp(error * 0.01f, -0.005f, 0.005f);
++        ratio += (want - ratio) * 0.1f;
++        SDL_SetAudioStreamFrequencyRatio(g_audio_stream, ratio);
++        if (g_audio_queue_log && (g_audio_push_count % 4096u) == 0u)
++            std::fprintf(stderr, "[audio-queue] rate=%.4f queued=%d target=%d\n", ratio,
++                         queued, prebuffer_bytes);
++    }
+     if (!SDL_PutAudioStreamData(g_audio_stream, samples, bytes))
+         std::fprintf(stderr, "[audio] failed to queue samples: %s\n", SDL_GetError());
+     else if (!g_audio_playing && queued + bytes >= prebuffer_bytes) {
+@@ -1886,6 +2202,169 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
      }
  }
  

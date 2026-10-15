@@ -19,7 +19,7 @@ Settings g_settings = {
     .fps_counter = true,
     .music_volume = 100,
     .effects_volume = 100,
-    .audio_buffer_ms = 40,
+    .audio_buffer_ms = 60,
     .controls_layout = 1,  // Modern
     // Modern: sprint (left stick click) and creep (right stick click) toggle.
     .sprint_toggle = {false, true, false},

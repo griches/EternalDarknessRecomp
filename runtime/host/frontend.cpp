@@ -5,11 +5,14 @@
 #include "host/frontend.h"
 
 #include "gxruntime/aurora_backend.h"
+#include "host/controls.h"
 #include "host/settings.h"
 
 #include <aurora/rmlui.hpp>
 
 #include <RmlUi/Core.h>
+#include <RmlUi_Platform_SDL.h>
+#include <SDL3/SDL_keyboard.h>
 #include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_scancode.h>
 #include <SDL3/SDL_timer.h>
@@ -79,6 +82,19 @@ class KeyListener final : public Rml::EventListener {
 public:
     void ProcessEvent(Rml::Event& event) override {
         using namespace Rml::Input;
+        if (controls::capturing()) {
+            // Rebinding: find the SDL scancode for this key.
+            const int id = event.GetParameter<int>("key_identifier", 0);
+            for (int sc = SDL_SCANCODE_A; sc < SDL_SCANCODE_COUNT; sc++) {
+                const SDL_Keycode code = SDL_GetKeyFromScancode(
+                    static_cast<SDL_Scancode>(sc), SDL_KMOD_NONE, false);
+                if (code != SDLK_UNKNOWN && RmlSDL::ConvertKey(static_cast<int>(code)) == id) {
+                    controls::capture_key(sc);
+                    break;
+                }
+            }
+            return;
+        }
         static const bool log = std::getenv("ED_FRONTEND_LOG") != nullptr;
         if (log)
             std::fprintf(stderr, "[frontend] key %d phase=%d target=%s current=%s t=%llu\n",
@@ -218,11 +234,12 @@ std::string region_name(const std::string& id) {
 
 // --- Menu model -------------------------------------------------------------
 
-enum class Screen { Launcher, Options, InGame };
+enum class Screen { Launcher, Options, Controls, InGame };
 
 struct Row {
     std::string label;
     std::string value;           // empty: an action row
+    std::string value_rml;       // markup instead of value (button icons)
     bool enabled = true;
     std::string note;            // shown under the menu while selected
     std::function<void(int)> change;  // left/right (-1/+1); null: no value
@@ -230,6 +247,7 @@ struct Row {
 };
 
 Rml::ElementDocument* g_doc = nullptr;
+Rml::ElementDocument* g_hud = nullptr;  // FPS counter, over the game
 bool g_ui_ready = false;
 Screen g_screen = Screen::Launcher;
 Screen g_options_return = Screen::Launcher;
@@ -330,7 +348,30 @@ void build_launcher() {
 
 void build_options() {
     static const char* const kAspect[] = {"Follow the game", "4:3", "16:9", "Stretch"};
-    static const char* const kScale[] = {"Window", "1x (640x528)", "2x", "3x", "4x"};
+    // Each resolution as the pixels it draws at, for the display shape in use
+    // (the GameCube's 528 lines times the scale, at 4:3 or 16:9).
+    float display_aspect = 4.f / 3.f;
+    uint32_t win_w = 0, win_h = 0;
+    dol_aurora_get_display_info(&display_aspect, &win_w, &win_h);
+    auto size_label = [&](int scale) {
+        uint32_t w, h;
+        if (scale == 0) {
+            w = win_w;
+            h = win_h;
+            if (h != 0 && static_cast<float>(w) / h > display_aspect)
+                w = static_cast<uint32_t>(h * display_aspect + 0.5f);
+            else if (display_aspect > 0.f)
+                h = static_cast<uint32_t>(w / display_aspect + 0.5f);
+        } else {
+            h = 528u * static_cast<uint32_t>(scale);
+            w = static_cast<uint32_t>(h * display_aspect + 0.5f);
+        }
+        return std::to_string(w) + "x" + std::to_string(h);
+    };
+    const std::string kScale[] = {
+        "Window (" + size_label(0) + ")", "1x (" + size_label(1) + ")",
+        "2x (" + size_label(2) + ")", "3x (" + size_label(3) + ")",
+        "4x (" + size_label(4) + ")"};
     static const int kBuffers[] = {40, 60, 80, 100, 150, 200};
 
     Row skip{"Skip intros", on_off(g_settings.skip_intros)};
@@ -391,10 +432,54 @@ void build_options() {
     };
     g_rows.push_back(buffer);
 
+    Row controls{"Controls", controls::layout_name(controls::layout())};
+    controls.note = "Controller and keyboard layout: Original, Modern or Custom.";
+    controls.activate = [] {
+        g_screen = Screen::Controls;
+        g_selected = 0;
+    };
+    g_rows.push_back(controls);
+
     Row back{"Back"};
     back.activate = [] {
         settings_save();
         g_screen = g_options_return;
+        g_selected = 0;
+    };
+    g_rows.push_back(back);
+}
+
+void build_controls() {
+    Row layout{"Layout", "< " + std::string(controls::layout_name(controls::layout())) + " >"};
+    layout.note = "Original: GameCube positions. Modern: aim LT, attack RT, sprint LB.";
+    layout.change = [](int dir) {
+        int l = controls::layout();
+        cycle(l, controls::kLayoutCount, dir);
+        controls::set_layout(l);
+    };
+    g_rows.push_back(layout);
+
+    Row pad{"Controller", controls::controller_name()};
+    pad.enabled = false;
+    g_rows.push_back(pad);
+
+    for (int a = 0; a < controls::kActionCount; a++) {
+        Row r{controls::action_name(a)};
+        if (controls::capturing() && controls::capture_action() == a) {
+            r.value = "Press a button or key...";
+            r.note = "Waiting for a controller button, trigger or key (Esc cancels).";
+        } else {
+            r.value_rml = controls::pad_glyphs(a) + "<span class=\"sep\"></span>" +
+                          controls::key_glyph(a);
+            r.note = "Select to rebind (switches to Custom). Controller | keyboard.";
+        }
+        r.activate = [a] { controls::begin_capture(a); };
+        g_rows.push_back(r);
+    }
+
+    Row back{"Back"};
+    back.activate = [] {
+        g_screen = Screen::Options;
         g_selected = 0;
     };
     g_rows.push_back(back);
@@ -455,9 +540,10 @@ void build_in_game() {
 void render() {
     if (g_doc == nullptr)
         return;
-    const char* heading = g_screen == Screen::Launcher ? "Main Menu"
-                          : g_screen == Screen::Options ? "Options"
-                                                        : "Paused";
+    const char* heading = g_screen == Screen::Launcher   ? "Main Menu"
+                          : g_screen == Screen::Options  ? "Options"
+                          : g_screen == Screen::Controls ? "Controls"
+                                                         : "Paused";
     g_doc->GetElementById("heading")->SetInnerRML(heading);
     std::string rml;
     for (size_t i = 0; i < g_rows.size(); i++) {
@@ -469,7 +555,9 @@ void render() {
             rml += " disabled";
         rml += "\" id=\"row" + std::to_string(i) + "\"><span class=\"label\">" +
                escape(r.label) + "</span>";
-        if (!r.value.empty())
+        if (!r.value_rml.empty())
+            rml += "<span class=\"value\">" + r.value_rml + "</span>";
+        else if (!r.value.empty())
             rml += "<span class=\"value\">" + escape(r.value) + "</span>";
         rml += "</div>";
     }
@@ -481,9 +569,12 @@ void render() {
         g_screen == Screen::InGame
             ? "Up/Down choose &#183; Left/Right change &#183; A select &#183; B resume"
             : "Up/Down choose &#183; Left/Right change &#183; A select &#183; B back");
+    // The controls list is long: drop the title and tighten the rows.
+    g_doc->SetClass("compact", g_screen == Screen::Controls);
     // Over the game the menu dims the paused frame; the launcher is opaque.
     g_doc->SetClass("overlay", g_screen == Screen::InGame ||
-                                   (g_screen == Screen::Options &&
+                                   ((g_screen == Screen::Options ||
+                                     g_screen == Screen::Controls) &&
                                     g_options_return == Screen::InGame));
 }
 
@@ -492,6 +583,7 @@ void build_rows() {
     switch (g_screen) {
     case Screen::Launcher: build_launcher(); break;
     case Screen::Options: build_options(); break;
+    case Screen::Controls: build_controls(); break;
     case Screen::InGame: build_in_game(); break;
     }
     if (g_selected >= static_cast<int>(g_rows.size()))
@@ -522,6 +614,10 @@ void activate_selected() {
 
 void go_back() {
     switch (g_screen) {
+    case Screen::Controls:
+        g_screen = Screen::Options;
+        g_selected = 0;
+        break;
     case Screen::Options:
         settings_save();
         g_screen = g_options_return;
@@ -600,6 +696,7 @@ bool ensure_ui() {
                              "AlegreyaSC-Regular.ttf", "AlegreyaSC-Bold.ttf"})
         if (!Rml::LoadFontFace(res + "/fonts/" + font))
             std::fprintf(stderr, "[frontend] font missing: %s/fonts/%s\n", res.c_str(), font);
+    g_hud = context->LoadDocument(res + "/ui/hud.rml");
     g_doc = context->LoadDocument(res + "/ui/menu.rml");
     if (g_doc == nullptr) {
         std::fprintf(stderr, "[frontend] %s/ui/menu.rml did not load; menus disabled\n",
@@ -625,6 +722,20 @@ bool run_menu() {
     g_input.poll(pressed);
     bool open = true;
     while (!g_close) {
+        if (controls::capturing()) {
+            const bool done = controls::poll_capture();
+            if (done || !controls::capturing()) {
+                // Swallow the press that bound the action.
+                g_input.poll(pressed);
+                std::fill(std::begin(g_key_pressed), std::end(g_key_pressed), false);
+                build_rows();
+            }
+            if (!dol_aurora_ui_frame()) {
+                open = false;
+                break;
+            }
+            continue;
+        }
         g_input.poll(pressed);
         bool dirty = false;
         if (pressed[kUp]) {
@@ -659,6 +770,11 @@ bool run_menu() {
                          g_selected, g_close);
         if (g_close)
             break;
+        static Uint64 refresh = 0;
+        if (g_screen == Screen::Controls && SDL_GetTicks() > refresh) {
+            refresh = SDL_GetTicks() + 500;  // controller plugged in / out
+            dirty = true;
+        }
         if (dirty)
             build_rows();
         if (!dol_aurora_ui_frame()) {
@@ -711,7 +827,43 @@ extern "C" bool frontend_run_launcher(const char* default_iso, char* iso_out,
     return true;
 }
 
+// On-screen frames per second (game frames, i.e. calls here), refreshed each
+// second while the FPS counter option is on.
+void update_fps_counter() {
+    static Uint64 mark = 0;
+    static unsigned frames = 0;
+    static bool shown = false;
+    if (g_hud == nullptr)
+        return;
+    if (!g_settings.fps_counter) {
+        if (shown) {
+            g_hud->Hide();
+            shown = false;
+        }
+        mark = 0;
+        return;
+    }
+    const Uint64 now = SDL_GetTicksNS();
+    frames++;
+    if (mark == 0) {
+        mark = now;
+        frames = 0;
+        return;
+    }
+    if (now - mark >= 1000000000ull) {
+        const double fps = frames * 1e9 / static_cast<double>(now - mark);
+        g_hud->GetElementById("fps")->SetInnerRML(std::to_string(static_cast<int>(fps + 0.5)) + " FPS");
+        mark = now;
+        frames = 0;
+        if (!shown) {
+            g_hud->Show(Rml::ModalFlag::None, Rml::FocusFlag::None);
+            shown = true;
+        }
+    }
+}
+
 extern "C" void frontend_frame(void) {
+    update_fps_counter();
     static bool menu_was_held = false;
     bool held[kButtonCount];
     read_buttons(held);

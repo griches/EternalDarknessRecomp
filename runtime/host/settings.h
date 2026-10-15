@@ -17,6 +17,8 @@ typedef struct {
     int music_volume;     // disc-streamed music, 0-100
     int effects_volume;   // the game's own mix (effects, voices), 0-100
     int audio_buffer_ms;  // audio queued ahead of the output
+    int controls_layout;  // 0 original, 1 modern, 2 custom
+    char controls_custom[512];  // custom bindings (controls.cpp format)
     char disc[1024];      // last disc image chosen in the launcher
 } Settings;
 

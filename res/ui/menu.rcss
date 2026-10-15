@@ -108,3 +108,48 @@ body.overlay {
 	color: #8a7a60;
 	text-align: center;
 }
+
+/* Button and key icons (Kenney Input Prompts, CC0). */
+img.glyph {
+	width: 34dp;
+	height: 34dp;
+	margin-left: 4dp;
+	vertical-align: middle;
+}
+
+.sep {
+	display: inline-block;
+	width: 22dp;
+}
+
+.keycap {
+	display: inline-block;
+	padding: 2dp 8dp;
+	margin-left: 4dp;
+	border: 1dp #a08b6a;
+	border-radius: 4dp;
+	font-size: 16dp;
+	color: #e8dcc0;
+	vertical-align: middle;
+}
+
+.unbound {
+	color: #6b6152;
+}
+
+/* Long lists (Controls): no title, tighter rows. */
+body.compact #title,
+body.compact #subtitle {
+	display: none;
+}
+
+body.compact #panel {
+	padding-top: 22dp;
+	padding-bottom: 18dp;
+}
+
+body.compact .row {
+	padding: 2dp 14dp;
+	margin: 1dp 0;
+	align-items: center;
+}

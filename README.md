@@ -33,8 +33,12 @@ launcher. Menus work with the keyboard (arrows, Enter, Esc), a controller
 (d-pad or stick, A, B) or the mouse.
 
 Options (kept in `settings.ini`): skip intros, display (follow the game's
-widescreen setting, 4:3, 16:9 or stretch), resolution, fullscreen, FPS counter,
-music and sound-effect volumes, audio buffer.
+widescreen setting, 4:3, 16:9 or stretch), widescreen HUD, resolution (each
+choice shows its size), fullscreen, on-screen FPS counter, music and
+sound-effect volumes, audio buffer, and Controls: Original (GameCube
+positions), Modern (aim LT, attack RT, sprint LB, creep RB, reload X/Square) or
+Custom (select an action, then press a button, trigger or key). Bindings show
+as Xbox, PlayStation or Switch button icons for the connected controller.
 
 Quick save: 2 saves the whole machine to `build/runs/quick.state` and 1 loads
 it back, in the same session or after a restart (`ED_QUICKSTATE=path` picks
@@ -53,7 +57,8 @@ another file). Memory-card saves are never touched by a load.
 - `patches/gxruntime/`, `patches/dolrecomp/`: fixes to GXRuntime and the
   recompiler this game needs.
 - `res/`: the launcher and in-game menu (RmlUi documents) and their fonts
-  (Alegreya SC and Fira Sans, SIL Open Font License, licences alongside).
+  (Alegreya SC and Fira Sans, SIL Open Font License, licences alongside), and
+  button icons from Kenney's Input Prompts (CC0).
 
 ## Licence
 

@@ -9,6 +9,7 @@
 #include "generated.h"
 
 #include "gxruntime/aurora_backend.h"
+#include "host/controls.h"
 #include "host/frontend.h"
 #include "host/settings.h"
 #include "gxruntime/boot.h"
@@ -304,6 +305,7 @@ int main(int argc, char** argv) {
     if (aurora_enabled) {
         settings_load();
         settings_apply();
+        controls_init();
         frontend_init(argc, argv);
         if (!no_launcher && getenv("ED_QUICKLOAD") == NULL &&
             getenv("ED_NO_LAUNCHER") == NULL) {

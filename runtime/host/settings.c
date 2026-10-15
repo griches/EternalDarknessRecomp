@@ -20,6 +20,8 @@ Settings g_settings = {
     .music_volume = 100,
     .effects_volume = 100,
     .audio_buffer_ms = 40,
+    .controls_layout = 0,
+    .controls_custom = "",
     .disc = "",
 };
 
@@ -73,6 +75,10 @@ void settings_load(void) {
             g_settings.effects_volume = clamp_int(n, 0, 100);
         else if (strcmp(key, "audio_buffer_ms") == 0)
             g_settings.audio_buffer_ms = clamp_int(n, 20, 500);
+        else if (strcmp(key, "controls_layout") == 0)
+            g_settings.controls_layout = clamp_int(n, 0, 2);
+        else if (strcmp(key, "controls_custom") == 0)
+            snprintf(g_settings.controls_custom, sizeof g_settings.controls_custom, "%s", value);
         else if (strcmp(key, "disc") == 0)
             snprintf(g_settings.disc, sizeof g_settings.disc, "%s", value);
     }
@@ -95,6 +101,8 @@ void settings_save(void) {
     fprintf(f, "music_volume = %d\n", g_settings.music_volume);
     fprintf(f, "effects_volume = %d\n", g_settings.effects_volume);
     fprintf(f, "audio_buffer_ms = %d\n", g_settings.audio_buffer_ms);
+    fprintf(f, "controls_layout = %d\n", g_settings.controls_layout);
+    fprintf(f, "controls_custom = %s\n", g_settings.controls_custom);
     fprintf(f, "disc = %s\n", g_settings.disc);
     fclose(f);
 }

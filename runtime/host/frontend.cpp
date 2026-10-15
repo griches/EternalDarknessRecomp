@@ -569,8 +569,16 @@ void build_options() {
     };
     g_rows.push_back(more);
 
+    static const char* const kGameFont[] = {"Sharp", "Tome", "Original"};
+    Row font{"Game text", kGameFont[g_settings.game_font]};
+    font.section = "IV \u00b7 Game";
+    font.page = 1;
+    font.note = "The game's own lettering: Sharp redraws it crisply, Tome in old "
+                "typefaces, Original as on the disc.";
+    font.change = [](int dir) { cycle(g_settings.game_font, 3, dir); };
+    g_rows.push_back(font);
+
     Row skip{"Skip intros", on_off(g_settings.skip_intros)};
-    skip.section = "IV \u00b7 Game";
     skip.page = 1;
     skip.note = "Skip the logo movies and the opening quote (next start).";
     skip.change = [](int) { g_settings.skip_intros = !g_settings.skip_intros; };

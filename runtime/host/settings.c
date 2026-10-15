@@ -15,6 +15,7 @@ Settings g_settings = {
     .aspect = 0,
     .widescreen_hud = true,
     .render_scale = 0,
+    .game_font = 0,  // Sharp
     .fullscreen = false,
     .fps_counter = true,
     .music_volume = 100,
@@ -86,6 +87,8 @@ void settings_load(void) {
             g_settings.widescreen_hud = n != 0;
         else if (strcmp(key, "render_scale") == 0)
             g_settings.render_scale = clamp_int(n, 0, 4);
+        else if (strcmp(key, "game_font") == 0)
+            g_settings.game_font = clamp_int(n, 0, 2);
         else if (strcmp(key, "fullscreen") == 0)
             g_settings.fullscreen = n != 0;
         else if (strcmp(key, "fps_counter") == 0)
@@ -128,6 +131,7 @@ void settings_save(void) {
     fprintf(f, "aspect = %d\n", g_settings.aspect);
     fprintf(f, "widescreen_hud = %d\n", g_settings.widescreen_hud ? 1 : 0);
     fprintf(f, "render_scale = %d\n", g_settings.render_scale);
+    fprintf(f, "game_font = %d\n", g_settings.game_font);
     fprintf(f, "fullscreen = %d\n", g_settings.fullscreen ? 1 : 0);
     fprintf(f, "fps_counter = %d\n", g_settings.fps_counter ? 1 : 0);
     fprintf(f, "music_volume = %d\n", g_settings.music_volume);

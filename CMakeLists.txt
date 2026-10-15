@@ -72,7 +72,7 @@ if(ED_ENABLE_AURORA)
     set_target_properties(EternalDarkness PROPERTIES LINKER_LANGUAGE CXX)
     # Launcher and in-game menu (RmlUi documents in res/ui).
     target_sources(EternalDarkness PRIVATE runtime/host/frontend.cpp runtime/host/controls.cpp
-                   runtime/host/buttons.cpp)
+                   runtime/host/buttons.cpp runtime/host/fonts.cpp)
     target_compile_definitions(EternalDarkness PRIVATE AURORA_ENABLE_RMLUI=1)
     target_link_libraries(EternalDarkness PRIVATE rmlui rmlui_backends PNG::PNG)
 endif()

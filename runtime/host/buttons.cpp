@@ -10,6 +10,7 @@
 
 #include "gxruntime/aurora_backend.h"
 #include "host/controls.h"
+#include "host/fonts.h"
 #include "host/frontend.h"
 
 #include <png.h>
@@ -194,7 +195,24 @@ bool load_png_rgba(const std::string& path, std::vector<uint8_t>* rgba, uint32_t
     return true;
 }
 
+// The renderer takes one override: the prompt sheet here, the font sheets in
+// fonts.cpp.
+bool claims_any(uint32_t format, uint32_t width, uint32_t height) {
+    return claims(format, width, height) || fonts_claims(format, width, height);
+}
+
+bool apply_any(const uint8_t* rgba, uint32_t width, uint32_t height, uint8_t** out_rgba,
+               uint32_t* out_width, uint32_t* out_height) {
+    if (claims(kCmpr, width, height))
+        return apply(rgba, width, height, out_rgba, out_width, out_height);
+    return fonts_apply(rgba, width, height, out_rgba, out_width, out_height);
+}
+
+uint64_t generation_any() {
+    return generation() ^ (fonts_generation() * 0x9E3779B97F4A7C15ull);
+}
+
 extern "C" void buttons_init(void) {
-    static const DolAuroraTextureOverride ops = {claims, apply, generation};
+    static const DolAuroraTextureOverride ops = {claims_any, apply_any, generation_any};
     dol_aurora_set_texture_override(&ops);
 }

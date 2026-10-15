@@ -1,8 +1,8 @@
 diff --git a/backends/aurora/aurora_backend.cpp b/backends/aurora/aurora_backend.cpp
-index d94f811..14bbe77 100644
+index d94f811..0089b97 100644
 --- a/backends/aurora/aurora_backend.cpp
 +++ b/backends/aurora/aurora_backend.cpp
-@@ -19,9 +19,13 @@
+@@ -19,9 +19,15 @@
  #include <dolphin/pad.h>
  #include <dolphin/vi.h>
  #include <SDL3/SDL_audio.h>
@@ -12,16 +12,25 @@ index d94f811..14bbe77 100644
  #include <SDL3/SDL_scancode.h>
  #include <SDL3/SDL_timer.h>
 +#include <SDL3/SDL_surface.h>
++#include <SDL3/SDL_cpuinfo.h>
++#include <SDL3/SDL_thread.h>
 +#include <SDL3/SDL_video.h>
  
  #include <gx/fifo.hpp>
  #include <gx/gx.hpp>
-@@ -30,12 +34,16 @@
+@@ -30,12 +36,23 @@
  #include <cstdio>
  #include <cstdlib>
  #include <cstring>
 +#include <algorithm>
  #include <array>
++#include <atomic>
++#include <chrono>
++#include <condition_variable>
++#include <deque>
++#include <functional>
++#include <mutex>
++#include <thread>
  #include <cstddef>
  #include <cstdint>
 +#include <memory>
@@ -33,7 +42,7 @@ index d94f811..14bbe77 100644
  
  #if GXRUNTIME_HAS_AURORA_RECOMP
  // gxcore substrate submission lives in the Aurora fork (lib/gfx/gxcore_draw.cpp),
-@@ -46,9 +54,31 @@ namespace aurora::gfx::gxcore {
+@@ -46,9 +63,31 @@ namespace aurora::gfx::gxcore {
  bool submit_draw_plan(const gxruntime::gxcore::DrawPlan& plan);
  void copy_efb_to_texture(const gxruntime::gxcore::EfbCopyCommand& cmd);
  void reset_texture_cache();
@@ -65,7 +74,7 @@ index d94f811..14bbe77 100644
  // Forward for continuous EFB readback attach (fork-internal).
  namespace aurora::gfx::efb_readback {
  void set_continuous(bool enabled) noexcept;
-@@ -57,8 +87,18 @@ bool peek(const std::uint8_t** rgba, std::uint32_t* width,
+@@ -57,10 +96,24 @@ bool peek(const std::uint8_t** rgba, std::uint32_t* width,
            std::uint32_t* height) noexcept;
  } // namespace aurora::gfx::efb_readback
  
@@ -82,9 +91,16 @@ index d94f811..14bbe77 100644
  bool g_initialized = false;
 +Uint64 g_last_present_ms = 0;  // SDL_GetTicks at the last present
  bool g_frame_open = false;
- bool g_should_quit = false;
+-bool g_should_quit = false;
++// Set on the main thread (window closed, Quit), read by the game thread.
++std::atomic<bool> g_should_quit{false};
++// Aurora's pad state (its controller list, rumble) is read by the game thread
++// and changed by event handling on the main thread.
++std::mutex g_input_mutex;
  bool g_graphics_log = false;
-@@ -112,6 +152,24 @@ std::array<PendingTlutMetadata, 20> g_pending_tluts{};
+ bool g_force_untextured = false;
+ bool g_gx_core_enabled = true; // gxcore is the default renderer; DOL_GX_CORE=0 opts out
+@@ -112,6 +165,28 @@ std::array<PendingTlutMetadata, 20> g_pending_tluts{};
  // validating sink checked. The live Aurora path stays authoritative; this only
  // proves the consumer survives real FIFO traffic ahead of renderer cutover.
  gxruntime::aurora_recomp::RetailGxFrontend g_shadow_frontend;
@@ -104,12 +120,42 @@ index d94f811..14bbe77 100644
 +}();
 +// DOL_GX_TIME=1: wall time spent in the GX front end (parse, plan, submit)
 +// per presented frame, printed with the frame-pacing line.
-+static bool g_gx_time_log = std::getenv("DOL_GX_TIME") != nullptr;
-+static std::uint64_t g_gx_time_ns;
++static bool g_gx_time_log = [] {
++    const bool on = std::getenv("DOL_GX_TIME") != nullptr;
++    gxruntime::gxcore::g_plan_timing = on;
++    return on;
++}();
++static std::atomic<std::uint64_t> g_gx_time_ns{0};  // decode thread adds
  gxruntime::aurora_recomp::ConsumingAuroraRenderSink g_shadow_packet_sink;
  bool g_shadow_frontend_enabled = false;
  bool g_shadow_frontend_failed = false;
-@@ -379,13 +437,39 @@ unsigned long long g_trace_present_scope_frame = 0ull;
+@@ -124,9 +199,17 @@ bool g_shadow_frontend_failed = false;
+ gxruntime::gxcore::GxCoreSink g_core_sink;
+ unsigned long long g_core_submitted = 0;
+ unsigned long long g_core_rejected = 0;
++std::uint64_t g_submit_time_ns = 0;  // DOL_GX_TIME: in submit_draw_plan
+ void core_plan_observer(const gxruntime::gxcore::DrawPlan& plan, void*) {
+     if (!plan.ok)
+         return; // skip reasons are tallied in the sink gap counters
++    if (g_gx_time_log) {
++        const std::uint64_t t0 = SDL_GetTicksNS();
++        const bool ok = aurora::gfx::gxcore::submit_draw_plan(plan);
++        g_submit_time_ns += SDL_GetTicksNS() - t0;
++        ++(ok ? g_core_submitted : g_core_rejected);
++        return;
++    }
+     if (aurora::gfx::gxcore::submit_draw_plan(plan))
+         ++g_core_submitted;
+     else
+@@ -244,6 +327,7 @@ void log_callback(AuroraLogLevel level, const char* module, const char* message,
+ }
+ 
+ void poll_events() {
++    std::lock_guard<std::mutex> input_lock(g_input_mutex);
+     const AuroraEvent* event = aurora_update();
+     while (event != nullptr && event->type != AURORA_NONE) {
+         if (event->type == AURORA_EXIT)
+@@ -379,13 +463,39 @@ unsigned long long g_trace_present_scope_frame = 0ull;
  bool g_trace_frame_begun = false;
  unsigned long long g_trace_frames_recorded = 0ull;
  gxruntime::aurora_recomp::trace::TraceWriter g_trace_writer;
@@ -156,7 +202,7 @@ index d94f811..14bbe77 100644
  
  unsigned long long trace_current_frame() {
      return g_trace_present_scope_frame != 0ull ? g_trace_present_scope_frame
-@@ -435,6 +519,17 @@ bool trace_should_record() {
+@@ -435,6 +545,17 @@ bool trace_should_record() {
          g_trace_writer.frame_begin(static_cast<u32>(frame));
          g_trace_frame_begun = true;
          ++g_trace_frames_recorded;
@@ -174,7 +220,7 @@ index d94f811..14bbe77 100644
      }
      return true;
  }
-@@ -442,18 +537,46 @@ bool trace_should_record() {
+@@ -442,18 +563,46 @@ bool trace_should_record() {
  void trace_record_mem_update(u32 address, u32 size, const void* data) {
      if (size == 0 || data == nullptr || !trace_should_record())
          return;
@@ -230,7 +276,7 @@ index d94f811..14bbe77 100644
  }
  
  void trace_close_and_log() {
-@@ -491,6 +614,10 @@ void trace_on_present() {
+@@ -491,6 +640,10 @@ void trace_on_present() {
          trace_close_and_log();
      g_trace_present_scope_frame = 0ull;
      g_trace_frame_begun = false;
@@ -241,7 +287,814 @@ index d94f811..14bbe77 100644
  }
  // ---------------------------------------------------------------------------
  
-@@ -937,7 +1064,7 @@ bool dol_aurora_initialize(int argc, char** argv,
+@@ -587,6 +740,29 @@ void shadow_frontend_call_display_list(const void* data, u32 size) {
+     }
+ }
+ 
++// gxcore: decode FIFO bytes (one write, or a run of them replayed by the GX
++// thread) and plan the draws they complete.
++void shadow_frontend_core_write(std::span<const std::uint8_t> fragment) {
++    if (!g_shadow_frontend.write_fifo(fragment) ||
++        !g_shadow_frontend.flush(&g_core_sink)) {
++        g_shadow_frontend_failed = true;
++        std::fprintf(stderr,
++                     "[gx-core] frontend rejected FIFO after %llu byte(s): "
++                     "%s (opcode=0x%02X offset=%llu); consumer=%s\n",
++                     g_fifo_bytes,
++                     g_shadow_frontend.last_error() != nullptr
++                         ? g_shadow_frontend.last_error()
++                         : "none",
++                     static_cast<unsigned>(
++                         g_shadow_frontend.last_error_opcode()),
++                     static_cast<unsigned long long>(
++                         g_shadow_frontend.last_error_offset()),
++                     g_core_sink.failure_reason() != nullptr
++                         ? g_core_sink.failure_reason()
++                         : "none");
++    }
++}
++
+ void shadow_frontend_write(u64 value, u8 size) {
+     if (!g_shadow_frontend_enabled || g_shadow_frontend_failed)
+         return;
+@@ -615,24 +791,7 @@ void shadow_frontend_write(u64 value, u8 size) {
+     }
+     const std::span<const std::uint8_t> fragment(bytes, size);
+     if (g_gx_core_enabled) {
+-        if (!g_shadow_frontend.write_fifo(fragment) ||
+-            !g_shadow_frontend.flush(&g_core_sink)) {
+-            g_shadow_frontend_failed = true;
+-            std::fprintf(stderr,
+-                         "[gx-core] frontend rejected FIFO after %llu byte(s): "
+-                         "%s (opcode=0x%02X offset=%llu); consumer=%s\n",
+-                         g_fifo_bytes,
+-                         g_shadow_frontend.last_error() != nullptr
+-                             ? g_shadow_frontend.last_error()
+-                             : "none",
+-                         static_cast<unsigned>(
+-                             g_shadow_frontend.last_error_opcode()),
+-                         static_cast<unsigned long long>(
+-                             g_shadow_frontend.last_error_offset()),
+-                         g_core_sink.failure_reason() != nullptr
+-                             ? g_core_sink.failure_reason()
+-                             : "none");
+-        }
++        shadow_frontend_core_write(fragment);
+         return;
+     }
+     if (!g_shadow_frontend.write_fifo(fragment) ||
+@@ -842,8 +1001,750 @@ void shadow_transform_observer(
+     }
+ }
+ #endif
++
+ } // namespace
+ 
++extern "C" {
++void aurora_backend_gx_write(u64 value, u8 size);
++void aurora_backend_set_array_guest(u32 attr, u32 guest_address,
++                                    const void* data, u32 size, u8 stride);
++void aurora_backend_call_display_list(const void* data, u32 size);
++void aurora_backend_set_copy_destination_guest(u32 guest_address,
++                                               const void* data);
++void aurora_backend_configure_vi(u32 tv_mode, u16 fb_width, u16 efb_height,
++                                 u16 xfb_height, u16 vi_width, u16 vi_height);
++void aurora_backend_set_next_xfb(u32 physical_address);
++void aurora_backend_flush_xfb(void);
++void aurora_backend_set_xfb_black(bool black);
++}
++
++#if GXRUNTIME_HAS_AURORA_RECOMP
++// --- GX thread ------------------------------------------------------------------
++// Three threads (dol_aurora_run_game): the game; a decode thread that runs
++// the GX frontend over the game's recorded GX calls; and the main thread,
++// which keeps the window and Aurora and builds and submits each draw. The
++// game's calls are queued here in chunks, the decode thread's output in the
++// render ring below. The game may run at most one frame ahead, as with the
++// GameCube's own GPU (which this game keeps a frame behind anyway).
++// DOL_GX_THREAD=0 keeps one thread.
++namespace gxq {
++
++enum class Op : std::uint8_t {
++    GxBytes,          // a run of FIFO writes, big-endian as written
++    CallDisplayList,  // a copy of the list's bytes
++    SetArray,
++    CopyDest,
++    ConfigureVi,
++    SetNextXfb,
++    FlushXfb,
++    SetXfbBlack,
++    Present,
++    Call,             // run a function on the main thread (quick states)
++};
++
++struct Header {
++    Op op;
++    std::uint8_t pad[3];
++    std::uint32_t size;  // payload bytes after the header
++};
++struct SetArrayArgs {
++    const void* data;
++    u32 attr;
++    u32 guest;
++    u32 size;
++    u8 stride;
++};
++struct CopyDestArgs {
++    const void* data;
++    u32 guest;
++};
++struct ViArgs {
++    u32 tv_mode;
++    u16 fb_width, efb_height, xfb_height, vi_width, vi_height;
++};
++
++// Chunks are handed over when they pass this size (so the main thread starts
++// on a frame early) and at every present; a backlog past the limit holds the
++// game until the main thread catches up.
++constexpr std::size_t kChunkBytes = 64u * 1024u;
++constexpr std::size_t kMaxChunks = 256u;
++constexpr std::size_t kNoRecord = ~std::size_t{0};
++
++thread_local bool t_game_thread = false;
++bool g_active = false;  // the game thread is running
++
++std::mutex g_mutex;
++std::condition_variable g_cv_main;  // chunks ready, game finished
++std::condition_variable g_cv_game;  // present or call done, chunk room
++std::deque<std::vector<std::uint8_t>> g_ready;
++std::vector<std::vector<std::uint8_t>> g_free;
++bool g_game_done = false;
++std::uint64_t g_presents_done = 0;
++std::uint64_t g_calls_done = 0;
++
++// Game thread only.
++std::vector<std::uint8_t> g_open;
++std::size_t g_open_gx = kNoRecord;  // offset of the open GxBytes record
++std::uint64_t g_presents_queued = 0;
++std::uint64_t g_calls_queued = 0;
++
++void (*g_frame_hook)(void) = nullptr;
++std::atomic<std::uint64_t> g_wait_ns{0};  // game thread waiting at presents
++std::uint64_t g_idle_ns = 0;               // main thread waiting for the game
++
++bool on_game_thread() { return t_game_thread; }
++
++void close_gx() {
++    if (g_open_gx == kNoRecord)
++        return;
++    const auto size =
++        static_cast<std::uint32_t>(g_open.size() - g_open_gx - sizeof(Header));
++    std::memcpy(g_open.data() + g_open_gx + offsetof(Header, size), &size,
++                sizeof size);
++    g_open_gx = kNoRecord;
++}
++
++void publish() {
++    close_gx();
++    if (g_open.empty())
++        return;
++    std::vector<std::uint8_t> next;
++    {
++        std::unique_lock<std::mutex> lock(g_mutex);
++        g_cv_game.wait(lock, [] {
++            return g_ready.size() < kMaxChunks || g_should_quit.load();
++        });
++        g_ready.push_back(std::move(g_open));
++        if (!g_free.empty()) {
++            next = std::move(g_free.back());
++            g_free.pop_back();
++        }
++    }
++    g_cv_main.notify_one();
++    g_open = std::move(next);
++    g_open.clear();
++    if (g_open.capacity() < kChunkBytes + 1024u)
++        g_open.reserve(kChunkBytes + 1024u);
++}
++
++void append(Op op, const void* payload, std::uint32_t size) {
++    close_gx();
++    const Header header{op, {}, size};
++    const auto* h = reinterpret_cast<const std::uint8_t*>(&header);
++    g_open.insert(g_open.end(), h, h + sizeof header);
++    if (size != 0u) {
++        const auto* p = static_cast<const std::uint8_t*>(payload);
++        g_open.insert(g_open.end(), p, p + size);
++    }
++    if (g_open.size() >= kChunkBytes)
++        publish();
++}
++
++void append_gx(u64 value, u8 size) {
++    if (g_open_gx == kNoRecord) {
++        g_open_gx = g_open.size();
++        const Header header{Op::GxBytes, {}, 0u};
++        const auto* h = reinterpret_cast<const std::uint8_t*>(&header);
++        g_open.insert(g_open.end(), h, h + sizeof header);
++    }
++    for (unsigned i = 0; i < size; ++i)
++        g_open.push_back(static_cast<std::uint8_t>(value >> ((size - 1u - i) * 8u)));
++    if (g_open.size() >= kChunkBytes)
++        publish();
++}
++
++// Run fn on the main thread once everything queued before it has been
++// replayed, and wait for it: the main thread is idle until the game queues
++// more, so the caller may also read GX state afterwards.
++void call_sync(const std::function<void()>& fn) {
++    const std::function<void()>* p = &fn;
++    append(Op::Call, &p, sizeof p);
++    const std::uint64_t id = ++g_calls_queued;
++    publish();
++    std::unique_lock<std::mutex> lock(g_mutex);
++    g_cv_game.wait(lock, [id] { return g_calls_done >= id; });
++}
++
++void present() {
++    const std::uint64_t n = ++g_presents_queued;
++    append(Op::Present, &n, sizeof n);
++    publish();
++    const std::uint64_t t0 = SDL_GetTicksNS();
++    {
++        std::unique_lock<std::mutex> lock(g_mutex);
++        g_cv_game.wait(lock, [n] {
++            return g_presents_done + 1u >= n || g_should_quit.load();
++        });
++    }
++    g_wait_ns += SDL_GetTicksNS() - t0;
++}
++
++template <typename T>
++T read_args(const std::uint8_t* p) {
++    T value;
++    std::memcpy(&value, p, sizeof value);
++    return value;
++}
++
++// --- Decode -> main: the render ring --------------------------------------------
++// The decode thread turns the queued GX stream into draws (each with the
++// register state it needs) and the Aurora calls between them, in order, into
++// reusable slots; the main thread builds each draw's plan, submits it and
++// makes the calls. A full ring holds the decode thread back.
++enum class Item : std::uint8_t {
++    Draw,
++    EfbCopy,
++    SetArray,
++    CopyDest,
++    ConfigureVi,
++    SetNextXfb,
++    FlushXfb,
++    SetXfbBlack,
++    Present,
++    Call,
++    Done,
++};
++
++struct RenderItem {
++    Item kind = Item::Done;
++    gxruntime::gxcore::GxCoreState state;
++    gxruntime::aurora_recomp::ConsumedDraw draw;
++    gxruntime::gxcore::EfbCopyCommand copy{};
++    SetArrayArgs set_array{};
++    CopyDestArgs copy_dest{};
++    ViArgs vi{};
++    u32 value = 0;
++    bool flag = false;
++    std::uint64_t n = 0;
++    const std::function<void()>* fn = nullptr;
++    // Draws are planned by whichever thread claims the slot first (a plan
++    // worker, or the main thread when it gets there first); 2 = done.
++    gxruntime::gxcore::DrawPlan plan;
++    std::atomic<int> plan_state{0};
++};
++
++// Each slot is ~14 KB; room for the plan workers to run ahead of the main
++// thread without leaving the cache.
++constexpr std::uint64_t kRingSlots = 256u;
++std::unique_ptr<RenderItem[]> g_ring;
++std::atomic<std::uint64_t> g_ring_head{0};  // next slot the main thread reads
++std::atomic<std::uint64_t> g_ring_tail{0};  // next slot the decode thread fills
++std::atomic<bool> g_main_waiting{false};
++std::atomic<bool> g_decode_waiting{false};
++std::mutex g_ring_mutex;
++std::condition_variable g_cv_ring_main;
++std::condition_variable g_cv_ring_decode;
++
++// The main thread's plan stage, in stream order.
++gxruntime::gxcore::GapCounters g_plan_counters{};
++gxruntime::gxcore::CachedVertexAttrs g_plan_attrs{};
++gxruntime::gxcore::CachedZSlope g_plan_zslope{};
++std::uint64_t g_calls_forwarded = 0;  // decode thread
++std::atomic<std::uint64_t> g_decode_full_ns{0};  // decode waiting on a full ring
++
++// Plan workers: build draw plans ahead of the main thread, in parallel, each
++// leaving what the cross-draw caches need for the main thread to finish in
++// stream order. DOL_GX_PLAN_WORKERS sets how many (0: the main thread plans).
++constexpr int kMaxPlanWorkers = 8;
++std::atomic<std::uint64_t> g_plan_next{0};  // next slot nobody has claimed
++std::atomic<bool> g_workers_stop{false};
++std::atomic<int> g_workers_sleeping{0};
++std::mutex g_work_mutex;
++std::condition_variable g_cv_work;
++int g_worker_count = 0;
++gxruntime::gxcore::GapCounters g_worker_counters[kMaxPlanWorkers];
++std::atomic<std::uint64_t> g_worker_plan_ns{0};
++std::uint64_t g_plan_wait_ns = 0;  // main waiting for a worker's plan
++std::uint64_t g_present_ns = 0;    // main in present (Aurora frame end/begin)
++
++// Spin briefly for `ready` before a thread falls back to sleeping: handing
++// over thousands of draws a frame, a sleep and wake-up per draw costs more
++// than the work.
++template <typename Ready>
++bool spin_for(Ready ready, std::uint64_t ns) {
++    const std::uint64_t until = SDL_GetTicksNS() + ns;
++    for (unsigned i = 0;; ++i) {
++        if (ready())
++            return true;
++        if ((i & 63u) == 63u) {
++            if (SDL_GetTicksNS() >= until)
++                return false;
++            std::this_thread::yield();
++        }
++    }
++}
++
++// Decode thread: the next free slot (waits while the ring is full).
++RenderItem& ring_begin() {
++    const std::uint64_t tail = g_ring_tail.load(std::memory_order_relaxed);
++    if (tail - g_ring_head.load() >= kRingSlots) {
++        const std::uint64_t t0 = SDL_GetTicksNS();
++        if (spin_for([tail] { return tail - g_ring_head.load() < kRingSlots; }, 300'000u)) {
++            g_decode_full_ns += SDL_GetTicksNS() - t0;
++            return g_ring[tail % kRingSlots];
++        }
++        std::unique_lock<std::mutex> lock(g_ring_mutex);
++        g_decode_waiting.store(true);
++        while (tail - g_ring_head.load() >= kRingSlots)
++            g_cv_ring_decode.wait_for(lock, std::chrono::milliseconds(2));
++        g_decode_waiting.store(false);
++        g_decode_full_ns += SDL_GetTicksNS() - t0;
++    }
++    return g_ring[tail % kRingSlots];
++}
++
++void ring_commit() {
++    g_ring_tail.store(g_ring_tail.load(std::memory_order_relaxed) + 1u);
++    if (g_main_waiting.load()) {
++        std::lock_guard<std::mutex> lock(g_ring_mutex);
++        g_cv_ring_main.notify_one();
++    }
++    // An awake worker picks the slot up (and wakes another for a backlog);
++    // only when all sleep does one need waking.
++    if (g_worker_count > 0 && g_workers_sleeping.load() == g_worker_count) {
++        std::lock_guard<std::mutex> lock(g_work_mutex);
++        g_cv_work.notify_one();
++    }
++}
++
++// Claim slot `seq` for planning; false when another thread already has it.
++bool claim(std::uint64_t seq) {
++    std::uint64_t expected = seq;
++    return g_plan_next.load() == seq &&
++           g_plan_next.compare_exchange_strong(expected, seq + 1u);
++}
++
++void plan_draw(RenderItem& item, gxruntime::gxcore::GapCounters& counters) {
++    item.state.build_draw_plan_into(item.plan, item.draw, counters, nullptr,
++                                    nullptr, /*record_cross=*/true);
++}
++
++// Plan worker: claim the next unplanned slot and plan it if it is a draw.
++int SDLCALL plan_worker_main(void* user) {
++    auto& counters = *static_cast<gxruntime::gxcore::GapCounters*>(user);
++    while (!g_workers_stop.load()) {
++        const std::uint64_t seq = g_plan_next.load();
++        if (seq < g_ring_tail.load()) {
++            if (!claim(seq))
++                continue;
++            if (g_ring_tail.load() - seq > 1u && g_workers_sleeping.load() > 0) {
++                std::lock_guard<std::mutex> lock(g_work_mutex);
++                g_cv_work.notify_one();
++            }
++            RenderItem& item = g_ring[seq % kRingSlots];
++            if (item.kind == Item::Draw && !g_should_quit.load()) {
++                const std::uint64_t t0 = g_gx_time_log ? SDL_GetTicksNS() : 0u;
++                plan_draw(item, counters);
++                if (g_gx_time_log)
++                    g_worker_plan_ns += SDL_GetTicksNS() - t0;
++            }
++            item.plan_state.store(2, std::memory_order_release);
++            continue;
++        }
++        if (spin_for([] { return g_plan_next.load() < g_ring_tail.load() ||
++                                g_workers_stop.load(); },
++                     200'000u))
++            continue;
++        std::unique_lock<std::mutex> lock(g_work_mutex);
++        ++g_workers_sleeping;
++        if (g_plan_next.load() >= g_ring_tail.load() && !g_workers_stop.load())
++            g_cv_work.wait_for(lock, std::chrono::milliseconds(2));
++        --g_workers_sleeping;
++    }
++    return 0;
++}
++
++// Decode thread: the slot the sink is building the current draw in, until
++// the draw is complete and committed (defer_draw).
++RenderItem* g_reserved = nullptr;
++
++RenderItem& ring_item(Item kind) {
++    // Anything queued after a draw follows it: complete and commit the draw
++    // first (its spans are all in by the time the game makes another call).
++    if (g_reserved != nullptr)
++        g_core_sink.flush_frame();
++    RenderItem& item = ring_begin();
++    item.kind = kind;
++    item.plan_state.store(0, std::memory_order_relaxed);
++    return item;
++}
++
++// Main thread: the next filled slot, pumping window events while it waits.
++RenderItem& ring_next() {
++    const std::uint64_t head = g_ring_head.load(std::memory_order_relaxed);
++    if (g_ring_tail.load() == head) {
++        const std::uint64_t t0 = SDL_GetTicksNS();
++        if (spin_for([head] { return g_ring_tail.load() != head; }, 300'000u)) {
++            g_idle_ns += SDL_GetTicksNS() - t0;
++            return g_ring[head % kRingSlots];
++        }
++        std::unique_lock<std::mutex> lock(g_ring_mutex);
++        g_main_waiting.store(true);
++        while (g_ring_tail.load() == head) {
++            g_cv_ring_main.wait_for(lock, std::chrono::milliseconds(4));
++            if (g_ring_tail.load() == head) {
++                // Loading or waiting on the disc: keep the window alive.
++                lock.unlock();
++                dol_aurora_pump_events_if_idle();
++                lock.lock();
++            }
++        }
++        g_main_waiting.store(false);
++        g_idle_ns += SDL_GetTicksNS() - t0;
++    }
++    return g_ring[head % kRingSlots];
++}
++
++void ring_release() {
++    g_ring_head.store(g_ring_head.load(std::memory_order_relaxed) + 1u);
++    if (g_decode_waiting.load()) {
++        std::lock_guard<std::mutex> lock(g_ring_mutex);
++        g_cv_ring_decode.notify_one();
++    }
++}
++
++// GxCoreSink storage and observers on the decode thread: each draw and its
++// register state are built straight into a ring slot, committed once the
++// draw is complete; EFB copies follow in order.
++gxruntime::aurora_recomp::ConsumedDraw* reserve_draw(void*) {
++    RenderItem& item = ring_begin();
++    item.kind = Item::Draw;
++    item.plan_state.store(0, std::memory_order_relaxed);
++    g_reserved = &item;
++    return &item.draw;
++}
++
++gxruntime::gxcore::GxCoreState* reserved_state(void*) {
++    return &g_reserved->state;
++}
++
++void defer_draw(const gxruntime::gxcore::GxCoreState&,
++                const gxruntime::aurora_recomp::ConsumedDraw&, void*) {
++    g_reserved = nullptr;
++    ring_commit();
++}
++
++void defer_copy(const gxruntime::gxcore::EfbCopyCommand& cmd, void*) {
++    ring_item(Item::EfbCopy).copy = cmd;
++    ring_commit();
++}
++
++// Decode thread: one chunk of the game's GX calls.
++void replay(const std::vector<std::uint8_t>& chunk) {
++    std::size_t at = 0;
++    while (at + sizeof(Header) <= chunk.size()) {
++        const Header h = read_args<Header>(chunk.data() + at);
++        const std::uint8_t* p = chunk.data() + at + sizeof(Header);
++        at += sizeof(Header) + h.size;
++        // Once quitting, only what the game thread waits on still runs.
++        const bool live = !g_should_quit.load();
++        switch (h.op) {
++        case Op::GxBytes:
++            if (live) {
++                g_fifo_bytes += h.size;
++                if (g_shadow_frontend_enabled && !g_shadow_frontend_failed) {
++                    const std::uint64_t t0 = g_gx_time_log ? SDL_GetTicksNS() : 0u;
++                    shadow_frontend_core_write(std::span<const std::uint8_t>(p, h.size));
++                    if (g_gx_time_log)
++                        g_gx_time_ns += SDL_GetTicksNS() - t0;
++                }
++            }
++            break;
++        case Op::CallDisplayList:
++            if (live) {
++                const std::uint64_t t0 = g_gx_time_log ? SDL_GetTicksNS() : 0u;
++                aurora_backend_call_display_list(p, h.size);
++                if (g_gx_time_log)
++                    g_gx_time_ns += SDL_GetTicksNS() - t0;
++            }
++            break;
++        case Op::SetArray: {
++            const auto a = read_args<SetArrayArgs>(p);
++            if (live && g_initialized && a.data != nullptr) {
++                // The frontend's copy here; Aurora's own GX state on main.
++                if (a.guest != 0u)
++                    shadow_frontend_set_array(a.attr, a.guest, a.stride);
++                ring_item(Item::SetArray).set_array = a;
++                ring_commit();
++            }
++            break;
++        }
++        case Op::CopyDest:
++            if (live) {
++                ring_item(Item::CopyDest).copy_dest = read_args<CopyDestArgs>(p);
++                ring_commit();
++            }
++            break;
++        case Op::ConfigureVi:
++            ring_item(Item::ConfigureVi).vi = read_args<ViArgs>(p);
++            ring_commit();
++            break;
++        case Op::SetNextXfb:
++            ring_item(Item::SetNextXfb).value = read_args<u32>(p);
++            ring_commit();
++            break;
++        case Op::FlushXfb:
++            ring_item(Item::FlushXfb);
++            ring_commit();
++            break;
++        case Op::SetXfbBlack:
++            ring_item(Item::SetXfbBlack).flag = read_args<bool>(p);
++            ring_commit();
++            break;
++        case Op::Present:
++            // The frame's last draw is planned at the frame boundary.
++            if (live && !g_shadow_frontend_failed)
++                g_core_sink.flush_frame();
++            ring_item(Item::Present).n = read_args<std::uint64_t>(p);
++            ring_commit();
++            break;
++        case Op::Call: {
++            // Runs on the main thread while this thread waits, so it may
++            // touch the frontend as well as Aurora.
++            ring_item(Item::Call).fn = read_args<const std::function<void()>*>(p);
++            ring_commit();
++            const std::uint64_t id = ++g_calls_forwarded;
++            std::unique_lock<std::mutex> lock(g_mutex);
++            g_cv_game.wait(lock, [id] { return g_calls_done >= id; });
++            break;
++        }
++        }
++    }
++}
++
++// Decode thread: replay the game's chunks until it has finished.
++int SDLCALL decode_thread_main(void*) {
++    for (;;) {
++        std::vector<std::uint8_t> chunk;
++        {
++            std::unique_lock<std::mutex> lock(g_mutex);
++            g_cv_main.wait(lock, [] { return !g_ready.empty() || g_game_done; });
++            if (g_ready.empty())
++                break;
++            chunk = std::move(g_ready.front());
++            g_ready.pop_front();
++        }
++        g_cv_game.notify_all();
++        replay(chunk);
++        chunk.clear();
++        std::lock_guard<std::mutex> lock(g_mutex);
++        g_free.push_back(std::move(chunk));
++    }
++    ring_item(Item::Done);
++    ring_commit();
++    return 0;
++}
++
++// Main thread: plan, submit and present until the decode thread is done.
++void run_main() {
++    for (;;) {
++        RenderItem& item = ring_next();
++        const bool live = !g_should_quit.load();
++        // Plan the draw here unless a worker got to it first; then wait for
++        // the worker before the slot is reused.
++        const std::uint64_t seq = g_ring_head.load(std::memory_order_relaxed);
++        const bool mine = claim(seq);
++        if (mine) {
++            if (item.kind == Item::Draw && live) {
++                const std::uint64_t t0 = g_gx_time_log ? SDL_GetTicksNS() : 0u;
++                plan_draw(item, g_plan_counters);
++                if (g_gx_time_log)
++                    gxruntime::gxcore::g_plan_time_ns += SDL_GetTicksNS() - t0;
++            }
++        } else if (item.plan_state.load(std::memory_order_acquire) != 2) {
++            const std::uint64_t t0 = SDL_GetTicksNS();
++            while (item.plan_state.load(std::memory_order_acquire) != 2)
++                std::this_thread::yield();
++            g_plan_wait_ns += SDL_GetTicksNS() - t0;
++        }
++        switch (item.kind) {
++        case Item::Draw:
++            if (live) {
++                gxruntime::gxcore::finish_cross_draw(item.plan, g_plan_attrs,
++                                                     g_plan_zslope, g_plan_counters);
++                core_plan_observer(item.plan, nullptr);
++            }
++            break;
++        case Item::EfbCopy:
++            if (live)
++                aurora::gfx::gxcore::copy_efb_to_texture(item.copy);
++            break;
++        case Item::SetArray:
++            if (live)
++                GXSetArray(static_cast<GXAttr>(item.set_array.attr), item.set_array.data,
++                           item.set_array.size, item.set_array.stride, false);
++            break;
++        case Item::CopyDest:
++            if (live)
++                aurora_backend_set_copy_destination_guest(item.copy_dest.guest,
++                                                          item.copy_dest.data);
++            break;
++        case Item::ConfigureVi:
++            aurora_backend_configure_vi(item.vi.tv_mode, item.vi.fb_width,
++                                        item.vi.efb_height, item.vi.xfb_height,
++                                        item.vi.vi_width, item.vi.vi_height);
++            break;
++        case Item::SetNextXfb:
++            aurora_backend_set_next_xfb(item.value);
++            break;
++        case Item::FlushXfb:
++            aurora_backend_flush_xfb();
++            break;
++        case Item::SetXfbBlack:
++            aurora_backend_set_xfb_black(item.flag);
++            break;
++        case Item::Present:
++            if (live) {
++                const std::uint64_t t0 = SDL_GetTicksNS();
++                aurora_backend_present();
++                g_present_ns = SDL_GetTicksNS() - t0;
++                if (g_frame_hook != nullptr)
++                    g_frame_hook();
++            }
++            {
++                std::lock_guard<std::mutex> lock(g_mutex);
++                g_presents_done = item.n;
++            }
++            g_cv_game.notify_all();
++            break;
++        case Item::Call:
++            (*item.fn)();
++            {
++                std::lock_guard<std::mutex> lock(g_mutex);
++                ++g_calls_done;
++            }
++            g_cv_game.notify_all();
++            break;
++        case Item::Done:
++            ring_release();
++            return;
++        }
++        ring_release();
++    }
++}
++
++struct GameRun {
++    int (*fn)(void*);
++    void* arg;
++    int result;
++};
++
++int SDLCALL game_thread_main(void* user) {
++    auto* run = static_cast<GameRun*>(user);
++    t_game_thread = true;
++    run->result = run->fn(run->arg);
++    publish();
++    {
++        std::lock_guard<std::mutex> lock(g_mutex);
++        g_game_done = true;
++    }
++    g_cv_main.notify_all();
++    t_game_thread = false;
++    return 0;
++}
++
++bool wanted() {
++#if GXRUNTIME_HAS_AURORA_RECOMP
++    const char* env = std::getenv("DOL_GX_THREAD");
++    if (env != nullptr && std::strcmp(env, "0") == 0)
++        return false;
++    // Trace recording interleaves FIFO records with the memory the decode
++    // resolves, which needs the decode inside the write.
++    return g_initialized && g_gx_core_enabled && g_shadow_frontend_enabled &&
++           !g_trace_armed;
++#else
++    return false;
++#endif
++}
++
++// Platform ops: the game thread queues; anything else runs as before.
++bool should_quit_op() { return g_should_quit.load(); }
++
++void present_op() {
++    if (t_game_thread)
++        present();
++    else
++        aurora_backend_present();
++}
++
++void gx_write_op(u64 value, u8 size) {
++    if (!t_game_thread) {
++        aurora_backend_gx_write(value, size);
++        return;
++    }
++    if (size == 1u || size == 2u || size == 4u || size == 8u)
++        append_gx(value, size);
++}
++
++void call_display_list_op(const void* data, u32 size) {
++    if (t_game_thread)
++        append(Op::CallDisplayList, data, size);
++    else
++        aurora_backend_call_display_list(data, size);
++}
++
++void set_array_guest_op(u32 attr, u32 guest_address, const void* data, u32 size,
++                        u8 stride) {
++    if (!t_game_thread) {
++        aurora_backend_set_array_guest(attr, guest_address, data, size, stride);
++        return;
++    }
++    const SetArrayArgs a{data, attr, guest_address, size, stride};
++    append(Op::SetArray, &a, sizeof a);
++}
++
++void set_array_op(u32 attr, const void* data, u32 size, u8 stride) {
++    set_array_guest_op(attr, 0u, data, size, stride);
++}
++
++void set_copy_destination_guest_op(u32 guest_address, const void* data) {
++    if (!t_game_thread) {
++        aurora_backend_set_copy_destination_guest(guest_address, data);
++        return;
++    }
++    const CopyDestArgs a{data, guest_address};
++    append(Op::CopyDest, &a, sizeof a);
++}
++
++void set_copy_destination_op(const void* data) {
++    set_copy_destination_guest_op(0u, data);
++}
++
++void configure_vi_op(u32 tv_mode, u16 fb_width, u16 efb_height, u16 xfb_height,
++                     u16 vi_width, u16 vi_height) {
++    if (!t_game_thread) {
++        aurora_backend_configure_vi(tv_mode, fb_width, efb_height, xfb_height,
++                                    vi_width, vi_height);
++        return;
++    }
++    const ViArgs a{tv_mode, fb_width, efb_height, xfb_height, vi_width, vi_height};
++    append(Op::ConfigureVi, &a, sizeof a);
++}
++
++void set_next_xfb_op(u32 physical_address) {
++    if (t_game_thread)
++        append(Op::SetNextXfb, &physical_address, sizeof physical_address);
++    else
++        aurora_backend_set_next_xfb(physical_address);
++}
++
++void flush_xfb_op() {
++    if (t_game_thread)
++        append(Op::FlushXfb, nullptr, 0u);
++    else
++        aurora_backend_flush_xfb();
++}
++
++void set_xfb_black_op(bool black) {
++    if (t_game_thread)
++        append(Op::SetXfbBlack, &black, sizeof black);
++    else
++        aurora_backend_set_xfb_black(black);
++}
++
++} // namespace gxq
++#endif
++
+ extern "C" {
+ 
+ void aurora_backend_set_array_guest(u32 attr, u32 guest_address,
+@@ -937,7 +1838,7 @@ bool dol_aurora_initialize(int argc, char** argv,
      g_trace_present_scope_frame = 0ull;
      g_trace_frame_begun = false;
      g_trace_frames_recorded = 0ull;
@@ -250,13 +1103,31 @@ index d94f811..14bbe77 100644
      const char* trace_out = std::getenv("DOL_AURORA_RECOMP_TRACE_OUT");
      if (trace_out != nullptr && trace_out[0] != '\0') {
          g_trace_path = trace_out;
-@@ -1114,6 +1241,112 @@ void dol_aurora_flush_gap_report(void) {
+@@ -1069,7 +1970,11 @@ static void flush_gxcore_gap_counters() {
+ #if GXRUNTIME_HAS_AURORA_RECOMP
+     if (!g_gx_core_enabled)
+         return;
+-    const gxruntime::gxcore::GapCounters& c = g_core_sink.counters();
++    // The sink's counts, plus the planning done by the GX threads.
++    gxruntime::gxcore::GapCounters c = g_core_sink.counters();
++    c += gxq::g_plan_counters;
++    for (const auto& worker : gxq::g_worker_counters)
++        c += worker;
+     struct {
+         const char* name;
+         unsigned long long value;
+@@ -1114,10 +2019,132 @@ void dol_aurora_flush_gap_report(void) {
      flush_gxcore_gap_counters();
  }
  
 +void dol_aurora_pump_events_if_idle(void) {
 +    if (!g_initialized || SDL_GetTicks() - g_last_present_ms < 100)
 +        return;
++#if GXRUNTIME_HAS_AURORA_RECOMP
++    if (gxq::on_game_thread())
++        return;  // the main thread pumps while it waits for the game
++#endif
++    std::lock_guard<std::mutex> input_lock(g_input_mutex);
 +    SDL_PumpEvents();
 +}
 +
@@ -363,7 +1234,47 @@ index d94f811..14bbe77 100644
  void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user) {
      g_efb_frame_fill = fn;
      g_efb_frame_fill_user = user;
-@@ -1212,6 +1445,60 @@ void aurora_backend_present(void) {
+-    if (fn != nullptr) {
++}
++
++// Reading the frame back costs a whole-frame copy from the GPU every frame
++// (several ms at 4K), so it runs only while the guest peeks: from its first
++// peek until two seconds after its last. That first peek reads the last
++// frame filled (peeks always lag a frame or more).
++static std::atomic<int> g_efb_peek_frames{0};
++
++void dol_aurora_efb_peeked(void) {
++    if (g_efb_frame_fill == nullptr)
++        return;
++    if (g_efb_peek_frames.exchange(120) == 0) {
+         aurora::gfx::efb_readback::set_continuous(true);
+         aurora_request_framebuffer_readback();
+     }
+@@ -1169,7 +2196,8 @@ void aurora_backend_present(void) {
+     // gxcore accumulates the frame's draws as their spans complete; the final
+     // pending draw is only planned at the frame boundary. Submit it into the
+     // still-open Aurora frame before end_frame flushes the command list.
+-    if (g_gx_core_enabled && !g_shadow_frontend_failed)
++    // With the GX threads the decode thread did this at the frame's Present.
++    if (g_gx_core_enabled && !g_shadow_frontend_failed && !gxq::g_active)
+         g_core_sink.flush_frame();
+     // TEMP DIAG: per-frame gxcore gap-counter deltas so a live
+     // goal celebration reveals which skip reason dominates (missing_vcd /
+@@ -1201,8 +2229,11 @@ void aurora_backend_present(void) {
+         g_frame_open = false;
+     }
+     // Host EFB fill: push latest present-source snapshot into software backing
+-    // (async map may land next present; continuous keeps the pipeline fed).
+-    if (g_efb_frame_fill != nullptr) {
++    // (async map may land next present; continuous keeps the pipeline fed),
++    // while the guest is peeking (dol_aurora_efb_peeked).
++    if (g_efb_frame_fill != nullptr && g_efb_peek_frames.load() > 0) {
++        if (g_efb_peek_frames.fetch_sub(1) == 1)
++            aurora::gfx::efb_readback::set_continuous(false);
+         const std::uint8_t* rgba = nullptr;
+         std::uint32_t w = 0;
+         std::uint32_t h = 0;
+@@ -1212,6 +2243,72 @@ void aurora_backend_present(void) {
          }
      }
      ++g_present_count;
@@ -415,16 +1326,28 @@ index d94f811..14bbe77 100644
 +    if (g_gx_time_log) {
 +        static std::uint64_t last_present_ns;
 +        const std::uint64_t now = SDL_GetTicksNS();
-+        std::fprintf(stderr, "[gx-time] frame=%llu gx=%.2fms frame=%.2fms\n",
++        // wait: the game thread held at the present for the main thread;
++        // idle: the main thread waiting for the game's next commands.
++        // plan/submit: the parts of gx in build_draw_plan / submit_draw_plan.
++        std::fprintf(stderr, "[gx-time] frame=%llu gx=%.2fms frame=%.2fms wait=%.2fms idle=%.2fms plan=%.2fms wplan=%.2fms submit=%.2fms full=%.2fms pwait=%.2fms present=%.2fms\n",
 +                     g_present_count, g_gx_time_ns / 1e6,
-+                     last_present_ns ? (now - last_present_ns) / 1e6 : 0.0);
++                     last_present_ns ? (now - last_present_ns) / 1e6 : 0.0,
++                     gxq::g_wait_ns.exchange(0) / 1e6, gxq::g_idle_ns / 1e6,
++                     gxruntime::gxcore::g_plan_time_ns / 1e6,
++                     gxq::g_worker_plan_ns.exchange(0) / 1e6, g_submit_time_ns / 1e6,
++                     gxq::g_decode_full_ns.exchange(0) / 1e6, gxq::g_plan_wait_ns / 1e6,
++                     gxq::g_present_ns / 1e6);
++        gxq::g_plan_wait_ns = 0;
++        gxq::g_idle_ns = 0;
++        gxruntime::gxcore::g_plan_time_ns = 0;
++        g_submit_time_ns = 0;
 +        last_present_ns = now;
 +        g_gx_time_ns = 0;
 +    }
      if (g_frame_pacing_log &&
          (g_present_count <= 10 || (g_present_count % 60) == 0)) {
          const AuroraStats* stats = aurora_get_stats();
-@@ -1432,6 +1719,7 @@ void aurora_backend_present(void) {
+@@ -1432,6 +2529,7 @@ void aurora_backend_present(void) {
      const unsigned long long present_fifo = g_fifo_bytes;
      g_fifo_bytes = 0;
      poll_events();
@@ -432,7 +1355,7 @@ index d94f811..14bbe77 100644
      if (!g_should_quit) {
          g_frame_open = aurora_begin_frame();
  #if GXRUNTIME_HAS_AURORA_RECOMP
-@@ -1482,7 +1770,13 @@ void aurora_backend_gx_write(u64 value, u8 size) {
+@@ -1482,7 +2580,13 @@ void aurora_backend_gx_write(u64 value, u8 size) {
          return;
      g_fifo_bytes += size;
  #if GXRUNTIME_HAS_AURORA_RECOMP
@@ -447,7 +1370,23 @@ index d94f811..14bbe77 100644
      // Record AFTER the shadow write so MEM_UPDATEs its resolves emitted
      // precede this GX_WRITE in the trace (replay reads them first), and
      // BEFORE the live-Aurora forwarding below so the pristine value is
-@@ -1796,6 +2090,9 @@ u32 aurora_backend_pad_read(DolPadState state[4]) {
+@@ -1737,6 +2841,7 @@ void aurora_backend_set_xfb_black(bool black) {
+ }
+ 
+ bool aurora_backend_pad_init(void) {
++    std::lock_guard<std::mutex> input_lock(g_input_mutex);
+     if (PADInit() == FALSE)
+         return false;
+ 
+@@ -1780,6 +2885,7 @@ bool aurora_backend_pad_init(void) {
+ }
+ 
+ u32 aurora_backend_pad_read(DolPadState state[4]) {
++    std::lock_guard<std::mutex> input_lock(g_input_mutex);
+     PADStatus status[4]{};
+     const u32 motor_mask = PADRead(status);
+     for (u32 i = 0; i < 4; i++) {
+@@ -1796,22 +2902,41 @@ u32 aurora_backend_pad_read(DolPadState state[4]) {
              .error = status[i].err,
          };
      }
@@ -457,13 +1396,20 @@ index d94f811..14bbe77 100644
      return motor_mask;
  }
  
-@@ -1807,7 +2104,18 @@ bool aurora_backend_pad_recalibrate(u32 mask) {
+ bool aurora_backend_pad_reset(u32 mask) {
++    std::lock_guard<std::mutex> input_lock(g_input_mutex);
+     return PADReset(mask) != FALSE;
+ }
+ 
+ bool aurora_backend_pad_recalibrate(u32 mask) {
++    std::lock_guard<std::mutex> input_lock(g_input_mutex);
      return PADRecalibrate(mask) != FALSE;
  }
  
 +static bool g_vibration = true;
 +
 +void dol_aurora_set_vibration(bool on) {
++    std::lock_guard<std::mutex> input_lock(g_input_mutex);
 +    g_vibration = on;
 +    if (!on)
 +        for (u32 channel = 0; channel < 4; channel++)
@@ -473,10 +1419,16 @@ index d94f811..14bbe77 100644
  void aurora_backend_pad_control_motor(u32 channel, u32 command) {
 +    if (!g_vibration && command != PAD_MOTOR_STOP && command != PAD_MOTOR_STOP_HARD)
 +        return;
++    std::lock_guard<std::mutex> input_lock(g_input_mutex);
      PADControlMotor(channel, command);
  }
  
-@@ -1848,6 +2156,7 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+ void aurora_backend_pad_set_spec(u32 spec) {
++    std::lock_guard<std::mutex> input_lock(g_input_mutex);
+     PADSetSpec(spec);
+ }
+ 
+@@ -1848,6 +2973,7 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
  
      int queued = SDL_GetAudioStreamQueued(g_audio_stream);
      unsigned waited_ms = 0;
@@ -484,7 +1436,7 @@ index d94f811..14bbe77 100644
      while (queued > max_queued_bytes && waited_ms < 20u) {
          g_audio_throttle_count++;
          if (g_audio_queue_log &&
-@@ -1860,8 +2169,17 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1860,8 +2986,17 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
                           max_queued_bytes);
          SDL_Delay(1);
          waited_ms++;
@@ -502,7 +1454,7 @@ index d94f811..14bbe77 100644
  
      const bool low_queue =
          queued >= 0 && queued < bytes_per_second / 100;
-@@ -1876,6 +2194,20 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1876,6 +3011,20 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
                       g_audio_push_count, queued, queued + bytes,
                       g_audio_playing ? 1u : 0u, g_audio_throttle_count);
      }
@@ -523,7 +1475,7 @@ index d94f811..14bbe77 100644
      if (!SDL_PutAudioStreamData(g_audio_stream, samples, bytes))
          std::fprintf(stderr, "[audio] failed to queue samples: %s\n", SDL_GetError());
      else if (!g_audio_playing && queued + bytes >= prebuffer_bytes) {
-@@ -1886,6 +2218,169 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1886,10 +3035,338 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
      }
  }
  
@@ -537,6 +1489,11 @@ index d94f811..14bbe77 100644
 +
 +bool dol_aurora_gx_idle(void) {
 +#if GXRUNTIME_HAS_AURORA_RECOMP
++    if (gxq::on_game_thread()) {
++        bool idle = false;
++        gxq::call_sync([&] { idle = dol_aurora_gx_idle(); });
++        return idle;
++    }
 +    // A frontend that has failed ignores the FIFO, so its leftover bytes would
 +    // never drain; it no longer cares where the guest is.
 +    return !g_shadow_frontend_enabled || g_shadow_frontend_failed ||
@@ -567,6 +1524,12 @@ index d94f811..14bbe77 100644
 +}
 +
 +void dol_aurora_state_save(void* out) {
++#if GXRUNTIME_HAS_AURORA_RECOMP
++    if (gxq::on_game_thread()) {
++        gxq::call_sync([&] { dol_aurora_state_save(out); });
++        return;
++    }
++#endif
 +    AuroraQuickState s{};
 +    if (aurora::vi::g_renderMode) {
 +        const GXRenderModeObj& mode = *aurora::vi::g_renderMode;
@@ -587,6 +1550,12 @@ index d94f811..14bbe77 100644
 +}
 +
 +void dol_aurora_state_load(const void* in) {
++#if GXRUNTIME_HAS_AURORA_RECOMP
++    if (gxq::on_game_thread()) {
++        gxq::call_sync([&] { dol_aurora_state_load(in); });
++        return;
++    }
++#endif
 +    if (!g_initialized || in == nullptr)
 +        return;
 +    AuroraQuickState s;
@@ -614,6 +1583,11 @@ index d94f811..14bbe77 100644
 +
 +size_t dol_aurora_gx_state_save(void* out, size_t capacity) {
 +#if GXRUNTIME_HAS_AURORA_RECOMP
++    if (gxq::on_game_thread()) {
++        size_t size = 0;
++        gxq::call_sync([&] { size = dol_aurora_gx_state_save(out, capacity); });
++        return size;
++    }
 +    if (!g_initialized || !g_shadow_frontend_enabled || g_shadow_frontend_failed)
 +        return 0;
 +    const std::vector<std::uint8_t> preamble = g_shadow_frontend.state_preamble();
@@ -629,6 +1603,11 @@ index d94f811..14bbe77 100644
 +
 +bool dol_aurora_gx_state_load(const void* in, size_t size) {
 +#if GXRUNTIME_HAS_AURORA_RECOMP
++    if (gxq::on_game_thread()) {
++        bool ok = false;
++        gxq::call_sync([&] { ok = dol_aurora_gx_state_load(in, size); });
++        return ok;
++    }
 +    // Textures in the replay resolve through the guest resolver; without it
 +    // the replay would fail and leave the decoder off.
 +    if (!g_initialized || !g_shadow_frontend_enabled || in == nullptr ||
@@ -641,6 +1620,8 @@ index d94f811..14bbe77 100644
 +                                              g_guest_address_resolver_user);
 +    if (g_gx_core_enabled)
 +        g_core_sink.reset();
++    gxq::g_plan_attrs = {};
++    gxq::g_plan_zslope = {};
 +    const std::span<const std::uint8_t> bytes(
 +        static_cast<const std::uint8_t*>(in), size);
 +    const bool ok =
@@ -673,6 +1654,12 @@ index d94f811..14bbe77 100644
 +    if (!g_initialized)
 +        return;
 +#if GXRUNTIME_HAS_AURORA_RECOMP
++    if (gxq::on_game_thread()) {
++        gxq::call_sync([] { dol_aurora_state_loaded(); });
++        return;
++    }
++#endif
++#if GXRUNTIME_HAS_AURORA_RECOMP
 +    // EFB-copy and RAM-XFB textures are keyed by guest address alone; after a
 +    // load those addresses hold other things.
 +    if (g_gx_core_enabled)
@@ -686,13 +1673,155 @@ index d94f811..14bbe77 100644
 +    // controller, so the game ignores every key. Idempotent once initialised.
 +    (void)aurora_backend_pad_init();
 +    // Rumble started in the abandoned timeline would never be stopped.
++    std::lock_guard<std::mutex> input_lock(g_input_mutex);
 +    for (u32 channel = 0; channel < PAD_CHANMAX; ++channel)
 +        PADControlMotor(channel, PAD_MOTOR_STOP);
++}
++
++int dol_aurora_run_game(int (*game)(void*), void* arg) {
++#if GXRUNTIME_HAS_AURORA_RECOMP
++    if (!gxq::wanted())
++        return game(arg);
++    gxq::GameRun run{game, arg, 0};
++    // The recompiled code nests host calls as deep as the guest's call
++    // chains; a secondary thread's default stack (512 KB on macOS) is far
++    // too small.
++    const SDL_PropertiesID props = SDL_CreateProperties();
++    SDL_SetPointerProperty(props, SDL_PROP_THREAD_CREATE_ENTRY_FUNCTION_POINTER,
++                           reinterpret_cast<void*>(&gxq::game_thread_main));
++    SDL_SetStringProperty(props, SDL_PROP_THREAD_CREATE_NAME_STRING, "game");
++    SDL_SetPointerProperty(props, SDL_PROP_THREAD_CREATE_USERDATA_POINTER, &run);
++    SDL_SetNumberProperty(props, SDL_PROP_THREAD_CREATE_STACKSIZE_NUMBER,
++                          64ll * 1024 * 1024);
++    gxq::g_ring.reset(new gxq::RenderItem[gxq::kRingSlots]);
++    gxq::g_ring_head = 0;
++    gxq::g_ring_tail = 0;
++    gxq::g_plan_next = 0;
++    g_core_sink.set_defer_observer(gxq::defer_draw, nullptr);
++    g_core_sink.set_storage(gxq::reserve_draw, gxq::reserved_state, nullptr);
++    g_core_sink.set_copy_observer(gxq::defer_copy, nullptr);
++    gxq::g_active = true;
++    // Plan workers: the cores left after the game, decode and main threads.
++    int workers = std::clamp(SDL_GetNumLogicalCPUCores() - 3, 1, 4);
++    if (const char* env = std::getenv("DOL_GX_PLAN_WORKERS"))
++        workers = std::clamp(std::atoi(env), 0, gxq::kMaxPlanWorkers);
++    gxq::g_workers_stop = false;
++    std::vector<SDL_Thread*> worker_threads;
++    for (int i = 0; i < workers; ++i) {
++        const SDL_PropertiesID wp = SDL_CreateProperties();
++        SDL_SetPointerProperty(wp, SDL_PROP_THREAD_CREATE_ENTRY_FUNCTION_POINTER,
++                               reinterpret_cast<void*>(&gxq::plan_worker_main));
++        SDL_SetStringProperty(wp, SDL_PROP_THREAD_CREATE_NAME_STRING, "gx-plan");
++        SDL_SetPointerProperty(wp, SDL_PROP_THREAD_CREATE_USERDATA_POINTER,
++                               &gxq::g_worker_counters[i]);
++        SDL_SetNumberProperty(wp, SDL_PROP_THREAD_CREATE_STACKSIZE_NUMBER,
++                              8ll * 1024 * 1024);
++        if (SDL_Thread* t = SDL_CreateThreadWithProperties(wp))
++            worker_threads.push_back(t);
++        SDL_DestroyProperties(wp);
++    }
++    gxq::g_worker_count = static_cast<int>(worker_threads.size());
++    const SDL_PropertiesID decode_props = SDL_CreateProperties();
++    SDL_SetPointerProperty(decode_props, SDL_PROP_THREAD_CREATE_ENTRY_FUNCTION_POINTER,
++                           reinterpret_cast<void*>(&gxq::decode_thread_main));
++    SDL_SetStringProperty(decode_props, SDL_PROP_THREAD_CREATE_NAME_STRING, "gx-decode");
++    SDL_SetNumberProperty(decode_props, SDL_PROP_THREAD_CREATE_STACKSIZE_NUMBER,
++                          16ll * 1024 * 1024);
++    SDL_Thread* decode = SDL_CreateThreadWithProperties(decode_props);
++    SDL_DestroyProperties(decode_props);
++    SDL_Thread* thread = decode != nullptr ? SDL_CreateThreadWithProperties(props) : nullptr;
++    SDL_DestroyProperties(props);
++    if (thread == nullptr) {
++        std::fprintf(stderr, "[gx-thread] could not start the game threads (%s)\n",
++                     SDL_GetError());
++        std::abort();
++    }
++    std::fprintf(stderr, "[gx-thread] game, GX decode, %d plan worker(s) and main "
++                         "(submit, present) on their own threads\n",
++                 gxq::g_worker_count);
++    gxq::run_main();
++    SDL_WaitThread(thread, nullptr);
++    SDL_WaitThread(decode, nullptr);
++    gxq::g_workers_stop = true;
++    {
++        std::lock_guard<std::mutex> lock(gxq::g_work_mutex);
++        gxq::g_cv_work.notify_all();
++    }
++    for (SDL_Thread* t : worker_threads)
++        SDL_WaitThread(t, nullptr);
++    gxq::g_active = false;
++    g_core_sink.set_defer_observer(nullptr, nullptr);
++    g_core_sink.set_storage(nullptr, nullptr, nullptr);
++    g_core_sink.set_copy_observer(core_copy_observer, nullptr);
++    gxq::g_ring.reset();
++    return run.result;
++#else
++    return game(arg);
++#endif
++}
++
++bool dol_aurora_gx_threaded(void) {
++#if GXRUNTIME_HAS_AURORA_RECOMP
++    return gxq::g_active;
++#else
++    return false;
++#endif
++}
++
++void dol_aurora_set_frame_hook(void (*hook)(void)) {
++#if GXRUNTIME_HAS_AURORA_RECOMP
++    gxq::g_frame_hook = hook;
++#else
++    (void)hook;
++#endif
 +}
 +
  } // extern "C"
  
  namespace {
+ void install_platform_ops() {
++#if GXRUNTIME_HAS_AURORA_RECOMP
++    // The game thread queues its GX calls (gxq); other callers run them here.
++    const DolPlatformOps ops = {
++        .should_quit = gxq::should_quit_op,
++        .present = gxq::present_op,
++        .mark_gx_begin = aurora_backend_mark_gx_begin,
++        .gx_write = gxq::gx_write_op,
++        .call_display_list = gxq::call_display_list_op,
++        .set_array = gxq::set_array_op,
++        .set_array_guest = gxq::set_array_guest_op,
++        .load_texture = aurora_backend_load_texture,
++        .load_texture_guest = aurora_backend_load_texture_guest,
++        .load_tlut = aurora_backend_load_tlut,
++        .load_tlut_guest = aurora_backend_load_tlut_guest,
++        .set_copy_destination = gxq::set_copy_destination_op,
++        .set_copy_destination_guest = gxq::set_copy_destination_guest_op,
++        .set_guest_address_resolver = aurora_backend_set_guest_address_resolver,
++        .configure_vi = gxq::configure_vi_op,
++        .set_next_xfb = gxq::set_next_xfb_op,
++        .flush_xfb = gxq::flush_xfb_op,
++        .set_xfb_black = gxq::set_xfb_black_op,
++        .pad_init = aurora_backend_pad_init,
++        .pad_read = aurora_backend_pad_read,
++        .pad_reset = aurora_backend_pad_reset,
++        .pad_recalibrate = aurora_backend_pad_recalibrate,
++        .pad_control_motor = aurora_backend_pad_control_motor,
++        .pad_set_spec = aurora_backend_pad_set_spec,
++        .audio_set_sample_rate = aurora_backend_audio_set_sample_rate,
++        .audio_push = aurora_backend_audio_push,
++    };
++#else
+     const DolPlatformOps ops = {
+         .should_quit = aurora_backend_should_quit,
+         .present = aurora_backend_present,
+@@ -1918,6 +3395,7 @@ void install_platform_ops() {
+         .audio_set_sample_rate = aurora_backend_audio_set_sample_rate,
+         .audio_push = aurora_backend_audio_push,
+     };
++#endif
+     dol_platform_install(&ops);
+ }
+ } // namespace
 diff --git a/graphics/aurora/include/aurora/aurora.h b/graphics/aurora/include/aurora/aurora.h
 index b86b214..f6b70de 100644
 --- a/graphics/aurora/include/aurora/aurora.h
@@ -811,7 +1940,7 @@ index 7af8fca..4c14e34 100644
      g_requested.store(false, std::memory_order_release);
    else
 diff --git a/graphics/aurora/lib/gfx/gxcore_draw.cpp b/graphics/aurora/lib/gfx/gxcore_draw.cpp
-index 71136b9..c6d4c8d 100644
+index 71136b9..6febd7b 100644
 --- a/graphics/aurora/lib/gfx/gxcore_draw.cpp
 +++ b/graphics/aurora/lib/gfx/gxcore_draw.cpp
 @@ -19,6 +19,8 @@
@@ -942,7 +2071,18 @@ index 71136b9..c6d4c8d 100644
    }
    if (!it->second) {
      return;
-@@ -714,6 +762,20 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -709,11 +757,30 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+   // XFB YUYV into guest RAM from this readback on every display copy, so it
+   // must stay armed in product runs too (cost: one EFB readback per display
+   // copy, ~1-2/frame).
+-  if (plane_capture::enabled() || is_xfb) {
++  // Display copies stay GPU-only unless DOL_XFB_RAM=1 (Dolphin's default,
++  // "XFB to texture only"): writing them to RAM needs a whole-frame readback
++  // every frame, several ms at high resolutions, for a copy games rarely
++  // read (Eternal Darkness presents the EFB and never does).
++  static const bool xfb_ram = std::getenv("DOL_XFB_RAM") != nullptr;
++  if (plane_capture::enabled() || (is_xfb && xfb_ram)) {
+     if (!efb_readback::continuous())
        efb_readback::set_continuous(true);
      efb_readback::request();
    }
@@ -963,7 +2103,16 @@ index 71136b9..c6d4c8d 100644
    gfx::resolve_pass(it->second, srcRect, do_clear && cmd.color_update,
                      do_clear && cmd.alpha_update,
                      do_clear && cmd.depth_update,
-@@ -782,10 +844,99 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -730,7 +797,7 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+   // never read XFB RAM stay safe.
+   // dest_stride_bytes = BP 0x4D << 5 when set; else tight width*2.
+   // XFB dest height from y_scale (byte_size/stride or cmd.xfb_height).
+-  if (is_xfb && cmd.dest_address != 0u && cmd.width >= 2u &&
++  if (is_xfb && xfb_ram && cmd.dest_address != 0u && cmd.width >= 2u &&
+       (cmd.width & 1u) == 0u) {
+     if (!efb_readback::continuous()) {
+       efb_readback::set_continuous(true);
+@@ -782,10 +849,99 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
    }
  }
  
@@ -1063,7 +2212,7 @@ index 71136b9..c6d4c8d 100644
  
    if (plan.viewport_valid) {
      // Raw XF viewport -> logical viewport, the raw path's own formula
-@@ -839,10 +990,28 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -839,10 +995,28 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      const uint32_t size = std::min(tsize, available);
      // Hash the actual source texels (+ TLUT for CI) so a content change under an
      // unchanged guest identity is a distinct cache entry — see TextureKey.
@@ -1096,7 +2245,7 @@ index 71136b9..c6d4c8d 100644
      const TextureKey key{address,     tsize,        format,      width,
                           height,      tlut_address, tlut_format, tlut_entries,
                           content_hash};
-@@ -869,7 +1038,18 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -869,7 +1043,18 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
        decoded = gxc::decode_texture(format, width, height, bytes, size);
      }
      TextureHandle handle;
@@ -1116,7 +2265,7 @@ index 71136b9..c6d4c8d 100644
        handle = new_static_texture_2d(
            width, height, 1, GX_TF_RGBA8_PC,
            ArrayRef<uint8_t>{decoded.data(), decoded.size()}, false,
-@@ -892,7 +1072,96 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -892,7 +1077,96 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    };
  
    BindGroupRef textureBindGroup = 0;
@@ -1213,7 +2362,7 @@ index 71136b9..c6d4c8d 100644
      if (plan.texmap_mask == 0u) {
        // Single-texmap fast path: primary texture + plan.sampler at binding 0/1.
        if (plan.has_texture) {
-@@ -919,6 +1188,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -919,6 +1193,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            textureBindGroup = bind_group_ref(descriptor);
          }
        }
@@ -1221,7 +2370,7 @@ index 71136b9..c6d4c8d 100644
      } else {
        // Multi-texmap: bind each used texmap at 2t (texture) / 2t+1 (sampler),
        // matching the WGSL declarations. Per-texmap PlanSampler from
-@@ -951,8 +1221,10 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -951,8 +1226,10 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
          entries.push_back(WGPUBindGroupEntry{
              .binding = 2u * t + 1u, .sampler = heldSamplers.back().Get()});
        }
@@ -1233,7 +2382,7 @@ index 71136b9..c6d4c8d 100644
        const WGPUBindGroupDescriptor descriptor{
            .label = {"GXCore Texture Bind Group", WGPU_STRLEN},
            .layout = texture_bind_group_layout(plan.texmap_mask).Get(),
-@@ -960,6 +1232,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -960,6 +1237,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            .entries = entries.data(),
        };
        textureBindGroup = bind_group_ref(descriptor);
@@ -1241,7 +2390,7 @@ index 71136b9..c6d4c8d 100644
      }
    }
  
-@@ -969,24 +1242,63 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -969,24 +1247,63 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    const auto idxRange = push_indices(
        reinterpret_cast<const uint8_t*>(plan.indices.data()),
        plan.indices.size() * sizeof(uint16_t), 4);
@@ -1452,10 +2601,48 @@ index b741e17..9b5fa67 100644
  // window/swapchain native size. Pass 0,0 to clear. Applied immediately when
  // a window exists (recreates g_frameBuffer).
 diff --git a/graphics/frontend/include/gxruntime/aurora_recomp/render_sink.hpp b/graphics/frontend/include/gxruntime/aurora_recomp/render_sink.hpp
-index 88110c8..6e59778 100644
+index 88110c8..4a70aa4 100644
 --- a/graphics/frontend/include/gxruntime/aurora_recomp/render_sink.hpp
 +++ b/graphics/frontend/include/gxruntime/aurora_recomp/render_sink.hpp
-@@ -517,6 +517,9 @@ std::uint32_t build_array_sizes(const ConsumedDraw& draw, std::uint32_t* out,
+@@ -320,6 +320,20 @@ public:
+     draw_observer_ = observer;
+     draw_observer_user_ = user;
+   }
++  // Streaming into caller-owned storage (the GX threads' render ring): each
++  // new draw is built in place in the ConsumedDraw `storage` returns, which
++  // must stay valid until the observer has seen it; after that the sink
++  // never touches it again. nullptr builds in draws_ again.
++  using DrawStorage = ConsumedDraw* (*)(void* user);
++  void set_draw_storage(DrawStorage storage, void* user) {
++    draw_storage_ = storage;
++    draw_storage_user_ = user;
++    external_draw_ = nullptr;
++  }
++  // The per-draw assembly statistics (vertex walk, topology and storage
++  // sizes) cross-check the frontend against Aurora; a renderer that does not
++  // read them can turn them off.
++  void set_assembly_stats(bool on) { assembly_stats_ = on; }
+ 
+   const std::vector<ConsumedDraw>& draws() const { return draws_; }
+   unsigned long long packets() const { return packets_; }
+@@ -411,6 +425,16 @@ private:
+   bool streaming_ = false;
+   ConsumedDrawObserver draw_observer_ = nullptr;
+   void* draw_observer_user_ = nullptr;
++  DrawStorage draw_storage_ = nullptr;
++  void* draw_storage_user_ = nullptr;
++  ConsumedDraw* external_draw_ = nullptr;  // being built in caller storage
++  bool assembly_stats_ = true;
++  // The draw still taking INDEXED_SPANs (null once observed, with storage).
++  ConsumedDraw* current_draw() {
++    if (draw_storage_ != nullptr)
++      return external_draw_;
++    return draws_.empty() ? nullptr : &draws_.back();
++  }
+   ConsumedArrayBinding arrays_[kArrayCount]{};
+   ConsumedTexture bound_texture_{};
+   ConsumedTexture bound_textures_[ConsumedDraw::kMaxTexmaps]{}; // per-texmap slot
+@@ -517,6 +541,9 @@ std::uint32_t build_array_sizes(const ConsumedDraw& draw, std::uint32_t* out,
  
  RenderPacket make_render_packet(std::uint32_t sequence,
                                  const DolGxRecompTraceEvent& event);
@@ -1561,10 +2748,30 @@ index 56ea697..1ef3293 100644
  
  } // namespace gxruntime::aurora_recomp::trace
 diff --git a/graphics/frontend/src/render_sink.cpp b/graphics/frontend/src/render_sink.cpp
-index 2ef5b3d..a5a13eb 100644
+index 2ef5b3d..2001208 100644
 --- a/graphics/frontend/src/render_sink.cpp
 +++ b/graphics/frontend/src/render_sink.cpp
-@@ -196,18 +196,32 @@ bool ConsumingAuroraRenderSink::submit_packet(const RenderPacket& packet) {
+@@ -35,6 +35,7 @@ void ConsumingAuroraRenderSink::reset() {
+     t = ConsumedTexture{};
+   cull_all_ = false;
+   draws_.clear();
++  external_draw_ = nullptr;
+   total_draws_ = 0;
+   total_vertices_ = 0;
+   payload_bytes_ = 0;
+@@ -109,8 +110,9 @@ bool ConsumingAuroraRenderSink::submit_packet(const RenderPacket& packet) {
+       // AFTER the draw it belongs to. So a draw's real array inputs are its
+       // spans, not every bound array. Append the read array to the most recent
+       // draw and resolve its exact byte span.
+-      if (!draws_.empty() && packet.resource.index < kArrayCount) {
+-        ConsumedDraw& draw = draws_.back();
++      if (ConsumedDraw* current = current_draw();
++          current != nullptr && packet.resource.index < kArrayCount) {
++        ConsumedDraw& draw = *current;
+         const ConsumedArrayBinding& binding = arrays_[packet.resource.index];
+         if (draw.array_input_count < ConsumedDraw::kMaxArrays) {
+           ConsumedArrayInput& input = draw.arrays[draw.array_input_count++];
+@@ -196,18 +198,39 @@ bool ConsumingAuroraRenderSink::submit_packet(const RenderPacket& packet) {
        if (arrays_[i].base_valid && arrays_[i].stride_valid)
          active_mask |= (1u << i);
      }
@@ -1580,18 +2787,25 @@ index 2ef5b3d..a5a13eb 100644
 -    };
 +    // The previous draw's trailing INDEXED_SPAN packets are now all in, so it is
 +    // span-complete: assemble it before it is replaced.
-+    if (!draws_.empty())
-+      accumulate_assembly(draws_.back());
++    if (ConsumedDraw* previous = current_draw())
++      accumulate_assembly(*previous);
 +    // Build the new draw in place. In streaming mode the one retained element
 +    // is reused rather than cleared and copied in again: a ConsumedDraw carries
 +    // several KB of matrices, and two full copies per draw were a measurable
 +    // part of a 9,000-draw frame. Every field is set below (array inputs are
 +    // read only up to array_input_count).
-+    if (!streaming_ || draws_.empty())
-+      draws_.emplace_back();
-+    else if (draws_.size() > 1u)
-+      draws_.erase(draws_.begin(), draws_.end() - 1);
-+    ConsumedDraw& draw = draws_.back();
++    ConsumedDraw* target = nullptr;
++    if (draw_storage_ != nullptr) {
++      external_draw_ = draw_storage_(draw_storage_user_);
++      target = external_draw_;
++    } else {
++      if (!streaming_ || draws_.empty())
++        draws_.emplace_back();
++      else if (draws_.size() > 1u)
++        draws_.erase(draws_.begin(), draws_.end() - 1);
++      target = &draws_.back();
++    }
++    ConsumedDraw& draw = *target;
 +    draw.sequence = packet.sequence;
 +    draw.primitive = packet.draw.primitive;
 +    draw.vtx_fmt = packet.draw.vtx_fmt;
@@ -1607,7 +2821,7 @@ index 2ef5b3d..a5a13eb 100644
      draw.transform_flags = packet.draw.transform_flags;
      draw.current_pn_matrix = packet.draw.current_pn_matrix;
      draw.payload_pn_matrix_mask = packet.draw.payload_pn_matrix_mask;
-@@ -242,18 +256,7 @@ bool ConsumingAuroraRenderSink::submit_packet(const RenderPacket& packet) {
+@@ -242,24 +265,13 @@ bool ConsumingAuroraRenderSink::submit_packet(const RenderPacket& packet) {
                  sizeof(draw.post_matrix_word_mask));
      draw.dualtex_info = packet.draw.dualtex_info;
      draw.dualtex_valid = packet.draw.dualtex_valid;
@@ -1627,7 +2841,50 @@ index 2ef5b3d..a5a13eb 100644
      // Retain the draw's raw per-vertex bytes (valid only during this call) so an
      // issuing sink can assemble vertices after submit. Append after push_back so
      // the copy lands on the just-added draw.
-@@ -522,11 +525,23 @@ std::uint32_t build_array_sizes(const ConsumedDraw& draw, std::uint32_t* out,
+     if (packet.draw.vertex_payload != nullptr &&
+         packet.draw.vertex_payload_size != 0u) {
+-      draws_.back().vertex_payload.assign(
++      draw.vertex_payload.assign(
+           packet.draw.vertex_payload,
+           packet.draw.vertex_payload + packet.draw.vertex_payload_size);
+       payload_bytes_ += packet.draw.vertex_payload_size;
+@@ -296,6 +308,15 @@ bool ConsumingAuroraRenderSink::resolve_array_input(
+ void ConsumingAuroraRenderSink::accumulate_assembly(const ConsumedDraw& draw) {
+   if (back_assembled_)
+     return;
++  if (!assembly_stats_) {
++    ++assembled_draws_;
++    back_assembled_ = true;
++    if (draw_storage_ != nullptr)
++      external_draw_ = nullptr;  // the observer owns it now
++    if (draw_observer_ != nullptr)
++      draw_observer_(draw, total_draws_, draw_observer_user_);
++    return;
++  }
+   // Count-only (nullptr): the live path does not retain per-vertex elements.
+   const AssembledDrawStats stats = assemble_consumed_draw(draw, nullptr);
+   ++assembled_draws_;
+@@ -316,14 +337,16 @@ void ConsumingAuroraRenderSink::accumulate_assembly(const ConsumedDraw& draw) {
+     storage_bytes_ += sizes[i];
+   if (!stats.ok)
+     ++assemble_failed_draws_;
++  back_assembled_ = true;
++  if (draw_storage_ != nullptr)
++    external_draw_ = nullptr;  // the observer owns it now
+   if (draw_observer_ != nullptr)
+     draw_observer_(draw, total_draws_, draw_observer_user_);
+-  back_assembled_ = true;
+ }
+ 
+ void ConsumingAuroraRenderSink::flush_assembly() {
+-  if (!draws_.empty())
+-    accumulate_assembly(draws_.back());
++  if (ConsumedDraw* current = current_draw())
++    accumulate_assembly(*current);
+ }
+ 
+ void ConsumingAuroraRenderSink::tally_array_input(bool resolved) {
+@@ -522,11 +545,23 @@ std::uint32_t build_array_sizes(const ConsumedDraw& draw, std::uint32_t* out,
  
  RenderPacket make_render_packet(std::uint32_t sequence,
                                  const DolGxRecompTraceEvent& event) {
@@ -1656,7 +2913,7 @@ index 2ef5b3d..a5a13eb 100644
  
    switch (event.kind) {
    case DOL_GX_RECOMP_EVENT_FIFO_BYTES:
-@@ -681,18 +696,16 @@ RenderPacket make_render_packet(std::uint32_t sequence,
+@@ -681,18 +716,16 @@ RenderPacket make_render_packet(std::uint32_t sequence,
      break;
    case DOL_GX_RECOMP_EVENT_DRAW:
      packet.kind = RenderPacketKind::Draw;
@@ -2246,11 +3503,121 @@ index adb5231..fe4b6aa 100644
      case trace::RecordKind::PresentStats: {
        present_and_capture();
        break;
+diff --git a/graphics/gxcore/include/gxruntime/gxcore/counters.hpp b/graphics/gxcore/include/gxruntime/gxcore/counters.hpp
+index 623f047..554428e 100644
+--- a/graphics/gxcore/include/gxruntime/gxcore/counters.hpp
++++ b/graphics/gxcore/include/gxruntime/gxcore/counters.hpp
+@@ -7,6 +7,8 @@
+ // from gxcore.hpp (Program 66 A0) so the coverage gate and the domain files can
+ // reference the counter names without pulling the whole sink header.
+ 
++#include <cstddef>
++
+ namespace gxruntime::gxcore {
+ 
+ // Loud-counter taxonomy for everything the slice does not implement yet.
+@@ -71,4 +73,14 @@ struct GapCounters {
+   unsigned long long tmem_manual = 0;
+ };
+ 
++// Every field is a counter: sum two sets (counts kept by separate threads).
++inline GapCounters& operator+=(GapCounters& a, const GapCounters& b) {
++  static_assert(sizeof(GapCounters) % sizeof(unsigned long long) == 0);
++  auto* pa = reinterpret_cast<unsigned long long*>(&a);
++  const auto* pb = reinterpret_cast<const unsigned long long*>(&b);
++  for (std::size_t i = 0; i < sizeof(GapCounters) / sizeof(unsigned long long); ++i)
++    pa[i] += pb[i];
++  return a;
++}
++
+ } // namespace gxruntime::gxcore
 diff --git a/graphics/gxcore/include/gxruntime/gxcore/gxcore.hpp b/graphics/gxcore/include/gxruntime/gxcore/gxcore.hpp
-index 4d14391..71dbfb2 100644
+index 4d14391..19edeea 100644
 --- a/graphics/gxcore/include/gxruntime/gxcore/gxcore.hpp
 +++ b/graphics/gxcore/include/gxruntime/gxcore/gxcore.hpp
-@@ -129,6 +129,10 @@ public:
+@@ -16,6 +16,10 @@
+ 
+ namespace gxruntime::gxcore {
+ 
++// DOL_GX_TIME: time spent in build_draw_plan, summed while g_plan_timing.
++extern bool g_plan_timing;
++extern std::uint64_t g_plan_time_ns;
++
+ // GapCounters now lives in counters.hpp (Program 66 A0) so the coverage gate and
+ // the domain files reference the counter taxonomy without the sink header.
+ 
+@@ -57,10 +61,21 @@ public:
+   // VertexLoaderManager normal_cache write on m_remaining==0). nullptr in unit
+   // tests that don't exercise the fallback (fields stay zero, matching a fresh
+   // cache).
++  // record_cross (with no caches): plan out of stream order, leaving what
++  // the caches would give and take in plan.cross for finish_cross_draw.
+   DrawPlan build_draw_plan(const gxruntime::aurora_recomp::ConsumedDraw& draw,
+                            GapCounters& counters,
+                            CachedVertexAttrs* cached = nullptr,
+-                           CachedZSlope* zslope = nullptr) const;
++                           CachedZSlope* zslope = nullptr,
++                           bool record_cross = false) const;
++  // The same into an existing plan, reusing its buffers (no allocation once
++  // they have grown to the draw sizes in use).
++  void build_draw_plan_into(DrawPlan& plan,
++                            const gxruntime::aurora_recomp::ConsumedDraw& draw,
++                            GapCounters& counters,
++                            CachedVertexAttrs* cached = nullptr,
++                            CachedZSlope* zslope = nullptr,
++                            bool record_cross = false) const;
+ 
+   std::uint32_t bp(std::uint8_t reg) const { return bp_regs_[reg]; }
+   bool bp_valid(std::uint8_t reg) const { return bp_valid_[reg]; }
+@@ -98,6 +113,11 @@ private:
+   std::uint8_t vat_valid_[8]{}; // bit per group
+ };
+ 
++// In stream order, after a record_cross build: fill the plan from the caches
++// and advance them, exactly as an in-order build_draw_plan would have.
++void finish_cross_draw(DrawPlan& plan, CachedVertexAttrs& cached,
++                       CachedZSlope& zslope, GapCounters& counters);
++
+ // AuroraRenderSink that owns a ConsumingAuroraRenderSink (streaming mode) and
+ // pairs every span-complete draw with the register state that was current at
+ // its Draw packet. The observer receives (plan-ready) ConsumedDraws; the
+@@ -110,6 +130,13 @@ public:
+   // flushed (its geometry is in the pass) — so a GPU observer can resolve the
+   // EFB into a texture at the copy's stream position.
+   using CopyObserver = void (*)(const EfbCopyCommand& cmd, void* user);
++  // Planning elsewhere (a separate plan stage): receives each span-complete
++  // draw with the register state that was current at it, instead of a plan.
++  // The receiver builds the plans in stream order with its own N/B/T and
++  // z-slope caches (build_draw_plan).
++  using DeferObserver = void (*)(const GxCoreState& state,
++                                 const gxruntime::aurora_recomp::ConsumedDraw& draw,
++                                 void* user);
+ 
+   GxCoreSink();
+ 
+@@ -124,11 +151,32 @@ public:
+     copy_observer_ = observer;
+     copy_observer_user_ = user;
+   }
++  // nullptr plans here again (the plan observer).
++  void set_defer_observer(DeferObserver observer, void* user) {
++    defer_observer_ = observer;
++    defer_observer_user_ = user;
++  }
++  // With a defer observer: build each draw, and the register state current
++  // at it, straight into caller storage (the render ring) instead of copying
++  // them there later. `state` returns where the newest draw's state goes; the
++  // observer's arguments are then that storage. nullptr: no storage.
++  using StateStorage = GxCoreState* (*)(void* user);
++  void set_storage(gxruntime::aurora_recomp::ConsumingAuroraRenderSink::DrawStorage draw,
++                   StateStorage state, void* user) {
++    consumer_.set_draw_storage(draw, user);
++    consumer_.set_assembly_stats(draw == nullptr);
++    state_storage_ = state;
++    state_storage_user_ = user;
++  }
+ 
+   bool submit_packet(
        const gxruntime::aurora_recomp::RenderPacket& packet) override;
    // Frame boundary: plan the final pending draw of the frame.
    void flush_frame();
@@ -2261,6 +3628,46 @@ index 4d14391..71dbfb2 100644
  
    const GapCounters& counters() const { return counters_; }
    GapCounters& counters() { return counters_; }
+@@ -151,6 +199,10 @@ private:
+   void* plan_observer_user_ = nullptr;
+   CopyObserver copy_observer_ = nullptr;
+   void* copy_observer_user_ = nullptr;
++  DeferObserver defer_observer_ = nullptr;
++  void* defer_observer_user_ = nullptr;
++  StateStorage state_storage_ = nullptr;
++  void* state_storage_user_ = nullptr;
+   GapCounters counters_{};
+ };
+ 
+diff --git a/graphics/gxcore/include/gxruntime/gxcore/shader.hpp b/graphics/gxcore/include/gxruntime/gxcore/shader.hpp
+index b9bfd5d..406941f 100644
+--- a/graphics/gxcore/include/gxruntime/gxcore/shader.hpp
++++ b/graphics/gxcore/include/gxruntime/gxcore/shader.hpp
+@@ -688,9 +688,24 @@ struct PlanTexture {
+ 
+ // packed uniforms, the pipeline key, and the bound texture's guest identity +
+ // host bytes (converted by the substrate's GX codecs at upload).
++// What a plan built out of stream order (record_cross) needs from, and gives
++// to, the cross-draw caches; finish_cross_draw applies it in stream order.
++struct PlanCrossDraw {
++  bool recorded = false;     // reached the N/B/T cache step
++  bool has_normal = false;   // this draw advances the normal cache
++  bool has_nbt = false;      // ... and the binormal/tangent cache
++  float normal[3]{};
++  float binormal[3]{};
++  float tangent[3]{};
++  bool zslope_needed = false;   // zfreeze draw: takes the cached slope
++  bool zslope_captured = false; // non-frozen triangle draw: new slope
++  float zslope[3]{};            // dfdx, dfdy, f0
++};
++
+ struct DrawPlan {
+   bool ok = false;
+   const char* skip_reason = nullptr; // set when ok==false
++  PlanCrossDraw cross{};
+   PipelineKey pipeline{};
+   VertexShaderConstants constants{};
+   PixelShaderConstants pixel_constants{}; // S14 TEV color/konst/alpha uniforms
 diff --git a/graphics/gxcore/src/gp_state_dump.cpp b/graphics/gxcore/src/gp_state_dump.cpp
 index 2d64013..04da7f7 100644
 --- a/graphics/gxcore/src/gp_state_dump.cpp
@@ -2368,17 +3775,34 @@ index 2d64013..04da7f7 100644
    append_u32(s, "num_tex_gens", sk.num_tex_gens, true);
    append_u32(s, "dualtex_enabled", sk.dualtex_enabled, true);
 diff --git a/graphics/gxcore/src/gxcore.cpp b/graphics/gxcore/src/gxcore.cpp
-index 2fb6944..96be2b8 100644
+index 2fb6944..02cc2fc 100644
 --- a/graphics/gxcore/src/gxcore.cpp
 +++ b/graphics/gxcore/src/gxcore.cpp
-@@ -1,4 +1,5 @@
+@@ -1,4 +1,6 @@
  // SPDX-License-Identifier: GPL-3.0-or-later
++#include <chrono>
 +#include <cstdlib>
  #include "gxruntime/gxcore/gxcore.hpp"
  
  // GxCoreSink: the AuroraRenderSink that pairs every span-complete draw with the
-@@ -23,6 +24,11 @@ void GxCoreSink::on_consumed_draw(const ar::ConsumedDraw& draw,
+@@ -11,6 +13,9 @@ namespace gxruntime::gxcore {
+ 
+ namespace ar = gxruntime::aurora_recomp;
+ 
++bool g_plan_timing = false;
++std::uint64_t g_plan_time_ns = 0;
++
+ // --- Sink ---------------------------------------------------------------------
+ 
+ GxCoreSink::GxCoreSink() {
+@@ -21,10 +26,26 @@ GxCoreSink::GxCoreSink() {
+ void GxCoreSink::on_consumed_draw(const ar::ConsumedDraw& draw,
+                                   unsigned long long, void* user) {
    auto* self = static_cast<GxCoreSink*>(user);
++  if (self->defer_observer_ != nullptr) {
++    self->defer_observer_(self->pending_state_, draw, self->defer_observer_user_);
++    return;
++  }
    if (self->plan_observer_ == nullptr)
      return;
 +  // DOL_GXCORE_SKIP_PLANS=1 (performance experiment): drop every draw before
@@ -2386,10 +3810,32 @@ index 2fb6944..96be2b8 100644
 +  static const bool skip_plans = std::getenv("DOL_GXCORE_SKIP_PLANS") != nullptr;
 +  if (skip_plans)
 +    return;
++  const auto t0 = g_plan_timing ? std::chrono::steady_clock::now()
++                                 : std::chrono::steady_clock::time_point{};
    const DrawPlan plan = self->pending_state_.build_draw_plan(
        draw, self->counters_, &self->cached_attrs_, &self->cached_zslope_);
++  if (g_plan_timing)
++    g_plan_time_ns += static_cast<std::uint64_t>(
++        std::chrono::duration_cast<std::chrono::nanoseconds>(
++            std::chrono::steady_clock::now() - t0)
++            .count());
    self->plan_observer_(plan, self->plan_observer_user_);
-@@ -112,4 +118,12 @@ bool GxCoreSink::submit_packet(const ar::RenderPacket& packet) {
+ }
+ 
+@@ -105,11 +126,23 @@ bool GxCoreSink::submit_packet(const ar::RenderPacket& packet) {
+   // fires the observer, which must see the state that was current at that
+   // previous draw (pending_state_), not this packet's.
+   const bool ok = consumer_.submit_packet(packet);
+-  if (packet.kind == ar::RenderPacketKind::Draw)
+-    pending_state_ = live_state_;
++  if (packet.kind == ar::RenderPacketKind::Draw) {
++    if (state_storage_ != nullptr)
++      *state_storage_(state_storage_user_) = live_state_;
++    else
++      pending_state_ = live_state_;
++  }
+   return ok;
+ }
  
  void GxCoreSink::flush_frame() { consumer_.flush_assembly(); }
  
@@ -2403,10 +3849,47 @@ index 2fb6944..96be2b8 100644
 +
  } // namespace gxruntime::gxcore
 diff --git a/graphics/gxcore/src/plan.cpp b/graphics/gxcore/src/plan.cpp
-index c3d1557..bd69e78 100644
+index c3d1557..e8aa0a0 100644
 --- a/graphics/gxcore/src/plan.cpp
 +++ b/graphics/gxcore/src/plan.cpp
-@@ -773,6 +773,18 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -429,13 +429,34 @@ void identity_rows(float rows[3][4]) {
+ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+                                       GapCounters& counters,
+                                       CachedVertexAttrs* cached,
+-                                      CachedZSlope* zslope) const {
++                                      CachedZSlope* zslope,
++                                      bool record_cross) const {
+   DrawPlan plan;
++  build_draw_plan_into(plan, draw, counters, cached, zslope, record_cross);
++  return plan;
++}
++
++void GxCoreState::build_draw_plan_into(DrawPlan& plan,
++                                       const ar::ConsumedDraw& draw,
++                                       GapCounters& counters,
++                                       CachedVertexAttrs* cached,
++                                       CachedZSlope* zslope,
++                                       bool record_cross) const {
++  // Start from a fresh plan but keep the vertex and index buffers' capacity:
++  // a reused plan then allocates nothing per draw.
++  {
++    std::vector<float> vertices = std::move(plan.vertices);
++    std::vector<std::uint16_t> indices = std::move(plan.indices);
++    vertices.clear();
++    indices.clear();
++    plan = DrawPlan{};
++    plan.vertices = std::move(vertices);
++    plan.indices = std::move(indices);
++  }
+   auto skip = [&](const char* reason) {
+     plan.ok = false;
+     plan.skip_reason = reason;
+     ++counters.draws_skipped;
+-    return plan;
+   };
+ 
+   if (draw.cull_all) {
+@@ -773,6 +794,18 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
      plan.pe_control_valid = pe.valid;
      plan.efb_pixel_format = pe.pixel_format;
      plan.efb_z_format = pe.z_format;
@@ -2425,7 +3908,7 @@ index c3d1557..bd69e78 100644
      plan.early_ztest = pe.early_ztest;
      if (!pe.valid)
        ++counters.efb_format_defaulted;
-@@ -1185,22 +1197,41 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1185,22 +1218,41 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
        ++counters.scissor_multi_rect;
    }
    if (key.textured != 0u) {
@@ -2480,6 +3963,103 @@ index c3d1557..bd69e78 100644
      // U2: decode sampler state for every used texmap from TX_SETMODE0/1.
      // Count sampler_defaulted when mode0 was never written for a live texmap
      // (plan falls back to BP-zero defaults: clamp/near/no-mip).
+@@ -1498,6 +1550,20 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+         }
+       }
+     }
++  } else if (record_cross) {
++    plan.cross.recorded = true;
++    if (plan.vertex_count > 0u) {
++      const float* last =
++          plan.vertices.data() +
++          static_cast<std::size_t>(plan.vertex_count - 1u) * kVertexFloats;
++      plan.cross.has_normal = walk.has_normal;
++      plan.cross.has_nbt = walk.has_nbt;
++      for (std::uint32_t k = 0; k < 3u; ++k) {
++        plan.cross.normal[k] = last[kVertexNormalOffset / 4u + k];
++        plan.cross.binormal[k] = last[kVertexBinormalOffset / 4u + k];
++        plan.cross.tangent[k] = last[kVertexTangentOffset / 4u + k];
++      }
++    }
+   }
+ 
+   // U6: CPU-side line/point expansion into triangle lists (WebGPU has no
+@@ -1584,6 +1650,8 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+         plan.pixel_constants.zslope[3] = 0.f;
+         plan.pixel_constants.efbscale[0] = 1.f;
+         plan.pixel_constants.efbscale[1] = 1.f;
++      } else if (record_cross) {
++        plan.cross.zslope_needed = true;
+       } else {
+         ++counters.zfreeze_ignored;
+         // Can't emit plane depth without a slope — drop per_pixel_depth so
+@@ -1594,6 +1662,14 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+     } else if (zslope != nullptr) {
+       // Always recompute on non-frozen draws (Dolphin CalculateZSlope path).
+       (void)capture_slope(zslope);
++    } else if (record_cross) {
++      CachedZSlope slope;
++      if (capture_slope(&slope)) {
++        plan.cross.zslope_captured = true;
++        plan.cross.zslope[0] = slope.dfdx;
++        plan.cross.zslope[1] = slope.dfdy;
++        plan.cross.zslope[2] = slope.f0;
++      }
+     }
+   }
+ 
+@@ -1614,7 +1690,50 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+ 
+   plan.ok = true;
+   ++counters.draws_planned;
+-  return plan;
++}
++
++void finish_cross_draw(DrawPlan& plan, CachedVertexAttrs& cached,
++                       CachedZSlope& zslope, GapCounters& counters) {
++  const PlanCrossDraw& x = plan.cross;
++  if (x.recorded) {
++    VertexShaderConstants& c = plan.constants;
++    for (std::uint32_t k = 0; k < 3u; ++k) {
++      c.cached_normal[k] = cached.normal[k];
++      c.cached_tangent[k] = cached.tangent[k];
++      c.cached_binormal[k] = cached.binormal[k];
++    }
++    if (x.has_normal)
++      for (std::uint32_t k = 0; k < 3u; ++k)
++        cached.normal[k] = x.normal[k];
++    if (x.has_nbt)
++      for (std::uint32_t k = 0; k < 3u; ++k) {
++        cached.binormal[k] = x.binormal[k];
++        cached.tangent[k] = x.tangent[k];
++      }
++  }
++  if (x.zslope_needed) {
++    if (zslope.valid) {
++      plan.zslope_valid = true;
++      plan.zslope_dfdx = zslope.dfdx;
++      plan.zslope_dfdy = zslope.dfdy;
++      plan.zslope_f0 = zslope.f0;
++      plan.pixel_constants.zslope[0] = zslope.dfdx;
++      plan.pixel_constants.zslope[1] = zslope.dfdy;
++      plan.pixel_constants.zslope[2] = zslope.f0;
++      plan.pixel_constants.zslope[3] = 0.f;
++      plan.pixel_constants.efbscale[0] = 1.f;
++      plan.pixel_constants.efbscale[1] = 1.f;
++    } else {
++      ++counters.zfreeze_ignored;
++      plan.pipeline.shader.per_pixel_depth = 0;
++      plan.pipeline.shader.zfreeze = 0;
++    }
++  } else if (x.zslope_captured) {
++    zslope.dfdx = x.zslope[0];
++    zslope.dfdy = x.zslope[1];
++    zslope.f0 = x.zslope[2];
++    zslope.valid = true;
++  }
+ }
+ 
+ } // namespace gxruntime::gxcore
 diff --git a/graphics/gxcore/src/tev.cpp b/graphics/gxcore/src/tev.cpp
 index 2c074d7..bc31d92 100644
 --- a/graphics/gxcore/src/tev.cpp
@@ -2528,7 +4108,7 @@ index 9c2f7bb..6dd6411 100644
 +
  #endif
 diff --git a/include/gxruntime/aurora_backend.h b/include/gxruntime/aurora_backend.h
-index 6ef4cf4..1b60db5 100644
+index 6ef4cf4..fb79de7 100644
 --- a/include/gxruntime/aurora_backend.h
 +++ b/include/gxruntime/aurora_backend.h
 @@ -5,6 +5,7 @@
@@ -2539,7 +4119,7 @@ index 6ef4cf4..1b60db5 100644
  #include <stdint.h>
  
  #ifdef __cplusplus
-@@ -26,6 +27,11 @@ bool dol_aurora_initialize(int argc, char** argv,
+@@ -26,12 +27,20 @@ bool dol_aurora_initialize(int argc, char** argv,
                             const AuroraBackendConfig* config);
  void dol_aurora_shutdown(void);
  
@@ -2551,7 +4131,16 @@ index 6ef4cf4..1b60db5 100644
  // Optional: after each present, push latest present-source RGBA8 into software
  // EFB (e.g. Strikers mmio_efb + dol_efb_access_fill_color_rgba8). Enables
  // continuous framebuffer readback while registered. NULL clears.
-@@ -40,6 +46,73 @@ void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user);
+ typedef void (*DolAuroraEfbFrameFillFn)(const uint8_t* rgba, uint32_t width,
+                                         uint32_t height, void* user);
+ void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user);
++// The guest read the EFB (GXPeek*): keep the frame fill above running (it is
++// off while nothing peeks; see aurora_backend.cpp).
++void dol_aurora_efb_peeked(void);
+ 
+ // C2: walk nonzero gxcore GapCounters into the process-global gap_report.
+ // Call once before gap_report_write_json on the live Strikers path so
+@@ -40,6 +49,85 @@ void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user);
  // from shutdown (second call only bumps if counters grew).
  void dol_aurora_flush_gap_report(void);
  
@@ -2580,6 +4169,18 @@ index 6ef4cf4..1b60db5 100644
 +// After a load: drop caches keyed by guest addresses (EFB-copy and XFB
 +// textures) and audio queued from the abandoned timeline.
 +void dol_aurora_state_loaded(void);
++
++// Run the game: on a thread of its own while this (the main) thread replays
++// its GX work, decoding and drawing beside it; returns game's result once it
++// has finished. One thread (game called here) when GX threading is off:
++// DOL_GX_THREAD=0, trace recording, or the live Aurora GX path.
++int dol_aurora_run_game(int (*game)(void*), void* arg);
++// True while the game runs on its own thread.
++bool dol_aurora_gx_threaded(void);
++// Called on the main thread after each frame the game thread presents (the
++// host's per-frame work that needs the window: menus, title). Single-threaded
++// runs leave the call to the host.
++void dol_aurora_set_frame_hook(void (*hook)(void));
 +
 +// Front-end support (launcher and in-game menu).
 +// Present one frame with no guest work (the last display copy plus the UI

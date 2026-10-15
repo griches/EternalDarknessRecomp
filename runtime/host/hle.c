@@ -24,6 +24,7 @@
 #include "host/compat.h"
 #include "host/settings.h"
 #ifdef ED_AURORA
+#include "gxruntime/aurora_backend.h"
 #include "host/frontend.h"
 #endif
 #include "game_data.h"
@@ -4293,6 +4294,49 @@ static void initialize_hle_dispatch(void) {
     }
 }
 
+#ifdef ED_AURORA
+// Once a game frame (VIFlush): the frames per second in the window title,
+// refreshed each second (ED_NO_FPS=1 leaves the title alone), and the
+// in-game menu.
+void hle_frame_boundary(void) {
+    static int fps_env = -1;
+    static unsigned frames;
+    static struct timespec mark;
+    static bool shown;
+    if (fps_env < 0)
+        fps_env = getenv("ED_NO_FPS") == NULL;
+    const bool fps_on = fps_env && g_settings.fps_counter;
+    if (!fps_on && shown) {
+        VISetWindowTitle("Eternal Darkness");
+        shown = false;
+    }
+    if (fps_on) {
+        shown = true;
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        frames++;
+        if (mark.tv_sec == 0) {
+            mark = now;
+            frames = 0;
+        } else {
+            const double dt = (double)(now.tv_sec - mark.tv_sec) +
+                              (double)(now.tv_nsec - mark.tv_nsec) * 1e-9;
+            if (dt >= 1.0) {
+                char title[64];
+                snprintf(title, sizeof title, "Eternal Darkness \u2014 %.0f fps",
+                         (double)frames / dt);
+                VISetWindowTitle(title);
+                mark = now;
+                frames = 0;
+            }
+        }
+    }
+    // Esc / the controller's Back button opens the in-game menu here, at
+    // a frame boundary, with the frame just drawn behind it.
+    frontend_frame();
+}
+#endif
+
 static bool hle_dispatch(CPUState* cpu, u32 address) {
     if (address == HLE_CALLBACK_RETURN && g_callback_active) {
         continue_irq_callback(cpu);
@@ -4403,45 +4447,11 @@ static bool hle_dispatch(CPUState* cpu, u32 address) {
         }
     }
 #ifdef ED_AURORA
-    // Game frames per second (VIFlush calls) in the window title, refreshed
-    // each second. ED_NO_FPS=1 leaves the title alone.
-    if (address == g_call_prof_vi && g_call_prof_vi != 0u) {
-        static int fps_env = -1;
-        static unsigned frames;
-        static struct timespec mark;
-        static bool shown;
-        if (fps_env < 0)
-            fps_env = getenv("ED_NO_FPS") == NULL;
-        const bool fps_on = fps_env && g_settings.fps_counter;
-        if (!fps_on && shown) {
-            VISetWindowTitle("Eternal Darkness");
-            shown = false;
-        }
-        if (fps_on) {
-            shown = true;
-            struct timespec now;
-            clock_gettime(CLOCK_MONOTONIC, &now);
-            frames++;
-            if (mark.tv_sec == 0) {
-                mark = now;
-                frames = 0;
-            } else {
-                const double dt = (double)(now.tv_sec - mark.tv_sec) +
-                                  (double)(now.tv_nsec - mark.tv_nsec) * 1e-9;
-                if (dt >= 1.0) {
-                    char title[64];
-                    snprintf(title, sizeof title, "Eternal Darkness \u2014 %.0f fps",
-                             (double)frames / dt);
-                    VISetWindowTitle(title);
-                    mark = now;
-                    frames = 0;
-                }
-            }
-        }
-        // Esc / the controller's Back button opens the in-game menu here, at
-        // a frame boundary, with the frame just drawn behind it.
-        frontend_frame();
-    }
+    // With the GX thread the backend runs this on the main thread after the
+    // frame is shown (dol_aurora_set_frame_hook).
+    if (address == g_call_prof_vi && g_call_prof_vi != 0u &&
+        !dol_aurora_gx_threaded())
+        hle_frame_boundary();
 #endif
     if (g_call_prof_fn != 0u) {
         if (address == g_call_prof_fn) {

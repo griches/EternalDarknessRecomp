@@ -182,6 +182,162 @@ static bool heap_ok(CPUState* cpu, unsigned long long blocks) {
     return true;
 }
 
+// The dispatch loop's settings, and what it leaves for the report after it.
+enum { PC_HIST = 24 };
+typedef struct RunLoop {
+    CPUState* cpu;
+    unsigned long long max_blocks;
+    unsigned long long call_addr;
+    unsigned long long trace_every;
+    unsigned long long heap_check_every;
+    unsigned long long snapshot_at_block;
+    const char* snapshot_out;
+    unsigned long long blocks;
+    const char* stop_reason;
+    u32 pc_hist[PC_HIST];
+    unsigned pc_hist_i;
+} RunLoop;
+
+// Run guest code until it stops (window closed, watchdog, a fault). With the
+// GX thread this is the game thread (dol_aurora_run_game).
+static int run_loop(void* user) {
+    RunLoop* r = (RunLoop*)user;
+    CPUState* cpu = r->cpu;
+    const unsigned long long max_blocks = r->max_blocks;
+    const unsigned long long call_addr = r->call_addr;
+    const unsigned long long trace_every = r->trace_every;
+    unsigned long long heap_check_every = r->heap_check_every;
+    const unsigned long long snapshot_at_block = r->snapshot_at_block;
+    const char* snapshot_out = r->snapshot_out;
+
+    unsigned long long blocks = 0;
+    const char* stop_reason = "max-blocks watchdog";
+    u32 last_pc = cpu->pc;
+    u32 pc_hist[PC_HIST] = {0};
+    unsigned pc_hist_i = 0;
+    while (blocks < max_blocks) {
+        // --call mode: the function returned (blr jumped to the lr sentinel).
+        if (call_addr != 0 && cpu->pc == CALL_RETURN_SENTINEL) {
+            stop_reason = "called function returned";
+            break;
+        }
+#ifdef ED_AURORA
+        if (call_addr == 0 && dol_platform_should_quit()) {
+            stop_reason = "window closed";
+            break;
+        }
+#endif
+        // In --call mode run the function in isolation: no interrupts/device
+        // polling, so its output depends only on the loaded MEM1 + arg registers.
+        if (call_addr != 0) {
+            u32 cpc = cpu->pc;
+            if (!dolrecomp_call(cpu, cpc)) {
+                stop_reason = "called function left recompiled code";
+                fprintf(stderr, "[call] pc=0x%08X has no handler (lr=0x%08X)\n",
+                        cpu->pc, cpu->lr);
+                break;
+            }
+            if (cpu->exception != 0) {
+                stop_reason = "cpu exception in called function";
+                break;
+            }
+            blocks++;
+            continue;
+        }
+        // Snapshot on request (SIGUSR1, interactive) or at a deterministic block
+        // count (--snapshot-at-block, automated/agent). Taken at the top of a
+        // dispatch iteration -- a block boundary -- where cpu->pc is a valid
+        // resume point.
+        if (snapshot_out != NULL &&
+            (g_snapshot_request ||
+             (snapshot_at_block != 0 && blocks == snapshot_at_block))) {
+            g_snapshot_request = 0;
+            write_state_snapshot(snapshot_out, cpu);
+        }
+        if (g_pcdump_request) {
+            g_pcdump_request = 0;
+            fprintf(stderr, "[pcdump] pc=0x%08X lr=0x%08X r1=0x%08X msr=0x%08X "
+                            "blocks=%llu\n  recent:",
+                    cpu->pc, cpu->lr, cpu->gpr[1], cpu->msr, blocks);
+            for (unsigned k = 0; k < PC_HIST; ++k)
+                fprintf(stderr, " 0x%08X",
+                        pc_hist[(pc_hist_i + k) % PC_HIST]);
+            fprintf(stderr, "\n");
+            dump_threads(cpu);
+            // ED_PCDUMP_MEM=path: also write raw MEM1, for tools/backchain.py.
+            if (getenv("ED_PCDUMP_MEM") != NULL)
+                dump_mem1(getenv("ED_PCDUMP_MEM"), cpu);
+        }
+
+        // Quick save / load (keys 2 / 1): at a block boundary like the
+        // snapshot above, but only once the GX FIFO is between commands.
+        if ((blocks & 0xFFFu) == 0u)
+            quickstate_poll(blocks);
+        if (g_quickstate_pending && quickstate_service(cpu))
+            continue;  // loaded: pc and the devices changed under us
+
+        // Deliver a due VI-retrace interrupt before dispatching the next block,
+        // so the redirected pc (the OS interrupt dispatcher) runs here.
+        interrupt_poll(cpu);
+        hle_poll_callback(cpu);
+
+        u32 pc = cpu->pc;
+        pc_hist[pc_hist_i++ % PC_HIST] = pc;
+        if (!dolrecomp_call(cpu, pc)) {
+            stop_reason = "pc left recompiled code (no host handler)";
+            {
+                char key[16];
+                snprintf(key, sizeof key, "0x%08X", pc);
+                gap_report_note("hle", "dispatch-miss", key, last_pc,
+                                "guest pc has no recompiled block and no HLE handler");
+            }
+            fprintf(stderr, "[run] left recompiled code: pc=0x%08X reached from "
+                            "block 0x%08X (lr=0x%08X)\n",
+                    cpu->pc, last_pc, cpu->lr);
+            fprintf(stderr, "[run] recent block entry PCs (oldest first):\n   ");
+            for (unsigned k = 0; k < PC_HIST; k++)
+                fprintf(stderr, " 0x%08X", pc_hist[(pc_hist_i + k) % PC_HIST]);
+            fprintf(stderr, "\n");
+            dump_backchain(cpu);
+            break;
+        }
+        last_pc = pc;
+        if (cpu->exception) {
+            // GameCube uses the `sc` instruction purely as a post-cache-op sync
+            // barrier: DCFlushRange/DCStoreRange/etc. end with `dcbf...; sc; blr`,
+            // and the SDK's default system-call vector simply syncs and returns.
+            // There is no real cache to wait on here, so emulate that vector by
+            // returning (rfi) to the instruction after `sc`.
+            if (cpu->exception == PPC_EXC_SYSTEM_CALL) {
+                cpu->exception = 0;
+                ppc_rfi(cpu, cpu->pc);
+                continue;
+            }
+            // Lazy FPU: a thread that is not the FPU owner used an FP
+            // instruction. Switch the FPU to it and retry the instruction.
+            if (cpu->exception == PPC_EXC_FP_UNAVAILABLE) {
+                interrupt_switch_fpu_context(cpu);
+                continue;
+            }
+            stop_reason = "cpu exception";
+            break;
+        }
+        blocks++;
+        if (heap_check_every && (blocks % heap_check_every) == 0 &&
+            !heap_ok(cpu, blocks))
+            heap_check_every = 0;  // report the first break only
+        if (trace_every && (blocks % trace_every) == 0)
+            fprintf(stderr, "[trace] block %llu pc=0x%08X lr=0x%08X r1=0x%08X\n",
+                    blocks, cpu->pc, cpu->lr, cpu->gpr[1]);
+    }
+
+    r->blocks = blocks;
+    r->stop_reason = stop_reason;
+    memcpy(r->pc_hist, pc_hist, sizeof pc_hist);
+    r->pc_hist_i = pc_hist_i;
+    return 0;
+}
+
 int main(int argc, char** argv) {
     // Keep stdout/stderr unbuffered so diagnostics are not lost when a worker
     // thread calls abort() (e.g. an Aurora FATAL) before buffered output is
@@ -481,127 +637,26 @@ int main(int argc, char** argv) {
     printf("[run] starting execution at 0x%08X (max %llu blocks)\n",
            cpu.pc, max_blocks);
 
-    unsigned long long blocks = 0;
-    const char* stop_reason = "max-blocks watchdog";
-    u32 last_pc = cpu.pc;
-    enum { PC_HIST = 24 };
-    u32 pc_hist[PC_HIST] = {0};
-    unsigned pc_hist_i = 0;
-    while (blocks < max_blocks) {
-        // --call mode: the function returned (blr jumped to the lr sentinel).
-        if (call_addr != 0 && cpu.pc == CALL_RETURN_SENTINEL) {
-            stop_reason = "called function returned";
-            break;
-        }
+    RunLoop run = {
+        .cpu = &cpu,
+        .max_blocks = max_blocks,
+        .call_addr = call_addr,
+        .trace_every = trace_every,
+        .heap_check_every = heap_check_every,
+        .snapshot_at_block = snapshot_at_block,
+        .snapshot_out = snapshot_out,
+    };
 #ifdef ED_AURORA
-        if (call_addr == 0 && dol_platform_should_quit()) {
-            stop_reason = "window closed";
-            break;
-        }
+    if (aurora_enabled) {
+        dol_aurora_set_frame_hook(hle_frame_boundary);
+        dol_aurora_run_game(run_loop, &run);
+    } else
 #endif
-        // In --call mode run the function in isolation: no interrupts/device
-        // polling, so its output depends only on the loaded MEM1 + arg registers.
-        if (call_addr != 0) {
-            u32 cpc = cpu.pc;
-            if (!dolrecomp_call(&cpu, cpc)) {
-                stop_reason = "called function left recompiled code";
-                fprintf(stderr, "[call] pc=0x%08X has no handler (lr=0x%08X)\n",
-                        cpu.pc, cpu.lr);
-                break;
-            }
-            if (cpu.exception != 0) {
-                stop_reason = "cpu exception in called function";
-                break;
-            }
-            blocks++;
-            continue;
-        }
-        // Snapshot on request (SIGUSR1, interactive) or at a deterministic block
-        // count (--snapshot-at-block, automated/agent). Taken at the top of a
-        // dispatch iteration -- a block boundary -- where cpu.pc is a valid
-        // resume point.
-        if (snapshot_out != NULL &&
-            (g_snapshot_request ||
-             (snapshot_at_block != 0 && blocks == snapshot_at_block))) {
-            g_snapshot_request = 0;
-            write_state_snapshot(snapshot_out, &cpu);
-        }
-        if (g_pcdump_request) {
-            g_pcdump_request = 0;
-            fprintf(stderr, "[pcdump] pc=0x%08X lr=0x%08X r1=0x%08X msr=0x%08X "
-                            "blocks=%llu\n  recent:",
-                    cpu.pc, cpu.lr, cpu.gpr[1], cpu.msr, blocks);
-            for (unsigned k = 0; k < PC_HIST; ++k)
-                fprintf(stderr, " 0x%08X",
-                        pc_hist[(pc_hist_i + k) % PC_HIST]);
-            fprintf(stderr, "\n");
-            dump_threads(&cpu);
-            // ED_PCDUMP_MEM=path: also write raw MEM1, for tools/backchain.py.
-            if (getenv("ED_PCDUMP_MEM") != NULL)
-                dump_mem1(getenv("ED_PCDUMP_MEM"), &cpu);
-        }
-
-        // Quick save / load (keys 2 / 1): at a block boundary like the
-        // snapshot above, but only once the GX FIFO is between commands.
-        if ((blocks & 0xFFFu) == 0u)
-            quickstate_poll(blocks);
-        if (g_quickstate_pending && quickstate_service(&cpu))
-            continue;  // loaded: pc and the devices changed under us
-
-        // Deliver a due VI-retrace interrupt before dispatching the next block,
-        // so the redirected pc (the OS interrupt dispatcher) runs here.
-        interrupt_poll(&cpu);
-        hle_poll_callback(&cpu);
-
-        u32 pc = cpu.pc;
-        pc_hist[pc_hist_i++ % PC_HIST] = pc;
-        if (!dolrecomp_call(&cpu, pc)) {
-            stop_reason = "pc left recompiled code (no host handler)";
-            {
-                char key[16];
-                snprintf(key, sizeof key, "0x%08X", pc);
-                gap_report_note("hle", "dispatch-miss", key, last_pc,
-                                "guest pc has no recompiled block and no HLE handler");
-            }
-            fprintf(stderr, "[run] left recompiled code: pc=0x%08X reached from "
-                            "block 0x%08X (lr=0x%08X)\n",
-                    cpu.pc, last_pc, cpu.lr);
-            fprintf(stderr, "[run] recent block entry PCs (oldest first):\n   ");
-            for (unsigned k = 0; k < PC_HIST; k++)
-                fprintf(stderr, " 0x%08X", pc_hist[(pc_hist_i + k) % PC_HIST]);
-            fprintf(stderr, "\n");
-            dump_backchain(&cpu);
-            break;
-        }
-        last_pc = pc;
-        if (cpu.exception) {
-            // GameCube uses the `sc` instruction purely as a post-cache-op sync
-            // barrier: DCFlushRange/DCStoreRange/etc. end with `dcbf...; sc; blr`,
-            // and the SDK's default system-call vector simply syncs and returns.
-            // There is no real cache to wait on here, so emulate that vector by
-            // returning (rfi) to the instruction after `sc`.
-            if (cpu.exception == PPC_EXC_SYSTEM_CALL) {
-                cpu.exception = 0;
-                ppc_rfi(&cpu, cpu.pc);
-                continue;
-            }
-            // Lazy FPU: a thread that is not the FPU owner used an FP
-            // instruction. Switch the FPU to it and retry the instruction.
-            if (cpu.exception == PPC_EXC_FP_UNAVAILABLE) {
-                interrupt_switch_fpu_context(&cpu);
-                continue;
-            }
-            stop_reason = "cpu exception";
-            break;
-        }
-        blocks++;
-        if (heap_check_every && (blocks % heap_check_every) == 0 &&
-            !heap_ok(&cpu, blocks))
-            heap_check_every = 0;  // report the first break only
-        if (trace_every && (blocks % trace_every) == 0)
-            fprintf(stderr, "[trace] block %llu pc=0x%08X lr=0x%08X r1=0x%08X\n",
-                    blocks, cpu.pc, cpu.lr, cpu.gpr[1]);
-    }
+        run_loop(&run);
+    const unsigned long long blocks = run.blocks;
+    const char* stop_reason = run.stop_reason;
+    const u32* pc_hist = run.pc_hist;
+    const unsigned pc_hist_i = run.pc_hist_i;
 
     if (getenv("ED_PC_HIST")) {
         fprintf(stderr, "[run] recent block entry PCs (oldest first):\n   ");

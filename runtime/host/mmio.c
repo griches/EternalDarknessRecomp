@@ -535,6 +535,9 @@ static bool efb_read_cb(void* user, CPUState* cpu, u32 ea, u8 size,
         return false;
     if (value != NULL)
         *value = dol_efb_access_mmio_read(efb, ea, size);
+#ifdef ED_AURORA
+    dol_aurora_efb_peeked();  // the frame fill runs only while peeks happen
+#endif
     // ED_EFB_PEEK_LOG=1: log CPU reads of the EFB (GXPeekARGB/GXPeekZ).
     static int peek_log = -1;
     if (peek_log < 0)

@@ -12,6 +12,10 @@
 // and advanced pc, typically to the link register).
 //
 void hle_install(CPUState* cpu);
+// Once a game frame, at VIFlush (Aurora builds): FPS in the title and the
+// in-game menu. Needs the window, so with the GX thread the backend calls it on
+// the main thread instead (dol_aurora_set_frame_hook).
+void hle_frame_boundary(void);
 
 // B2.1: dump MusyX API call counters (no-op unless ED_AUDIO_LOG is set).
 void hle_audio_api_report(void);

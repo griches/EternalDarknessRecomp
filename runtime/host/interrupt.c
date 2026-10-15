@@ -3,6 +3,9 @@
 #include "host/sdk_map.h"
 #include "host/audio.h"
 #include "host/mmio.h"
+#ifdef ED_AURORA
+#include "gxruntime/aurora_backend.h"
+#endif
 #include "gxruntime/interrupts.h"
 #include "gxruntime/si.h"
 #include "gxruntime/vi_clock.h"
@@ -378,6 +381,9 @@ void interrupt_poll(CPUState* cpu) {
         cpu->timebase += ticks;
         dol_interrupts_assert_vi_retrace(&interrupts);
         speed_note_retrace();
+#ifdef ED_AURORA
+        dol_aurora_pump_events_if_idle();
+#endif
         dol_si_latch_poll(&si, 0xFu);
         sync_si_interrupt();
     }

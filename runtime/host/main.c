@@ -346,6 +346,11 @@ int main(int argc, char** argv) {
     dvd_open_image(iso_path);  // disc image backing the file system
     dtk_init(iso_path);        // disc music streams, read from the same image
     mmio_set_disc_present(dvd_image_ready());
+    // The IPL leaves the disc header's first 0x20 bytes (game and maker code,
+    // disc number, version, streaming) at 0x80000000, where DVDGetCurrentDiskID
+    // points. Starting a game checks the save's game and maker code against it.
+    if (dvd_image_ready())
+        dvd_read_to_guest(&cpu, 0x80000000u, 0, 0x20u);
     cpu.instruction_fallback = instruction_fallback;
     // FP instructions check MSR[FP]; the run loop below answers the resulting
     // FP-unavailable exceptions with the OS's lazy FPU switch (interrupt.c).
@@ -493,6 +498,10 @@ int main(int argc, char** argv) {
                 fprintf(stderr, " 0x%08X",
                         pc_hist[(pc_hist_i + k) % PC_HIST]);
             fprintf(stderr, "\n");
+            dump_threads(&cpu);
+            // ED_PCDUMP_MEM=path: also write raw MEM1, for tools/backchain.py.
+            if (getenv("ED_PCDUMP_MEM") != NULL)
+                dump_mem1(getenv("ED_PCDUMP_MEM"), &cpu);
         }
 
         // Deliver a due VI-retrace interrupt before dispatching the next block,

@@ -703,6 +703,18 @@ static void hle_aramUploadData(CPUState* cpu) {
 // tail-call ARQ's completion routine with the request pointer. The caller
 // increments its queue count after ARQPostRequest returns; MusyX's callback
 // decrements it first, so the original bookkeeping still settles at zero.
+// ARQPostRequest(ARQRequest*, owner, type, priority, source, dest, length,
+// callback). The SDK fills the request in before queueing it, and callbacks
+// read it back: the room streamer's completion callback finds its stream
+// through request->owner, so leaving the struct unwritten hung Start Game.
+#define ARQ_REQ_NEXT 0x00u
+#define ARQ_REQ_OWNER 0x04u
+#define ARQ_REQ_TYPE 0x08u
+#define ARQ_REQ_PRIORITY 0x0Cu
+#define ARQ_REQ_SOURCE 0x10u
+#define ARQ_REQ_DEST 0x14u
+#define ARQ_REQ_LENGTH 0x18u
+#define ARQ_REQ_CALLBACK 0x1Cu
 static void hle_ARQPostRequest(CPUState* cpu) {
     u32 request = hle_arg_u32(cpu, 0);
     u32 type = hle_arg_u32(cpu, 2);
@@ -710,6 +722,16 @@ static void hle_ARQPostRequest(CPUState* cpu) {
     u32 destination = hle_arg_u32(cpu, 5);
     u32 length = hle_arg_u32(cpu, 6);
     u32 callback = hle_arg_u32(cpu, 7);
+    if (request != 0) {
+        mem_write32(cpu, request + ARQ_REQ_NEXT, 0);
+        mem_write32(cpu, request + ARQ_REQ_OWNER, hle_arg_u32(cpu, 1));
+        mem_write32(cpu, request + ARQ_REQ_TYPE, type);
+        mem_write32(cpu, request + ARQ_REQ_PRIORITY, hle_arg_u32(cpu, 3));
+        mem_write32(cpu, request + ARQ_REQ_SOURCE, source);
+        mem_write32(cpu, request + ARQ_REQ_DEST, destination);
+        mem_write32(cpu, request + ARQ_REQ_LENGTH, length);
+        mem_write32(cpu, request + ARQ_REQ_CALLBACK, callback);
+    }
     if (type == 0)
         aram_dma_to_aram(cpu->ram, source, destination, length);
     else

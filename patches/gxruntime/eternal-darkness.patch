@@ -1,3 +1,44 @@
+diff --git a/backends/aurora/aurora_backend.cpp b/backends/aurora/aurora_backend.cpp
+index d94f811..d12c4ac 100644
+--- a/backends/aurora/aurora_backend.cpp
++++ b/backends/aurora/aurora_backend.cpp
+@@ -19,6 +19,7 @@
+ #include <dolphin/pad.h>
+ #include <dolphin/vi.h>
+ #include <SDL3/SDL_audio.h>
++#include <SDL3/SDL_events.h>
+ #include <SDL3/SDL_init.h>
+ #include <SDL3/SDL_scancode.h>
+ #include <SDL3/SDL_timer.h>
+@@ -59,6 +60,7 @@ bool peek(const std::uint8_t** rgba, std::uint32_t* width,
+ 
+ namespace {
+ bool g_initialized = false;
++Uint64 g_last_present_ms = 0;  // SDL_GetTicks at the last present
+ bool g_frame_open = false;
+ bool g_should_quit = false;
+ bool g_graphics_log = false;
+@@ -1114,6 +1116,12 @@ void dol_aurora_flush_gap_report(void) {
+     flush_gxcore_gap_counters();
+ }
+ 
++void dol_aurora_pump_events_if_idle(void) {
++    if (!g_initialized || SDL_GetTicks() - g_last_present_ms < 100)
++        return;
++    SDL_PumpEvents();
++}
++
+ void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user) {
+     g_efb_frame_fill = fn;
+     g_efb_frame_fill_user = user;
+@@ -1432,6 +1440,7 @@ void aurora_backend_present(void) {
+     const unsigned long long present_fifo = g_fifo_bytes;
+     g_fifo_bytes = 0;
+     poll_events();
++    g_last_present_ms = SDL_GetTicks();
+     if (!g_should_quit) {
+         g_frame_open = aurora_begin_frame();
+ #if GXRUNTIME_HAS_AURORA_RECOMP
 diff --git a/graphics/aurora/lib/aurora.cpp b/graphics/aurora/lib/aurora.cpp
 index b09ef4d..9a5e545 100644
 --- a/graphics/aurora/lib/aurora.cpp
@@ -114,6 +155,22 @@ index bbefbee..8297108 100644
    emit(out, "    o.pos = clip;\n");
    // Vertex colors (Dolphin VertexShaderGen WriteVertexBody). First select each
    // channel's vertex color with the GX presence rules: channel 0 prefers
+diff --git a/include/gxruntime/aurora_backend.h b/include/gxruntime/aurora_backend.h
+index 6ef4cf4..29d315d 100644
+--- a/include/gxruntime/aurora_backend.h
++++ b/include/gxruntime/aurora_backend.h
+@@ -26,6 +26,11 @@ bool dol_aurora_initialize(int argc, char** argv,
+                            const AuroraBackendConfig* config);
+ void dol_aurora_shutdown(void);
+ 
++// Handle window events when nothing has been presented for 100 ms (a guest
++// loading or waiting on the disc). Without it macOS shows the busy cursor and
++// the keyboard state the pads read stops updating. Call it once a retrace.
++void dol_aurora_pump_events_if_idle(void);
++
+ // Optional: after each present, push latest present-source RGBA8 into software
+ // EFB (e.g. Strikers mmio_efb + dol_efb_access_fill_color_rgba8). Enables
+ // continuous framebuffer readback while registered. NULL clears.
 diff --git a/include/gxruntime/ax_host.h b/include/gxruntime/ax_host.h
 index 3731914..694a939 100644
 --- a/include/gxruntime/ax_host.h

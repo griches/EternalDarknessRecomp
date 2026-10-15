@@ -205,6 +205,21 @@ void audio_poll(CPUState* cpu) {
     if (g_log && (g_aid_chunks <= 10u || g_aid_chunks % 400u == 0u))
         fprintf(stderr, "[audio] AID chunk %llu: source=%08x peak=%u\n",
                 (unsigned long long)g_aid_chunks, physical, peak);
+    // ED_PCM_OUT=path: append every chunk as raw s16 stereo at the AID rate,
+    // to inspect the mix offline.
+    static FILE* pcm_out;
+    static int pcm_checked;
+    if (!pcm_checked) {
+        pcm_checked = 1;
+        const char* path = getenv("ED_PCM_OUT");
+        if (path != NULL && path[0] != '\0')
+            pcm_out = fopen(path, "wb");
+    }
+    if (pcm_out != NULL) {
+        fwrite(output, sizeof output, 1, pcm_out);
+        if ((g_aid_chunks & 1023u) == 0u)
+            fflush(pcm_out);
+    }
     static int mute = -1;  // ED_MUTE=1: keep pacing, send silence (test runs)
     if (mute < 0)
         mute = getenv("ED_MUTE") != NULL;

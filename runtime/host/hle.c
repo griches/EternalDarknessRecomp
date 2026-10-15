@@ -662,6 +662,19 @@ static void hle_salInitDsp(CPUState* cpu) {
 // synthetic CPU-window base made every stream allocation fail. GXRuntime's ARAM
 // accepts plain offsets.
 #define ARAM_USER_BASE 0x4000u
+// ED_ARAM_LOG=1: every host ARAM transfer, to find who owns an ARAM range.
+static void aram_log(CPUState* cpu, const char* path, u32 type, u32 mainmem,
+                     u32 aram, u32 length) {
+    static int enabled = -1;
+    if (enabled < 0)
+        enabled = getenv("ED_ARAM_LOG") != NULL;
+    if (enabled)
+        fprintf(stderr, "[aram] %s %s mram=0x%08X aram=0x%08X..0x%08X len=0x%X "
+                        "lr=0x%08X\n",
+                path, type == 0 ? "to-aram" : "to-mram", mainmem, aram,
+                aram + length, length, cpu->lr);
+}
+
 static void hle_ARInit(CPUState* cpu) { hle_set_u32(cpu, ARAM_USER_BASE); }
 static void hle_ARGetBaseAddress(CPUState* cpu) { hle_set_u32(cpu, ARAM_USER_BASE); }
 static void hle_ARGetSize(CPUState* cpu) { hle_set_u32(cpu, ARAM_SIZE); }
@@ -674,29 +687,18 @@ static void hle_ARStartDMA(CPUState* cpu) {
     u32 mainmem = hle_arg_u32(cpu, 1);
     u32 aram = hle_arg_u32(cpu, 2);
     u32 length = hle_arg_u32(cpu, 3);
+    aram_log(cpu, "ARStartDMA", type, mainmem, aram, length);
     if (type == 0)
         aram_dma_to_aram(cpu->ram, mainmem, aram, length);
     else
         aram_dma_to_ram(cpu->ram, mainmem, aram, length);
 }
 
-// MusyX aramUploadData normally enqueues ARQ DMA and receives an interrupt
-// later. Our ARAM copy is synchronous, so replace the whole queue operation.
-// If the caller supplied a completion callback, tail-call it with the original
-// user value; its return address is already the caller of aramUploadData.
-static void hle_aramUploadData(CPUState* cpu) {
-    u32 mainmem = hle_arg_u32(cpu, 0);
-    u32 aram = hle_arg_u32(cpu, 1);
-    u32 length = hle_arg_u32(cpu, 2);
-    u32 callback = hle_arg_u32(cpu, 4);
-    u32 user = hle_arg_u32(cpu, 5);
-    aram_dma_to_aram(cpu->ram, mainmem, aram, length);
-    if (callback) {
-        cpu->gpr[3] = user;
-        cpu->pc = callback;
-        g_hle_tail_call = true;
-    }
-}
+// MusyX's own aramUploadData runs (no HLE): it hands each request to
+// aramUploadCallback when the game set one, else to ARQPostRequest below. This
+// game sets it to stream its sample banks from the disc straight into ARAM; a
+// host shortcut that copied from main RAM uploaded memory the game never filled
+// and made every sound effect and menu tune crackle.
 
 // Some MusyX builds inline aramUploadData into aramInit, leaving ARQPostRequest
 // as the actual hardware boundary. Complete the transfer immediately and
@@ -732,10 +734,13 @@ static void hle_ARQPostRequest(CPUState* cpu) {
         mem_write32(cpu, request + ARQ_REQ_LENGTH, length);
         mem_write32(cpu, request + ARQ_REQ_CALLBACK, callback);
     }
-    if (type == 0)
+    if (type == 0) {
+        aram_log(cpu, "ARQPostRequest", 0, source, destination, length);
         aram_dma_to_aram(cpu->ram, source, destination, length);
-    else
+    } else {
+        aram_log(cpu, "ARQPostRequest", 1, destination, source, length);
         aram_dma_to_ram(cpu->ram, destination, source, length);
+    }
     if (callback) {
         cpu->gpr[3] = request;
         cpu->pc = callback;
@@ -904,6 +909,10 @@ static void hle_DVDReadPrio(CPUState* cpu) {
     u32 addr = hle_arg_u32(cpu, 1);
     u32 length = hle_arg_u32(cpu, 2);
     u32 offset = hle_arg_u32(cpu, 3);
+    if (g_hle_log)
+        fprintf(stderr, "[dvd] readprio addr=0x%08X len=%u disc=0x%08X lr=0x%08X\n",
+                addr, length, mem_read32(cpu, fi + DVD_FI_STARTADDR) + offset,
+                cpu->lr);
     dvd_read_to_guest(cpu, addr, mem_read32(cpu, fi + DVD_FI_STARTADDR) + offset, length);
     dvd_complete(cpu, fi, 0, 0, length);
     hle_set_u32(cpu, length);
@@ -914,6 +923,9 @@ static void hle_DVDReadAbsAsyncPrio(CPUState* cpu) {
     u32 block = hle_arg_u32(cpu, 0);
     u32 addr = hle_arg_u32(cpu, 1);
     u32 length = hle_arg_u32(cpu, 2);
+    if (g_hle_log)
+        fprintf(stderr, "[dvd] readabs addr=0x%08X len=%u disc=0x%08X cb=0x%08X\n",
+                addr, length, hle_arg_u32(cpu, 3), hle_arg_u32(cpu, 4));
     dvd_read_to_guest(cpu, addr, hle_arg_u32(cpu, 3), length);
     dvd_complete(cpu, block, hle_arg_u32(cpu, 4), (s32)length, length);
     hle_set_u32(cpu, 1);
@@ -3490,7 +3502,6 @@ static const HleAddrEntry kAddrHandlers[] = {
     // MusyX's CPU-side sequencer and voice engine run unchanged. Only skip the
     // physical DSP task boot; audio.c executes the resulting AX command lists.
     { 0u, hle_salInitDsp,                "salInitDsp" },
-    { 0u, hle_aramUploadData,            "aramUploadData" },
     { 0u, hle_ARQPostRequest,            "ARQPostRequest" },
     { 0u, hle_return_zero,                "DSPCheckMailToDSP" },
     // DVD: host serves the disc file system from the ISO (see DVD handlers).

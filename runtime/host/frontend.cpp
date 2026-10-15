@@ -649,6 +649,7 @@ void build_controls() {
     g_rows.push_back(vibration_row());
 
     Row mapping{"Button mapping"};
+    mapping.gap = true;  // its own group, so it does not trail the settings
     mapping.note = "See and change which button or key does what.";
     mapping.activate = [] {
         g_screen = Screen::Mapping;

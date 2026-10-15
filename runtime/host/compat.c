@@ -16,6 +16,12 @@ int ed_clock_gettime(int clock_id, struct timespec* ts) {
     ts->tv_nsec = (long)((now.QuadPart % freq.QuadPart) * 1000000000LL / freq.QuadPart);
     return 0;
 }
+
+int ed_rename_replace(const char* from, const char* to) {
+    return MoveFileExA(from, to, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)
+               ? 0
+               : -1;
+}
 #else
 // Nothing to stand in for: the POSIX calls exist.
 typedef int ed_compat_unused;

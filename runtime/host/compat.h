@@ -28,12 +28,18 @@ static inline int ed_unsetenv(const char* name) { return _putenv_s(name, ""); }
 #define unsetenv ed_unsetenv
 
 #define mkdir(path, mode) _mkdir(path)
+
+// rename() that replaces an existing target, as POSIX rename does (the
+// Windows CRT's fails instead).
+int ed_rename_replace(const char* from, const char* to);
 #define localtime_r(t, out) (localtime_s((out), (t)) == 0 ? (out) : NULL)
 
 #ifdef __cplusplus
 }
 #endif
 #else
+#include <stdio.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#define ed_rename_replace rename
 #endif

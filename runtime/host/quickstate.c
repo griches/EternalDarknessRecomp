@@ -418,6 +418,9 @@ static bool save_state(CPUState* cpu, const char* path) {
         sections++;
     else
         gx_size = 0;
+    if (gx_size == 0u)
+        fprintf(stderr, "[quick] warning: the GX decoder has no state to save; "
+                        "loading this state may draw wrongly\n");
 #endif
 
     QsFileHeader header;
@@ -455,7 +458,7 @@ static bool save_state(CPUState* cpu, const char* path) {
 
     if (fclose(f) != 0)
         w.ok = false;
-    if (!w.ok || rename(tmp, path) != 0) {
+    if (!w.ok || ed_rename_replace(tmp, path) != 0) {
         remove(tmp);
         fprintf(stderr, "[quick] save FAILED: error writing %s\n", path);
         return false;

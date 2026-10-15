@@ -4526,7 +4526,7 @@ index 4d14391..c141b7d 100644
  };
  
 diff --git a/graphics/gxcore/include/gxruntime/gxcore/shader.hpp b/graphics/gxcore/include/gxruntime/gxcore/shader.hpp
-index b9bfd5d..49f1204 100644
+index b9bfd5d..c402d7a 100644
 --- a/graphics/gxcore/include/gxruntime/gxcore/shader.hpp
 +++ b/graphics/gxcore/include/gxruntime/gxcore/shader.hpp
 @@ -12,6 +12,9 @@
@@ -4539,10 +4539,11 @@ index b9bfd5d..49f1204 100644
  #include <string>
  #include <type_traits>
  #include <vector>
-@@ -688,9 +691,34 @@ struct PlanTexture {
+@@ -688,14 +691,39 @@ struct PlanTexture {
  
  // packed uniforms, the pipeline key, and the bound texture's guest identity +
  // host bytes (converted by the substrate's GX codecs at upload).
+-struct DrawPlan {
 +// hash_bytes: the 64-bit fingerprint in render_sink.hpp (the frontend also
 +// uses it for its shared XF blocks).
 +using gxruntime::aurora_recomp::hash_bytes;
@@ -4561,7 +4562,9 @@ index b9bfd5d..49f1204 100644
 +  float zslope[3]{};            // dfdx, dfdy, f0
 +};
 +
- struct DrawPlan {
++// A draw plan's fixed-size fields (trivially copyable, so a reused plan can be
++// reset block by block); DrawPlan adds the vertex and index buffers.
++struct DrawPlanFields {
    bool ok = false;
    const char* skip_reason = nullptr; // set when ok==false
 +  PlanCrossDraw cross{};
@@ -4574,6 +4577,24 @@ index b9bfd5d..49f1204 100644
    PipelineKey pipeline{};
    VertexShaderConstants constants{};
    PixelShaderConstants pixel_constants{}; // S14 TEV color/konst/alpha uniforms
+-  std::vector<float> vertices; // kVertexFloats per vertex
+-  std::vector<std::uint16_t> indices;
+   std::uint32_t vertex_count = 0;
+   // Viewport, raw XF values (wd/2, -ht/2, zmax*2^24, xorig+342, yorig+342,
+   // farz*2^24) — the submission layer maps these through the substrate's
+@@ -750,6 +778,12 @@ struct DrawPlan {
+   float zslope_dfdy = 0.f;
+   float zslope_f0 = 0.f;
+ };
++static_assert(std::is_trivially_copyable_v<DrawPlanFields>);
++
++struct DrawPlan : DrawPlanFields {
++  std::vector<float> vertices; // kVertexFloats per vertex
++  std::vector<std::uint16_t> indices;
++};
+ 
+ // --- EFB copy-to-texture (S16) ------------------------------------------------
+ 
 diff --git a/graphics/gxcore/src/gp_state_dump.cpp b/graphics/gxcore/src/gp_state_dump.cpp
 index 2d64013..04da7f7 100644
 --- a/graphics/gxcore/src/gp_state_dump.cpp
@@ -4767,18 +4788,49 @@ index 2fb6944..e9a7c0a 100644
 +
  } // namespace gxruntime::gxcore
 diff --git a/graphics/gxcore/src/plan.cpp b/graphics/gxcore/src/plan.cpp
-index c3d1557..154b570 100644
+index c3d1557..4ee574b 100644
 --- a/graphics/gxcore/src/plan.cpp
 +++ b/graphics/gxcore/src/plan.cpp
-@@ -4,6 +4,7 @@
+@@ -3,7 +3,9 @@
+ 
  #include "gxruntime/gxcore/gxcore.hpp"
  
++#include <cstddef>
  #include <cstring>
 +#include <new>
  #include <limits>
  
  // DrawPlan construction: vertex layout/decode (Dolphin VertexLoader semantics),
-@@ -391,14 +392,15 @@ const ar::ConsumedArrayInput* find_array(const ar::ConsumedDraw& draw,
+@@ -17,6 +19,28 @@ namespace ar = gxruntime::aurora_recomp;
+ 
+ namespace {
+ 
++// --- Plan reset ----------------------------------------------------------------
++
++const DrawPlanFields kFreshPlanFields{};
++
++// Return a reused plan's fields to their defaults, rewriting only the 64-byte
++// blocks that differ from a fresh plan. One draw changes a fraction of the
++// ~7 KB; clearing all of it cost as much as building the plan, the lines being
++// last held by the thread that submitted it.
++void reset_plan_fields(DrawPlanFields& fields) {
++  constexpr std::size_t kBlock = 64;
++  auto* dst = reinterpret_cast<unsigned char*>(&fields);
++  const auto* src = reinterpret_cast<const unsigned char*>(&kFreshPlanFields);
++  std::size_t off = 0;
++  for (; off + kBlock <= sizeof(DrawPlanFields); off += kBlock)
++    if (std::memcmp(dst + off, src + off, kBlock) != 0)
++      std::memcpy(dst + off, src + off, kBlock);
++  constexpr std::size_t kRest = sizeof(DrawPlanFields) % kBlock;
++  if constexpr (kRest != 0)
++    if (std::memcmp(dst + off, src + off, kRest) != 0)
++      std::memcpy(dst + off, src + off, kRest);
++}
++
+ // --- Vertex decode (Dolphin VertexLoader semantics) ---------------------------
+ 
+ // One payload element in GC attribute order. attr uses CP array numbering
+@@ -391,14 +415,15 @@ const ar::ConsumedArrayInput* find_array(const ar::ConsumedDraw& draw,
  // Matrix-memory row -> 4 floats, from the draw's captured XF matrix state.
  // Rows 0-29 live in position_matrices (3 rows per matrix), rows 30-62 in
  // tex_matrices. Returns false when any word of the row was never written.
@@ -4797,7 +4849,7 @@ index c3d1557..154b570 100644
      return (mask & (1u << matrix)) != 0u;
    }
    if (row < 63u) {
-@@ -407,8 +409,8 @@ bool load_matrix_row(const ar::ConsumedDraw& draw, std::uint32_t row,
+@@ -407,8 +432,8 @@ bool load_matrix_row(const ar::ConsumedDraw& draw, std::uint32_t row,
      const std::uint32_t base = (rel % 3u) * 4u;
      bool valid = true;
      for (std::uint32_t w = 0; w < 4; ++w) {
@@ -4808,7 +4860,7 @@ index c3d1557..154b570 100644
          valid = false;
      }
      return valid;
-@@ -429,13 +431,24 @@ void identity_rows(float rows[3][4]) {
+@@ -429,13 +454,24 @@ void identity_rows(float rows[3][4]) {
  DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
                                        GapCounters& counters,
                                        CachedVertexAttrs* cached,
@@ -4835,7 +4887,7 @@ index c3d1557..154b570 100644
    };
  
    if (draw.cull_all) {
-@@ -472,9 +485,25 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -472,9 +508,25 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
        ++counters.alpha_compare_ignored;
    }
  
@@ -4864,7 +4916,7 @@ index c3d1557..154b570 100644
      ++counters.vertex_decode_failures;
      return skip("VCD/VAT walk underivable");
    }
-@@ -489,8 +518,8 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -489,8 +541,8 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
        static_cast<std::uint8_t>(bits(gen_mode, 1, 8) != 0u ? 1u : 0u);
    const std::uint32_t xf_numtexgens_reg = 0x103Fu - 0x1018u;
    std::uint32_t num_tex_gens = 0;
@@ -4875,7 +4927,7 @@ index c3d1557..154b570 100644
    else
      num_tex_gens = bits(gen_mode, 4, 0);
    if (num_tex_gens > kMaxTexGens) {
-@@ -518,9 +547,9 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -518,9 +570,9 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
    // lightMask4_7@11. chan_regs slot = xf_addr - 0x1009: [0]=numColorChans,
    // [1..4]=amb0/amb1/mat0/mat1, [5..8]=color0/color1/alpha0/alpha1 ctrl.
    auto lit_chan = [&](std::uint32_t slot, LightChanKey& ch) {
@@ -4887,7 +4939,7 @@ index c3d1557..154b570 100644
      ch.matsource = static_cast<std::uint8_t>(bits(v, 1, 0));
      ch.enablelighting = static_cast<std::uint8_t>(bits(v, 1, 1));
      ch.ambsource = static_cast<std::uint8_t>(bits(v, 1, 6));
-@@ -537,10 +566,10 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -537,10 +589,10 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
    // litchan 0..3). A captured channel selecting MatSource::Register drives the
    // material register; an unconfigured channel stays vertex-color passthrough.
    for (std::uint32_t j = 0; j < 4u; ++j)
@@ -4901,7 +4953,7 @@ index c3d1557..154b570 100644
      if (n > 2u)
        n = 2u;
      key.num_color_chans = static_cast<std::uint8_t>(n);
-@@ -558,21 +587,21 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -558,21 +610,21 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
    // Only count normals/lighting as ignored when we fall back to passthrough.
    if (walk.has_normal && key.lit_valid == 0u)
      ++counters.normals_ignored;
@@ -4928,7 +4980,7 @@ index c3d1557..154b570 100644
        // XFMemory.h TexMtxInfo bitfields.
        tg.projection = static_cast<std::uint8_t>(bits(info, 1, 1));
        tg.inputform = static_cast<std::uint8_t>(bits(info, 1, 2));
-@@ -589,8 +618,8 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -589,8 +641,8 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
      // base post-matrix row) + normalize (bit 8). Applied by the WGSL only for
      // Regular texgens under dualtex_enabled (Dolphin VertexShaderGen).
      const std::uint32_t post_reg = (0x1050u - 0x1018u) + i;
@@ -4939,7 +4991,7 @@ index c3d1557..154b570 100644
        tg.postmtx_index = static_cast<std::uint8_t>(bits(pinfo, 6, 0));
        tg.postmtx_normalize = static_cast<std::uint8_t>(bits(pinfo, 1, 8));
      }
-@@ -773,6 +802,18 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -773,6 +825,18 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
      plan.pe_control_valid = pe.valid;
      plan.efb_pixel_format = pe.pixel_format;
      plan.efb_z_format = pe.z_format;
@@ -4958,7 +5010,7 @@ index c3d1557..154b570 100644
      plan.early_ztest = pe.early_ztest;
      if (!pe.valid)
        ++counters.efb_format_defaulted;
-@@ -1006,11 +1047,17 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1006,11 +1070,17 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
  
    // Uniforms.
    VertexShaderConstants& c = plan.constants;
@@ -4979,7 +5031,7 @@ index c3d1557..154b570 100644
    // Normal matrix (XF 0x400): matrix M = current_pn_matrix, 3 rows of
    // 3 (Dolphin VertexShaderManager normalMatrices[3*(PosNormalMtxIdx&31)] == our
    // per-matrix [M] slot). Fall back to the position rows when it was never
-@@ -1019,16 +1066,16 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1019,16 +1089,16 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
      const std::uint32_t m = draw.current_pn_matrix;
      const bool nm_valid =
          m < DOL_GX_RECOMP_NORMAL_MATRIX_COUNT &&
@@ -5001,7 +5053,7 @@ index c3d1557..154b570 100644
        }
      }
    }
-@@ -1052,7 +1099,7 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1052,7 +1122,7 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
        return f;
      };
      for (std::uint32_t i = 0; i < 8u; ++i) {
@@ -5010,7 +5062,7 @@ index c3d1557..154b570 100644
        unpack_rgba8(w[3], c.lights[i].color);
        for (std::uint32_t k = 0; k < 3u; ++k) {
          c.lights[i].cosatt[k] = f32_of(w[4 + k]);
-@@ -1067,8 +1114,8 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1067,8 +1137,8 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
      // [3]=mat1(0x100D) — chan_regs slots 1..4.
      const std::uint32_t mat_slot[4] = {1u, 2u, 3u, 4u};
      for (std::uint32_t m = 0; m < 4u; ++m) {
@@ -5021,7 +5073,7 @@ index c3d1557..154b570 100644
                                      : 0u;
        unpack_rgba8(col, c.materials[m]);
      }
-@@ -1082,10 +1129,10 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1082,10 +1152,10 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
    // MatrixIndexA/B defaults to IDENTITY the same way. Residual is only a
    // non-identity index whose 3 rows were never captured.
    constexpr std::uint32_t kGxIdentityRow = 60u;
@@ -5036,7 +5088,7 @@ index c3d1557..154b570 100644
    for (std::uint32_t i = 0; i < key.num_tex_gens; ++i) {
      std::uint32_t row = kGxIdentityRow;
      if (i < 4u && mat_idx_a_valid)
-@@ -1098,7 +1145,7 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1098,7 +1168,7 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
      } else {
        bool resolved = true;
        for (std::uint32_t k = 0; k < 3u; ++k)
@@ -5045,7 +5097,7 @@ index c3d1557..154b570 100644
        if (!resolved) {
          identity_rows(rows);
          ++counters.unresolved_tex_matrix;
-@@ -1118,7 +1165,7 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1118,7 +1188,7 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
      constexpr std::uint32_t kPostRows =
          DOL_GX_RECOMP_POST_MATRIX_ROWS; // 64
      for (std::uint32_t r = 0; r < kPostRows; ++r)
@@ -5054,7 +5106,7 @@ index c3d1557..154b570 100644
                    sizeof c.posttransformmatrices[r]);
      for (std::uint32_t i = 0; i < key.num_tex_gens; ++i) {
        if (static_cast<TexGenType>(key.tex_gens[i].texgentype) !=
-@@ -1128,7 +1175,7 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1128,7 +1198,7 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
        bool resolved = true;
        for (std::uint32_t k = 0; k < 3u; ++k) {
          const std::uint32_t row = (base + k) & 0x3fu;
@@ -5063,7 +5115,7 @@ index c3d1557..154b570 100644
            resolved = false;
        }
        if (!resolved)
-@@ -1185,22 +1232,41 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1185,22 +1255,41 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
        ++counters.scissor_multi_rect;
    }
    if (key.textured != 0u) {
@@ -5118,7 +5170,7 @@ index c3d1557..154b570 100644
      // U2: decode sampler state for every used texmap from TX_SETMODE0/1.
      // Count sampler_defaulted when mode0 was never written for a live texmap
      // (plan falls back to BP-zero defaults: clamp/near/no-mip).
-@@ -1498,6 +1564,20 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1498,6 +1587,20 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
          }
        }
      }
@@ -5139,7 +5191,7 @@ index c3d1557..154b570 100644
    }
  
    // U6: CPU-side line/point expansion into triangle lists (WebGPU has no
-@@ -1584,6 +1664,8 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1584,6 +1687,8 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
          plan.pixel_constants.zslope[3] = 0.f;
          plan.pixel_constants.efbscale[0] = 1.f;
          plan.pixel_constants.efbscale[1] = 1.f;
@@ -5148,7 +5200,7 @@ index c3d1557..154b570 100644
        } else {
          ++counters.zfreeze_ignored;
          // Can't emit plane depth without a slope — drop per_pixel_depth so
-@@ -1594,6 +1676,14 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1594,6 +1699,14 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
      } else if (zslope != nullptr) {
        // Always recompute on non-frozen draws (Dolphin CalculateZSlope path).
        (void)capture_slope(zslope);
@@ -5163,7 +5215,7 @@ index c3d1557..154b570 100644
      }
    }
  
-@@ -1614,7 +1704,77 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1614,7 +1727,68 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
  
    plan.ok = true;
    ++counters.draws_planned;
@@ -5178,18 +5230,9 @@ index c3d1557..154b570 100644
 +                                       bool record_cross) const {
 +  // Start from a fresh plan but keep the vertex and index buffers' capacity:
 +  // a reused plan then allocates nothing per draw.
-+  {
-+    std::vector<float> vertices = std::move(plan.vertices);
-+    std::vector<std::uint16_t> indices = std::move(plan.indices);
-+    vertices.clear();
-+    indices.clear();
-+    // Re-initialise in place: one clear of the ~7 KB plan, not a fresh
-+    // temporary plus a copy over the old one.
-+    plan.~DrawPlan();
-+    new (&plan) DrawPlan();
-+    plan.vertices = std::move(vertices);
-+    plan.indices = std::move(indices);
-+  }
++  plan.vertices.clear();
++  plan.indices.clear();
++  reset_plan_fields(plan);
 +  if (draw.xf_block != nullptr)
 +    build_into_impl(plan, draw, *draw.xf_block, counters, cached, zslope,
 +                    record_cross);

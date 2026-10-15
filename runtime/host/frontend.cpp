@@ -959,6 +959,8 @@ bool run_menu() {
 
 }  // namespace
 
+std::string frontend_res_dir() { return res_dir(); }
+
 extern "C" void frontend_init(int argc, char** argv) {
     g_argc = argc;
     g_argv = argv;

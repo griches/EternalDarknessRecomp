@@ -434,6 +434,52 @@ std::string key_glyph(int action) {
     return "<span class=\"keycap\">" + name + "</span>";
 }
 
+std::string glyph_set() {
+    if (gamepad() == nullptr)
+        return "kb";
+    return brand() == kPlayStation ? "ps" : brand() == kNintendo ? "switch" : "xbox";
+}
+
+std::string action_glyph(int action, int preference) {
+    const std::string set = glyph_set();
+    if (set == "kb") {
+        // The key's icon file, from the menu's keycap mapping.
+        const std::string img = key_glyph(action);
+        const size_t at = img.find("glyphs/");
+        if (at == std::string::npos)
+            return "";
+        const size_t end = img.find('"', at);
+        return img.substr(at + 7, end - at - 7);
+    }
+    // Face buttons for the face cells; bumpers, then triggers, for the
+    // shoulder cells (so menu paging pairs LB with RB); else the first.
+    auto rank = [&](int n) {
+        if (n == kNone)
+            return 0;
+        if (preference == kFaceButton)
+            return n >= kSouth && n <= kNorth ? 3 : 1;
+        if (preference == kShoulderButton)
+            return n == kLB || n == kRB ? 3 : n == kLT || n == kRT ? 2 : 1;
+        return 1;
+    };
+    int pick = kNone;
+    for (int n : g_bindings[action].pad)
+        if (rank(n) > rank(pick))
+            pick = n;
+    return pick == kNone ? "" : set + "/" + kNativeIds[pick] + ".png";
+}
+
+uint64_t glyph_signature() {
+    uint64_t h = 1469598103934665603ull;
+    auto mix = [&](const std::string& text) {
+        for (unsigned char c : text)
+            h = (h ^ c) * 1099511628211ull;
+    };
+    mix(glyph_set());
+    mix(serialize());
+    return h;
+}
+
 std::string controller_name() {
     SDL_Gamepad* pad = gamepad();
     if (pad == nullptr)

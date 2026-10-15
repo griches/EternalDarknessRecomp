@@ -23,4 +23,7 @@ void frontend_frame(void);
 
 #ifdef __cplusplus
 }
+#include <string>
+// The res folder (fonts, menus, icons).
+std::string frontend_res_dir();
 #endif

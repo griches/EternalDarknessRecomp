@@ -43,7 +43,10 @@ as toggles, LB/RB as the GameCube L/R for paging the game's menus, reload
 X/Square, quickcast Y/Triangle) or
 Custom (select an action, then press a button, trigger or key), Sprint, Creep
 and Target as hold or toggle, stick deadzone and vibration. Bindings show
-as Xbox, PlayStation or Switch button icons for the connected controller.
+as Xbox, PlayStation or Switch button icons for the connected controller, and
+the game's own prompts ("B Examine", the inventory's L/R) are redrawn with the
+same icons for the button that does each action (keyboard keys with no
+controller).
 
 Quick save: 2 saves the whole machine to `build/runs/quick.state` and 1 loads
 it back, in the same session or after a restart (`ED_QUICKSTATE=path` picks

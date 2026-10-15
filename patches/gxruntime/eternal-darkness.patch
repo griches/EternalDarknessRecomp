@@ -1,5 +1,5 @@
 diff --git a/backends/aurora/aurora_backend.cpp b/backends/aurora/aurora_backend.cpp
-index d94f811..efe572f 100644
+index d94f811..c6381cd 100644
 --- a/backends/aurora/aurora_backend.cpp
 +++ b/backends/aurora/aurora_backend.cpp
 @@ -19,7 +19,9 @@
@@ -12,7 +12,7 @@ index d94f811..efe572f 100644
  #include <SDL3/SDL_scancode.h>
  #include <SDL3/SDL_timer.h>
  
-@@ -30,9 +32,12 @@
+@@ -30,12 +32,16 @@
  #include <cstdio>
  #include <cstdlib>
  #include <cstring>
@@ -25,12 +25,25 @@ index d94f811..efe572f 100644
  #include <span>
  #include <string>
  #include <unordered_map>
-@@ -46,9 +51,21 @@ namespace aurora::gfx::gxcore {
++#include <vector>
+ 
+ #if GXRUNTIME_HAS_AURORA_RECOMP
+ // gxcore substrate submission lives in the Aurora fork (lib/gfx/gxcore_draw.cpp),
+@@ -46,9 +52,30 @@ namespace aurora::gfx::gxcore {
  bool submit_draw_plan(const gxruntime::gxcore::DrawPlan& plan);
  void copy_efb_to_texture(const gxruntime::gxcore::EfbCopyCommand& cmd);
  void reset_texture_cache();
 +int take_frame_widescreen_vote() noexcept;
 +void set_widescreen_hud(bool on) noexcept;
++struct TextureOverride {
++  bool (*claims)(uint32_t format, uint32_t width, uint32_t height, void* user) = nullptr;
++  bool (*apply)(const uint8_t* rgba, uint32_t width, uint32_t height,
++                std::vector<uint8_t>* out, uint32_t* out_width, uint32_t* out_height,
++                void* user) = nullptr;
++  uint64_t (*generation)(void* user) = nullptr;
++  void* user = nullptr;
++};
++void set_texture_override(const TextureOverride& override_ops) noexcept;
  } // namespace aurora::gfx::gxcore
  #endif
  
@@ -47,7 +60,7 @@ index d94f811..efe572f 100644
  // Forward for continuous EFB readback attach (fork-internal).
  namespace aurora::gfx::efb_readback {
  void set_continuous(bool enabled) noexcept;
-@@ -57,8 +74,18 @@ bool peek(const std::uint8_t** rgba, std::uint32_t* width,
+@@ -57,8 +84,18 @@ bool peek(const std::uint8_t** rgba, std::uint32_t* width,
            std::uint32_t* height) noexcept;
  } // namespace aurora::gfx::efb_readback
  
@@ -66,7 +79,7 @@ index d94f811..efe572f 100644
  bool g_frame_open = false;
  bool g_should_quit = false;
  bool g_graphics_log = false;
-@@ -112,6 +139,24 @@ std::array<PendingTlutMetadata, 20> g_pending_tluts{};
+@@ -112,6 +149,24 @@ std::array<PendingTlutMetadata, 20> g_pending_tluts{};
  // validating sink checked. The live Aurora path stays authoritative; this only
  // proves the consumer survives real FIFO traffic ahead of renderer cutover.
  gxruntime::aurora_recomp::RetailGxFrontend g_shadow_frontend;
@@ -91,7 +104,7 @@ index d94f811..efe572f 100644
  gxruntime::aurora_recomp::ConsumingAuroraRenderSink g_shadow_packet_sink;
  bool g_shadow_frontend_enabled = false;
  bool g_shadow_frontend_failed = false;
-@@ -379,13 +424,39 @@ unsigned long long g_trace_present_scope_frame = 0ull;
+@@ -379,13 +434,39 @@ unsigned long long g_trace_present_scope_frame = 0ull;
  bool g_trace_frame_begun = false;
  unsigned long long g_trace_frames_recorded = 0ull;
  gxruntime::aurora_recomp::trace::TraceWriter g_trace_writer;
@@ -138,7 +151,7 @@ index d94f811..efe572f 100644
  
  unsigned long long trace_current_frame() {
      return g_trace_present_scope_frame != 0ull ? g_trace_present_scope_frame
-@@ -435,6 +506,17 @@ bool trace_should_record() {
+@@ -435,6 +516,17 @@ bool trace_should_record() {
          g_trace_writer.frame_begin(static_cast<u32>(frame));
          g_trace_frame_begun = true;
          ++g_trace_frames_recorded;
@@ -156,7 +169,7 @@ index d94f811..efe572f 100644
      }
      return true;
  }
-@@ -442,18 +524,46 @@ bool trace_should_record() {
+@@ -442,18 +534,46 @@ bool trace_should_record() {
  void trace_record_mem_update(u32 address, u32 size, const void* data) {
      if (size == 0 || data == nullptr || !trace_should_record())
          return;
@@ -212,7 +225,7 @@ index d94f811..efe572f 100644
  }
  
  void trace_close_and_log() {
-@@ -491,6 +601,10 @@ void trace_on_present() {
+@@ -491,6 +611,10 @@ void trace_on_present() {
          trace_close_and_log();
      g_trace_present_scope_frame = 0ull;
      g_trace_frame_begun = false;
@@ -223,7 +236,7 @@ index d94f811..efe572f 100644
  }
  // ---------------------------------------------------------------------------
  
-@@ -937,7 +1051,7 @@ bool dol_aurora_initialize(int argc, char** argv,
+@@ -937,7 +1061,7 @@ bool dol_aurora_initialize(int argc, char** argv,
      g_trace_present_scope_frame = 0ull;
      g_trace_frame_begun = false;
      g_trace_frames_recorded = 0ull;
@@ -232,7 +245,7 @@ index d94f811..efe572f 100644
      const char* trace_out = std::getenv("DOL_AURORA_RECOMP_TRACE_OUT");
      if (trace_out != nullptr && trace_out[0] != '\0') {
          g_trace_path = trace_out;
-@@ -1114,6 +1228,68 @@ void dol_aurora_flush_gap_report(void) {
+@@ -1114,6 +1238,99 @@ void dol_aurora_flush_gap_report(void) {
      flush_gxcore_gap_counters();
  }
  
@@ -272,6 +285,37 @@ index d94f811..efe572f 100644
 +    g_should_quit = true;
 +}
 +
++void dol_aurora_set_texture_override(const DolAuroraTextureOverride* ops) {
++#if GXRUNTIME_HAS_AURORA_RECOMP
++    static DolAuroraTextureOverride s_ops{};
++    aurora::gfx::gxcore::TextureOverride bridge{};
++    if (ops != nullptr) {
++        s_ops = *ops;
++        bridge.claims = [](uint32_t format, uint32_t width, uint32_t height, void*) {
++            return s_ops.claims != nullptr && s_ops.claims(format, width, height);
++        };
++        bridge.apply = [](const uint8_t* rgba, uint32_t width, uint32_t height,
++                          std::vector<uint8_t>* out, uint32_t* out_width,
++                          uint32_t* out_height, void*) {
++            uint8_t* data = nullptr;
++            if (s_ops.apply == nullptr ||
++                !s_ops.apply(rgba, width, height, &data, out_width, out_height) ||
++                data == nullptr)
++                return false;
++            out->assign(data, data + static_cast<size_t>(*out_width) * *out_height * 4u);
++            std::free(data);
++            return true;
++        };
++        bridge.generation = [](void*) -> uint64_t {
++            return s_ops.generation != nullptr ? s_ops.generation() : 0u;
++        };
++    }
++    aurora::gfx::gxcore::set_texture_override(bridge);
++#else
++    (void)ops;
++#endif
++}
++
 +void dol_aurora_set_widescreen_hud(bool edges) {
 +#if GXRUNTIME_HAS_AURORA_RECOMP
 +    aurora::gfx::gxcore::set_widescreen_hud(edges);
@@ -301,7 +345,7 @@ index d94f811..efe572f 100644
  void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user) {
      g_efb_frame_fill = fn;
      g_efb_frame_fill_user = user;
-@@ -1212,6 +1388,60 @@ void aurora_backend_present(void) {
+@@ -1212,6 +1429,60 @@ void aurora_backend_present(void) {
          }
      }
      ++g_present_count;
@@ -362,7 +406,7 @@ index d94f811..efe572f 100644
      if (g_frame_pacing_log &&
          (g_present_count <= 10 || (g_present_count % 60) == 0)) {
          const AuroraStats* stats = aurora_get_stats();
-@@ -1432,6 +1662,7 @@ void aurora_backend_present(void) {
+@@ -1432,6 +1703,7 @@ void aurora_backend_present(void) {
      const unsigned long long present_fifo = g_fifo_bytes;
      g_fifo_bytes = 0;
      poll_events();
@@ -370,7 +414,7 @@ index d94f811..efe572f 100644
      if (!g_should_quit) {
          g_frame_open = aurora_begin_frame();
  #if GXRUNTIME_HAS_AURORA_RECOMP
-@@ -1482,7 +1713,13 @@ void aurora_backend_gx_write(u64 value, u8 size) {
+@@ -1482,7 +1754,13 @@ void aurora_backend_gx_write(u64 value, u8 size) {
          return;
      g_fifo_bytes += size;
  #if GXRUNTIME_HAS_AURORA_RECOMP
@@ -385,7 +429,7 @@ index d94f811..efe572f 100644
      // Record AFTER the shadow write so MEM_UPDATEs its resolves emitted
      // precede this GX_WRITE in the trace (replay reads them first), and
      // BEFORE the live-Aurora forwarding below so the pristine value is
-@@ -1796,6 +2033,9 @@ u32 aurora_backend_pad_read(DolPadState state[4]) {
+@@ -1796,6 +2074,9 @@ u32 aurora_backend_pad_read(DolPadState state[4]) {
              .error = status[i].err,
          };
      }
@@ -395,7 +439,7 @@ index d94f811..efe572f 100644
      return motor_mask;
  }
  
-@@ -1807,7 +2047,18 @@ bool aurora_backend_pad_recalibrate(u32 mask) {
+@@ -1807,7 +2088,18 @@ bool aurora_backend_pad_recalibrate(u32 mask) {
      return PADRecalibrate(mask) != FALSE;
  }
  
@@ -414,7 +458,7 @@ index d94f811..efe572f 100644
      PADControlMotor(channel, command);
  }
  
-@@ -1848,6 +2099,7 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1848,6 +2140,7 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
  
      int queued = SDL_GetAudioStreamQueued(g_audio_stream);
      unsigned waited_ms = 0;
@@ -422,7 +466,7 @@ index d94f811..efe572f 100644
      while (queued > max_queued_bytes && waited_ms < 20u) {
          g_audio_throttle_count++;
          if (g_audio_queue_log &&
-@@ -1860,8 +2112,17 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1860,8 +2153,17 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
                           max_queued_bytes);
          SDL_Delay(1);
          waited_ms++;
@@ -440,7 +484,7 @@ index d94f811..efe572f 100644
  
      const bool low_queue =
          queued >= 0 && queued < bytes_per_second / 100;
-@@ -1886,6 +2147,169 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1886,6 +2188,169 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
      }
  }
  
@@ -691,7 +735,7 @@ index b09ef4d..c293c6d 100644
 +  }
 +}
 diff --git a/graphics/aurora/lib/gfx/gxcore_draw.cpp b/graphics/aurora/lib/gfx/gxcore_draw.cpp
-index 71136b9..c916753 100644
+index 71136b9..c6d4c8d 100644
 --- a/graphics/aurora/lib/gfx/gxcore_draw.cpp
 +++ b/graphics/aurora/lib/gfx/gxcore_draw.cpp
 @@ -19,6 +19,8 @@
@@ -843,7 +887,7 @@ index 71136b9..c916753 100644
    gfx::resolve_pass(it->second, srcRect, do_clear && cmd.color_update,
                      do_clear && cmd.alpha_update,
                      do_clear && cmd.depth_update,
-@@ -782,10 +844,94 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -782,10 +844,99 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
    }
  }
  
@@ -877,6 +921,11 @@ index 71136b9..c916753 100644
 +}
 +
 +void set_widescreen_hud(bool on) noexcept { g_widescreenHud = on; }
++
++TextureOverride g_textureOverride;
++void set_texture_override(const TextureOverride& override_ops) noexcept {
++  g_textureOverride = override_ops;
++}
 +
 +// NDC x shift for one draw (0: leave it).
 +float widescreen_hud_shift(const gxc::DrawPlan& plan) {
@@ -938,7 +987,7 @@ index 71136b9..c916753 100644
  
    if (plan.viewport_valid) {
      // Raw XF viewport -> logical viewport, the raw path's own formula
-@@ -839,10 +985,22 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -839,10 +990,28 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      const uint32_t size = std::min(tsize, available);
      // Hash the actual source texels (+ TLUT for CI) so a content change under an
      // unchanged guest identity is a distinct cache entry — see TextureKey.
@@ -962,10 +1011,36 @@ index 71136b9..c916753 100644
 +            XXH3_64bits_withSeed(tlut_data, tlut_available, content_hash);
 +      g_frameTextureHashes.emplace(hash_key, content_hash);
 +    }
++    const bool overridden =
++        g_textureOverride.claims != nullptr &&
++        g_textureOverride.claims(format, width, height, g_textureOverride.user);
++    if (overridden && g_textureOverride.generation != nullptr)
++      content_hash ^= (g_textureOverride.generation(g_textureOverride.user) + 1) *
++                      0x9E3779B97F4A7C15ull;
      const TextureKey key{address,     tsize,        format,      width,
                           height,      tlut_address, tlut_format, tlut_entries,
                           content_hash};
-@@ -892,7 +1050,96 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -869,7 +1038,18 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+       decoded = gxc::decode_texture(format, width, height, bytes, size);
+     }
+     TextureHandle handle;
+-    if (!decoded.empty()) {
++    std::vector<uint8_t> replaced;
++    uint32_t replaced_w = 0, replaced_h = 0;
++    if (overridden && !decoded.empty() && g_textureOverride.apply != nullptr &&
++        g_textureOverride.apply(decoded.data(), width, height, &replaced, &replaced_w,
++                                &replaced_h, g_textureOverride.user) &&
++        replaced.size() == static_cast<size_t>(replaced_w) * replaced_h * 4u) {
++      handle = new_static_texture_2d(
++          replaced_w, replaced_h, 1, GX_TF_RGBA8_PC,
++          ArrayRef<uint8_t>{replaced.data(), replaced.size()}, false,
++          "GXCore Texture (replaced)");
++      ++g_textureCacheStats.uploads;
++    } else if (!decoded.empty()) {
+       handle = new_static_texture_2d(
+           width, height, 1, GX_TF_RGBA8_PC,
+           ArrayRef<uint8_t>{decoded.data(), decoded.size()}, false,
+@@ -892,7 +1072,96 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    };
  
    BindGroupRef textureBindGroup = 0;
@@ -1062,7 +1137,7 @@ index 71136b9..c916753 100644
      if (plan.texmap_mask == 0u) {
        // Single-texmap fast path: primary texture + plan.sampler at binding 0/1.
        if (plan.has_texture) {
-@@ -919,6 +1166,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -919,6 +1188,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            textureBindGroup = bind_group_ref(descriptor);
          }
        }
@@ -1070,7 +1145,7 @@ index 71136b9..c916753 100644
      } else {
        // Multi-texmap: bind each used texmap at 2t (texture) / 2t+1 (sampler),
        // matching the WGSL declarations. Per-texmap PlanSampler from
-@@ -951,8 +1199,10 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -951,8 +1221,10 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
          entries.push_back(WGPUBindGroupEntry{
              .binding = 2u * t + 1u, .sampler = heldSamplers.back().Get()});
        }
@@ -1082,7 +1157,7 @@ index 71136b9..c916753 100644
        const WGPUBindGroupDescriptor descriptor{
            .label = {"GXCore Texture Bind Group", WGPU_STRLEN},
            .layout = texture_bind_group_layout(plan.texmap_mask).Get(),
-@@ -960,6 +1210,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -960,6 +1232,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            .entries = entries.data(),
        };
        textureBindGroup = bind_group_ref(descriptor);
@@ -1090,7 +1165,7 @@ index 71136b9..c916753 100644
      }
    }
  
-@@ -969,24 +1220,63 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -969,24 +1242,63 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    const auto idxRange = push_indices(
        reinterpret_cast<const uint8_t*>(plan.indices.data()),
        plan.indices.size() * sizeof(uint16_t), 4);
@@ -1166,10 +1241,19 @@ index 71136b9..c916753 100644
          .idxRange = idxRange,
          .uniformRange = uniformRange,
 diff --git a/graphics/aurora/lib/gfx/gxcore_draw.hpp b/graphics/aurora/lib/gfx/gxcore_draw.hpp
-index 0a23a3f..45dc04e 100644
+index 0a23a3f..8f5a217 100644
 --- a/graphics/aurora/lib/gfx/gxcore_draw.hpp
 +++ b/graphics/aurora/lib/gfx/gxcore_draw.hpp
-@@ -83,6 +83,13 @@ struct TextureCacheStats {
+@@ -1,5 +1,8 @@
+ #pragma once
+ 
++#include <cstdint>
++#include <vector>
++
+ // gxcore substrate integration (63/S12): the 4th per-type draw module beside
+ // clear/gx/rmlui. Pipelines and WGSL come from the headless
+ // gxruntime::gxcore lib; this file owns only the wgpu plumbing (pipeline
+@@ -83,6 +86,28 @@ struct TextureCacheStats {
  };
  const TextureCacheStats& texture_cache_stats();
  
@@ -1179,6 +1263,21 @@ index 0a23a3f..45dc04e 100644
 +int take_frame_widescreen_vote() noexcept;
 +// Move a squeezed widescreen HUD's side elements out to the screen edges.
 +void set_widescreen_hud(bool on) noexcept;
++
++// Host texture replacement (e.g. a game's button icons drawn for the player's
++// controller). claims() is asked by format/size before the cache lookup and
++// generation() is mixed into the cache key, so changing it re-decodes;
++// apply() gets the decoded RGBA8 texels and may return a replacement of any
++// size (sampling is by normalised coordinates).
++struct TextureOverride {
++  bool (*claims)(uint32_t format, uint32_t width, uint32_t height, void* user) = nullptr;
++  bool (*apply)(const uint8_t* rgba, uint32_t width, uint32_t height,
++                std::vector<uint8_t>* out, uint32_t* out_width, uint32_t* out_height,
++                void* user) = nullptr;
++  uint64_t (*generation)(void* user) = nullptr;
++  void* user = nullptr;
++};
++void set_texture_override(const TextureOverride& override_ops) noexcept;
 +
  // U8 dst-alpha: pipelines created with use_dst_alpha while DualSourceBlending
  // was unavailable (single-source SrcAlpha fallback). Zero when feature present.
@@ -1516,10 +1615,19 @@ index e21b335..80dc91b 100644
        // Unknown kinds are forward-compatible: skip.
        break;
 diff --git a/graphics/frontend/src/retail_gx_frontend.cpp b/graphics/frontend/src/retail_gx_frontend.cpp
-index 06fff92..f30079f 100644
+index 06fff92..0ec7b57 100644
 --- a/graphics/frontend/src/retail_gx_frontend.cpp
 +++ b/graphics/frontend/src/retail_gx_frontend.cpp
-@@ -246,11 +246,13 @@ std::uint32_t payload_pn_matrix_mask(const DolGxRecompState& state,
+@@ -2,6 +2,8 @@
+ #include "gxruntime/aurora_recomp/retail_gx_frontend.hpp"
+ #include "gxruntime/aurora_recomp/retail_gx_frontend_c.h"
+ 
++#include <cstdio>
++#include <cstdlib>
+ #include <cstring>
+ #include <new>
+ 
+@@ -246,11 +248,13 @@ std::uint32_t payload_pn_matrix_mask(const DolGxRecompState& state,
    return mask;
  }
  
@@ -1538,7 +1646,7 @@ index 06fff92..f30079f 100644
    if (state.viewport_valid) {
      out.transform_flags |= kDrawTransformViewportValid;
      std::memcpy(out.viewport, state.viewport, sizeof(out.viewport));
-@@ -292,7 +294,6 @@ DrawTransformSnapshot snapshot_transform(const DolGxRecompState& state,
+@@ -292,7 +296,6 @@ DrawTransformSnapshot snapshot_transform(const DolGxRecompState& state,
                sizeof(out.post_matrix_word_mask));
    out.dualtex_info = state.dualtex_info;
    out.dualtex_valid = state.dualtex_valid;
@@ -1546,7 +1654,7 @@ index 06fff92..f30079f 100644
  }
  
  } // namespace
-@@ -324,6 +325,8 @@ void RetailGxFrontend::reset(const DolGuestAddressResolver* resolver) {
+@@ -324,6 +327,8 @@ void RetailGxFrontend::reset(const DolGuestAddressResolver* resolver) {
    last_error_b_ = 0u;
    last_error_c_ = 0u;
    last_error_d_ = 0u;
@@ -1555,7 +1663,7 @@ index 06fff92..f30079f 100644
  }
  
  bool RetailGxFrontend::set_vertex_layout(std::uint8_t vtx_fmt,
-@@ -386,6 +389,9 @@ bool RetailGxFrontend::flush(AuroraRenderSink* sink) {
+@@ -386,6 +391,9 @@ bool RetailGxFrontend::flush(AuroraRenderSink* sink) {
      (void)dol_gx_recomp_trace_events(&state_, &first_event);
    }
  
@@ -1565,7 +1673,7 @@ index 06fff92..f30079f 100644
    std::size_t consumed = 0;
    if (!parse_stream(fifo_buffer_, true, true, 0u, &consumed))
      return false;
-@@ -395,6 +401,7 @@ bool RetailGxFrontend::flush(AuroraRenderSink* sink) {
+@@ -395,6 +403,7 @@ bool RetailGxFrontend::flush(AuroraRenderSink* sink) {
                         fifo_buffer_.begin() +
                             static_cast<std::ptrdiff_t>(consumed));
    }
@@ -1573,7 +1681,7 @@ index 06fff92..f30079f 100644
    notify_events(first_event);
  
    if (sink == nullptr)
-@@ -419,6 +426,9 @@ bool RetailGxFrontend::write_display_list(std::span<const std::uint8_t> bytes,
+@@ -419,6 +428,9 @@ bool RetailGxFrontend::write_display_list(std::span<const std::uint8_t> bytes,
    // Mirrors the 0x40 opcode branch of parse_stream: a zero-size list is a
    // no-op, the list bytes are recorded, then parsed at DL depth with partial
    // commands forbidden and full consumption required.
@@ -1583,7 +1691,7 @@ index 06fff92..f30079f 100644
    if (!bytes.empty()) {
      if (!dol_gx_recomp_push_fifo(&state_, bytes.data(),
                                   static_cast<std::uint32_t>(bytes.size())))
-@@ -429,6 +439,7 @@ bool RetailGxFrontend::write_display_list(std::span<const std::uint8_t> bytes,
+@@ -429,6 +441,7 @@ bool RetailGxFrontend::write_display_list(std::span<const std::uint8_t> bytes,
        return false;
      }
    }
@@ -1591,7 +1699,7 @@ index 06fff92..f30079f 100644
    notify_events(first_event);
  
    if (sink == nullptr)
-@@ -450,12 +461,16 @@ bool RetailGxFrontend::replay_fifo(std::span<const std::uint8_t> bytes,
+@@ -450,12 +463,16 @@ bool RetailGxFrontend::replay_fifo(std::span<const std::uint8_t> bytes,
      (void)dol_gx_recomp_trace_events(&state_, &first_event);
    }
  
@@ -1608,7 +1716,7 @@ index 06fff92..f30079f 100644
    notify_events(first_event);
  
    if (sink == nullptr)
-@@ -467,6 +482,33 @@ bool RetailGxFrontend::replay_fifo(std::span<const std::uint8_t> bytes,
+@@ -467,6 +484,33 @@ bool RetailGxFrontend::replay_fifo(std::span<const std::uint8_t> bytes,
    return true;
  }
  
@@ -1642,7 +1750,7 @@ index 06fff92..f30079f 100644
  void RetailGxFrontend::notify_events(std::uint32_t first_event) {
    if (event_observer_ == nullptr)
      return;
-@@ -515,6 +557,11 @@ bool RetailGxFrontend::parse_stream(std::span<const std::uint8_t> bytes,
+@@ -515,6 +559,11 @@ bool RetailGxFrontend::parse_stream(std::span<const std::uint8_t> bytes,
  
    std::size_t pos = 0;
    while (pos < bytes.size()) {
@@ -1654,7 +1762,7 @@ index 06fff92..f30079f 100644
      const std::uint8_t cmd = bytes[pos];
      if (cmd == 0x00u) {
        if (record_fifo_bytes &&
-@@ -631,11 +678,17 @@ bool RetailGxFrontend::parse_stream(std::span<const std::uint8_t> bytes,
+@@ -631,11 +680,17 @@ bool RetailGxFrontend::parse_stream(std::span<const std::uint8_t> bytes,
        in_display_list_ = true;
        dl_command_offset_ = call_offset;
        std::size_t dl_consumed = 0;
@@ -1677,7 +1785,7 @@ index 06fff92..f30079f 100644
          in_display_list_ = prev_in_dl;
          dl_command_offset_ = prev_dl_off;
          return false;
-@@ -710,13 +763,19 @@ bool RetailGxFrontend::parse_stream(std::span<const std::uint8_t> bytes,
+@@ -710,13 +765,19 @@ bool RetailGxFrontend::parse_stream(std::span<const std::uint8_t> bytes,
        const std::size_t vertex_bytes =
            static_cast<std::size_t>(vertex_count) * vertex_size;
        const std::size_t command_size = 3u + vertex_bytes;
@@ -1698,7 +1806,7 @@ index 06fff92..f30079f 100644
        if (!handle_draw(cmd,
                         std::span<const std::uint8_t>{bytes.data() + pos + 3u,
                                                       vertex_bytes},
-@@ -754,6 +813,11 @@ bool RetailGxFrontend::handle_bp(std::uint32_t raw) {
+@@ -754,6 +815,11 @@ bool RetailGxFrontend::handle_bp(std::uint32_t raw) {
    const std::uint32_t value = raw & 0x00FFFFFFu;
    if (!dol_gx_recomp_note_bp_reg(&state_, reg, value))
      return false;
@@ -1710,7 +1818,7 @@ index 06fff92..f30079f 100644
  
    std::uint8_t slot = 0;
    if (map_image0_reg(reg, &slot) || map_image3_reg(reg, &slot))
-@@ -882,8 +946,8 @@ bool RetailGxFrontend::handle_draw(std::uint8_t command,
+@@ -882,8 +948,8 @@ bool RetailGxFrontend::handle_draw(std::uint8_t command,
      // Retain this draw's raw per-vertex bytes in trace order; emit_new_packets
      // pops them in lockstep so each Draw packet references its own payload.
      draw_payload_queue_.emplace_back(vertex_data.begin(), vertex_data.end());
@@ -1721,7 +1829,7 @@ index 06fff92..f30079f 100644
    }
  
    for (std::uint32_t i = 0u; i < layout->indexed_attr_count; ++i) {
-@@ -931,10 +995,13 @@ bool RetailGxFrontend::emit_new_packets(AuroraRenderSink& sink,
+@@ -931,10 +997,13 @@ bool RetailGxFrontend::emit_new_packets(AuroraRenderSink& sink,
    if (first_event > events.size())
      return false;
  
@@ -1736,7 +1844,7 @@ index 06fff92..f30079f 100644
      // Draw events are emitted exactly once, in order, so the retained payloads
      // pop FIFO in lockstep. Attach this draw's raw bytes for the issuing sink.
      if (packet.kind == RenderPacketKind::Draw &&
-@@ -989,6 +1056,16 @@ bool RetailGxFrontend::emit_new_packets(AuroraRenderSink& sink,
+@@ -989,6 +1058,16 @@ bool RetailGxFrontend::emit_new_packets(AuroraRenderSink& sink,
                    sizeof(packet.draw.post_matrix_word_mask));
        packet.draw.dualtex_info = transform.dualtex_info;
        packet.draw.dualtex_valid = transform.dualtex_valid;
@@ -1753,7 +1861,7 @@ index 06fff92..f30079f 100644
      }
      if (!sink.submit_packet(packet))
        return false;
-@@ -1021,6 +1098,195 @@ void RetailGxFrontend::drain_emitted_packets(std::uint32_t emitted_count) {
+@@ -1021,6 +1100,195 @@ void RetailGxFrontend::drain_emitted_packets(std::uint32_t emitted_count) {
    emitted_trace_count_ = 0u;
  }
  
@@ -2321,7 +2429,7 @@ index 9c2f7bb..6dd6411 100644
 +
  #endif
 diff --git a/include/gxruntime/aurora_backend.h b/include/gxruntime/aurora_backend.h
-index 6ef4cf4..53dfdb2 100644
+index 6ef4cf4..f506b52 100644
 --- a/include/gxruntime/aurora_backend.h
 +++ b/include/gxruntime/aurora_backend.h
 @@ -5,6 +5,7 @@
@@ -2344,7 +2452,7 @@ index 6ef4cf4..53dfdb2 100644
  // Optional: after each present, push latest present-source RGBA8 into software
  // EFB (e.g. Strikers mmio_efb + dol_efb_access_fill_color_rgba8). Enables
  // continuous framebuffer readback while registered. NULL clears.
-@@ -40,6 +46,60 @@ void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user);
+@@ -40,6 +46,71 @@ void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user);
  // from shutdown (second call only bumps if counters grew).
  void dol_aurora_flush_gap_report(void);
  
@@ -2385,6 +2493,17 @@ index 6ef4cf4..53dfdb2 100644
 +// every pad read after Aurora's own; return true to use the filled state.
 +typedef bool (*DolAuroraPadOverrideFn)(DolPadState* state);
 +void dol_aurora_set_pad0_override(DolAuroraPadOverrideFn fn);
++// Replace a texture's decoded texels (the game's button icons, say): claims
++// is asked by GX format and size, generation changes force a re-decode, and
++// apply returns malloc'd RGBA8 of any size (freed by the backend).
++typedef struct DolAuroraTextureOverride {
++    bool (*claims)(uint32_t format, uint32_t width, uint32_t height);
++    bool (*apply)(const uint8_t* rgba, uint32_t width, uint32_t height,
++                  uint8_t** out_rgba, uint32_t* out_width, uint32_t* out_height);
++    uint64_t (*generation)(void);
++} DolAuroraTextureOverride;
++void dol_aurora_set_texture_override(const DolAuroraTextureOverride* ops);
++
 +// Controller vibration (the game's rumble) on or off.
 +void dol_aurora_set_vibration(bool on);
 +// Display aspect: 0 follows the game (4:3, or 16:9 when its 3D projects at

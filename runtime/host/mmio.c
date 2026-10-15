@@ -696,6 +696,7 @@ bool mmio_install(CPUState* cpu) {
 #ifdef ED_AURORA
     dol_platform_set_guest_address_resolver(
         graphics_guest_address_resolver_cb, cpu);
+    dol_aurora_set_guest_mem1(cpu->ram, cpu->ram_size);
 #endif
     return true;
 }

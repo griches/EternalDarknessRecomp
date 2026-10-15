@@ -1,5 +1,5 @@
 diff --git a/backends/aurora/aurora_backend.cpp b/backends/aurora/aurora_backend.cpp
-index d94f811..736d178 100644
+index d94f811..a0df87a 100644
 --- a/backends/aurora/aurora_backend.cpp
 +++ b/backends/aurora/aurora_backend.cpp
 @@ -19,9 +19,20 @@
@@ -292,7 +292,62 @@ index d94f811..736d178 100644
  }
  // ---------------------------------------------------------------------------
  
-@@ -587,6 +745,29 @@ void shadow_frontend_call_display_list(const void* data, u32 size) {
+@@ -514,11 +672,54 @@ void shadow_frontend_set_array(u32 attr, u32 guest_address, u8 stride) {
+     }
+ }
+ 
++// MEM1 for the resolver's fast path (dol_aurora_set_guest_mem1): almost every
++// address the decoder resolves (vertex arrays, textures) is in MEM1, and the
++// host's general resolver costs several calls per lookup, thousands of times
++// a frame. Same rules as guest_memory.c: physical below the size, virtual at
++// the cached and uncached mirrors.
++std::uint8_t* g_mem1 = nullptr;
++u32 g_mem1_size = 0;
++
++bool resolve_mem1_fast(u32 address, u32 size, DolGuestAddressSpace space,
++                       DolGuestResourceKind resource, DolGuestResolvedRange* out) {
++    u32 offset = 0;
++    DolGuestAddressSpace found = DOL_GUEST_ADDRESS_PHYSICAL;
++    if (space != DOL_GUEST_ADDRESS_VIRTUAL && address < g_mem1_size) {
++        offset = address;
++    } else if (space != DOL_GUEST_ADDRESS_PHYSICAL &&
++               address - 0x80000000u < g_mem1_size) {
++        offset = address - 0x80000000u;
++        found = DOL_GUEST_ADDRESS_VIRTUAL;
++    } else if (space != DOL_GUEST_ADDRESS_PHYSICAL &&
++               address - 0xC0000000u < g_mem1_size) {
++        offset = address - 0xC0000000u;
++        found = DOL_GUEST_ADDRESS_VIRTUAL;
++    } else {
++        return false;
++    }
++    if (size > g_mem1_size - offset)
++        return false;
++    *out = {
++        .data = g_mem1 + offset,
++        .address = address,
++        .size = size,
++        .available = g_mem1_size - offset,
++        .space = found,
++        .resource = resource,
++    };
++    return true;
++}
++
+ bool frontend_guest_address_resolver_bridge(
+     void*, u32 address, u32 size, DolGuestAddressSpace space,
+     DolGuestResourceKind resource, DolGuestResolvedRange* out) {
+     if (g_guest_address_resolver == nullptr || out == nullptr)
+         return false;
++    // Trace recording sees every resolve (its MEM_UPDATEs), so it takes the
++    // full path.
++    if (g_mem1 != nullptr && !g_trace_armed && size != 0u &&
++        resolve_mem1_fast(address, size, space, resource, out))
++        return true;
+     const void* data = nullptr;
+     u32 available = 0;
+     if (!g_guest_address_resolver(g_guest_address_resolver_user, address, size,
+@@ -587,6 +788,29 @@ void shadow_frontend_call_display_list(const void* data, u32 size) {
      }
  }
  
@@ -322,7 +377,7 @@ index d94f811..736d178 100644
  void shadow_frontend_write(u64 value, u8 size) {
      if (!g_shadow_frontend_enabled || g_shadow_frontend_failed)
          return;
-@@ -615,24 +796,7 @@ void shadow_frontend_write(u64 value, u8 size) {
+@@ -615,24 +839,7 @@ void shadow_frontend_write(u64 value, u8 size) {
      }
      const std::span<const std::uint8_t> fragment(bytes, size);
      if (g_gx_core_enabled) {
@@ -348,7 +403,7 @@ index d94f811..736d178 100644
          return;
      }
      if (!g_shadow_frontend.write_fifo(fragment) ||
-@@ -842,8 +1006,838 @@ void shadow_transform_observer(
+@@ -842,8 +1049,894 @@ void shadow_transform_observer(
      }
  }
  #endif
@@ -543,9 +598,15 @@ index d94f811..736d178 100644
 +    g_cv_game.wait(lock, [id] { return g_calls_done >= id; });
 +}
 +
++struct PresentArgs {
++    std::uint64_t n;
++    std::uint64_t t_game;  // when the game finished the frame (VIFlush)
++};
++
 +void present() {
 +    const std::uint64_t n = ++g_presents_queued;
-+    append(Op::Present, &n, sizeof n);
++    const PresentArgs args{n, SDL_GetTicksNS()};
++    append(Op::Present, &args, sizeof args);
 +    publish();
 +    const std::uint64_t t0 = SDL_GetTicksNS();
 +    {
@@ -594,6 +655,7 @@ index d94f811..736d178 100644
 +    u32 value = 0;
 +    bool flag = false;
 +    std::uint64_t n = 0;
++    std::uint64_t t_game = 0;
 +    const std::function<void()>* fn = nullptr;
 +    // Draws are planned by whichever thread claims the slot first (a plan
 +    // worker, or the main thread when it gets there first); 2 = done.
@@ -933,7 +995,12 @@ index d94f811..736d178 100644
 +            // The frame's last draw is planned at the frame boundary.
 +            if (live && !g_shadow_frontend_failed)
 +                g_core_sink.flush_frame();
-+            ring_item(Item::Present).n = read_args<std::uint64_t>(p);
++            {
++                const auto args = read_args<PresentArgs>(p);
++                RenderItem& item = ring_item(Item::Present);
++                item.n = args.n;
++                item.t_game = args.t_game;
++            }
 +            ring_commit();
 +            break;
 +        case Op::Call: {
@@ -972,6 +1039,49 @@ index d94f811..736d178 100644
 +    ring_item(Item::Done);
 +    ring_commit();
 +    return 0;
++}
++
++// Frame pacer (main thread). The game finishes its frames on an even beat
++// (its VI clock), but the decode and plan stages take a varying time, so
++// presenting each frame as soon as it is ready lands frames 15 and 19 ms
++// apart, which a 120 Hz display shows as judder. Present instead a steady
++// delay after the game finished the frame: just over the slowest of the last
++// second's frames, and never so long that the game (one frame ahead) would
++// wait for it. A frame later than that is shown at once. DOL_GX_PACE=0: off.
++std::uint64_t g_pace_ns = 0;  // waited this frame, for DOL_GX_TIME
++
++void pace_present(std::uint64_t t_game) {
++    static const bool off = [] {
++        const char* env = std::getenv("DOL_GX_PACE");
++        return env != nullptr && std::strcmp(env, "0") == 0;
++    }();
++    g_pace_ns = 0;
++    if (off || t_game == 0u)
++        return;
++    constexpr int kWindow = 60;
++    static std::uint64_t latency[kWindow];
++    static int count = 0;
++    static int next = 0;
++    const std::uint64_t now = SDL_GetTicksNS();
++    const std::uint64_t lat = now > t_game ? now - t_game : 0u;
++    std::uint64_t worst = lat;
++    for (int i = 0; i < count; ++i)
++        worst = std::max(worst, latency[i]);
++    latency[next] = lat;
++    next = (next + 1) % kWindow;
++    count = std::min(count + 1, kWindow);
++    // The game is at most a frame ahead and waits at its next present for
++    // this one, so the delay stays under a frame (DOL_GX_PACE_MAX_US).
++    static const std::uint64_t cap = [] {
++        const char* env = std::getenv("DOL_GX_PACE_MAX_US");
++        return env != nullptr ? std::strtoull(env, nullptr, 10) * 1000u : 14'000'000u;
++    }();
++    const std::uint64_t delay = std::min<std::uint64_t>(worst + 500'000u, cap);
++    const std::uint64_t target = t_game + delay;
++    if (target > now) {
++        SDL_DelayPrecise(target - now);
++        g_pace_ns = target - now;
++    }
 +}
 +
 +// Main thread: plan, submit and present until the decode thread is done.
@@ -1033,6 +1143,7 @@ index d94f811..736d178 100644
 +            break;
 +        case Item::Present:
 +            if (live) {
++                pace_present(item.t_game);
 +                const std::uint64_t t0 = SDL_GetTicksNS();
 +                aurora_backend_present();
 +                g_present_ns = SDL_GetTicksNS() - t0;
@@ -1187,7 +1298,7 @@ index d94f811..736d178 100644
  extern "C" {
  
  void aurora_backend_set_array_guest(u32 attr, u32 guest_address,
-@@ -937,7 +1931,7 @@ bool dol_aurora_initialize(int argc, char** argv,
+@@ -937,7 +2030,7 @@ bool dol_aurora_initialize(int argc, char** argv,
      g_trace_present_scope_frame = 0ull;
      g_trace_frame_begun = false;
      g_trace_frames_recorded = 0ull;
@@ -1196,7 +1307,7 @@ index d94f811..736d178 100644
      const char* trace_out = std::getenv("DOL_AURORA_RECOMP_TRACE_OUT");
      if (trace_out != nullptr && trace_out[0] != '\0') {
          g_trace_path = trace_out;
-@@ -1069,7 +2063,11 @@ static void flush_gxcore_gap_counters() {
+@@ -1069,7 +2162,11 @@ static void flush_gxcore_gap_counters() {
  #if GXRUNTIME_HAS_AURORA_RECOMP
      if (!g_gx_core_enabled)
          return;
@@ -1209,7 +1320,7 @@ index d94f811..736d178 100644
      struct {
          const char* name;
          unsigned long long value;
-@@ -1114,10 +2112,132 @@ void dol_aurora_flush_gap_report(void) {
+@@ -1114,10 +2211,142 @@ void dol_aurora_flush_gap_report(void) {
      flush_gxcore_gap_counters();
  }
  
@@ -1324,6 +1435,16 @@ index d94f811..736d178 100644
 +        g_audio_max_queue_ms = g_audio_prebuffer_ms + 100;
 +}
 +
++void dol_aurora_set_guest_mem1(void* ram, uint32_t size) {
++#if GXRUNTIME_HAS_AURORA_RECOMP
++    g_mem1 = static_cast<std::uint8_t*>(ram);
++    g_mem1_size = ram != nullptr ? size : 0u;
++#else
++    (void)ram;
++    (void)size;
++#endif
++}
++
  void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user) {
      g_efb_frame_fill = fn;
      g_efb_frame_fill_user = user;
@@ -1343,7 +1464,7 @@ index d94f811..736d178 100644
          aurora::gfx::efb_readback::set_continuous(true);
          aurora_request_framebuffer_readback();
      }
-@@ -1169,7 +2289,8 @@ void aurora_backend_present(void) {
+@@ -1169,7 +2398,8 @@ void aurora_backend_present(void) {
      // gxcore accumulates the frame's draws as their spans complete; the final
      // pending draw is only planned at the frame boundary. Submit it into the
      // still-open Aurora frame before end_frame flushes the command list.
@@ -1353,7 +1474,7 @@ index d94f811..736d178 100644
          g_core_sink.flush_frame();
      // TEMP DIAG: per-frame gxcore gap-counter deltas so a live
      // goal celebration reveals which skip reason dominates (missing_vcd /
-@@ -1201,8 +2322,11 @@ void aurora_backend_present(void) {
+@@ -1201,8 +2431,11 @@ void aurora_backend_present(void) {
          g_frame_open = false;
      }
      // Host EFB fill: push latest present-source snapshot into software backing
@@ -1367,7 +1488,7 @@ index d94f811..736d178 100644
          const std::uint8_t* rgba = nullptr;
          std::uint32_t w = 0;
          std::uint32_t h = 0;
-@@ -1212,6 +2336,72 @@ void aurora_backend_present(void) {
+@@ -1212,6 +2445,72 @@ void aurora_backend_present(void) {
          }
      }
      ++g_present_count;
@@ -1422,14 +1543,14 @@ index d94f811..736d178 100644
 +        // wait: the game thread held at the present for the main thread;
 +        // idle: the main thread waiting for the game's next commands.
 +        // plan/submit: the parts of gx in build_draw_plan / submit_draw_plan.
-+        std::fprintf(stderr, "[gx-time] frame=%llu gx=%.2fms frame=%.2fms wait=%.2fms idle=%.2fms plan=%.2fms wplan=%.2fms submit=%.2fms full=%.2fms pwait=%.2fms present=%.2fms\n",
++        std::fprintf(stderr, "[gx-time] frame=%llu gx=%.2fms frame=%.2fms wait=%.2fms idle=%.2fms plan=%.2fms wplan=%.2fms submit=%.2fms full=%.2fms pwait=%.2fms present=%.2fms pace=%.2fms\n",
 +                     g_present_count, g_gx_time_ns / 1e6,
 +                     last_present_ns ? (now - last_present_ns) / 1e6 : 0.0,
 +                     gxq::g_wait_ns.exchange(0) / 1e6, gxq::g_idle_ns / 1e6,
 +                     gxruntime::gxcore::g_plan_time_ns / 1e6,
 +                     gxq::g_worker_plan_ns.exchange(0) / 1e6, g_submit_time_ns / 1e6,
 +                     gxq::g_decode_full_ns.exchange(0) / 1e6, gxq::g_plan_wait_ns / 1e6,
-+                     gxq::g_present_ns / 1e6);
++                     gxq::g_present_ns / 1e6, gxq::g_pace_ns / 1e6);
 +        gxq::g_plan_wait_ns = 0;
 +        gxq::g_idle_ns = 0;
 +        gxruntime::gxcore::g_plan_time_ns = 0;
@@ -1440,7 +1561,7 @@ index d94f811..736d178 100644
      if (g_frame_pacing_log &&
          (g_present_count <= 10 || (g_present_count % 60) == 0)) {
          const AuroraStats* stats = aurora_get_stats();
-@@ -1432,6 +2622,7 @@ void aurora_backend_present(void) {
+@@ -1432,6 +2731,7 @@ void aurora_backend_present(void) {
      const unsigned long long present_fifo = g_fifo_bytes;
      g_fifo_bytes = 0;
      poll_events();
@@ -1448,7 +1569,7 @@ index d94f811..736d178 100644
      if (!g_should_quit) {
          g_frame_open = aurora_begin_frame();
  #if GXRUNTIME_HAS_AURORA_RECOMP
-@@ -1482,7 +2673,13 @@ void aurora_backend_gx_write(u64 value, u8 size) {
+@@ -1482,7 +2782,13 @@ void aurora_backend_gx_write(u64 value, u8 size) {
          return;
      g_fifo_bytes += size;
  #if GXRUNTIME_HAS_AURORA_RECOMP
@@ -1463,7 +1584,7 @@ index d94f811..736d178 100644
      // Record AFTER the shadow write so MEM_UPDATEs its resolves emitted
      // precede this GX_WRITE in the trace (replay reads them first), and
      // BEFORE the live-Aurora forwarding below so the pristine value is
-@@ -1737,6 +2934,7 @@ void aurora_backend_set_xfb_black(bool black) {
+@@ -1737,6 +3043,7 @@ void aurora_backend_set_xfb_black(bool black) {
  }
  
  bool aurora_backend_pad_init(void) {
@@ -1471,7 +1592,7 @@ index d94f811..736d178 100644
      if (PADInit() == FALSE)
          return false;
  
-@@ -1780,6 +2978,7 @@ bool aurora_backend_pad_init(void) {
+@@ -1780,6 +3087,7 @@ bool aurora_backend_pad_init(void) {
  }
  
  u32 aurora_backend_pad_read(DolPadState state[4]) {
@@ -1479,7 +1600,7 @@ index d94f811..736d178 100644
      PADStatus status[4]{};
      const u32 motor_mask = PADRead(status);
      for (u32 i = 0; i < 4; i++) {
-@@ -1796,22 +2995,41 @@ u32 aurora_backend_pad_read(DolPadState state[4]) {
+@@ -1796,22 +3104,41 @@ u32 aurora_backend_pad_read(DolPadState state[4]) {
              .error = status[i].err,
          };
      }
@@ -1521,7 +1642,7 @@ index d94f811..736d178 100644
      PADSetSpec(spec);
  }
  
-@@ -1848,6 +3066,7 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1848,6 +3175,7 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
  
      int queued = SDL_GetAudioStreamQueued(g_audio_stream);
      unsigned waited_ms = 0;
@@ -1529,7 +1650,7 @@ index d94f811..736d178 100644
      while (queued > max_queued_bytes && waited_ms < 20u) {
          g_audio_throttle_count++;
          if (g_audio_queue_log &&
-@@ -1860,8 +3079,17 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1860,8 +3188,17 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
                           max_queued_bytes);
          SDL_Delay(1);
          waited_ms++;
@@ -1547,7 +1668,7 @@ index d94f811..736d178 100644
  
      const bool low_queue =
          queued >= 0 && queued < bytes_per_second / 100;
-@@ -1876,6 +3104,20 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1876,6 +3213,20 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
                       g_audio_push_count, queued, queued + bytes,
                       g_audio_playing ? 1u : 0u, g_audio_throttle_count);
      }
@@ -1568,7 +1689,7 @@ index d94f811..736d178 100644
      if (!SDL_PutAudioStreamData(g_audio_stream, samples, bytes))
          std::fprintf(stderr, "[audio] failed to queue samples: %s\n", SDL_GetError());
      else if (!g_audio_playing && queued + bytes >= prebuffer_bytes) {
-@@ -1886,10 +3128,343 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1886,10 +3237,343 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
      }
  }
  
@@ -1912,7 +2033,7 @@ index d94f811..736d178 100644
      const DolPlatformOps ops = {
          .should_quit = aurora_backend_should_quit,
          .present = aurora_backend_present,
-@@ -1918,6 +3493,7 @@ void install_platform_ops() {
+@@ -1918,6 +3602,7 @@ void install_platform_ops() {
          .audio_set_sample_rate = aurora_backend_audio_set_sample_rate,
          .audio_push = aurora_backend_audio_push,
      };
@@ -4568,7 +4689,7 @@ index 9c2f7bb..6dd6411 100644
 +
  #endif
 diff --git a/include/gxruntime/aurora_backend.h b/include/gxruntime/aurora_backend.h
-index 6ef4cf4..fb79de7 100644
+index 6ef4cf4..e04bc61 100644
 --- a/include/gxruntime/aurora_backend.h
 +++ b/include/gxruntime/aurora_backend.h
 @@ -5,6 +5,7 @@
@@ -4579,7 +4700,7 @@ index 6ef4cf4..fb79de7 100644
  #include <stdint.h>
  
  #ifdef __cplusplus
-@@ -26,12 +27,20 @@ bool dol_aurora_initialize(int argc, char** argv,
+@@ -26,12 +27,23 @@ bool dol_aurora_initialize(int argc, char** argv,
                             const AuroraBackendConfig* config);
  void dol_aurora_shutdown(void);
  
@@ -4594,13 +4715,16 @@ index 6ef4cf4..fb79de7 100644
  typedef void (*DolAuroraEfbFrameFillFn)(const uint8_t* rgba, uint32_t width,
                                          uint32_t height, void* user);
  void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user);
++// Guest MEM1 (host pointer, size), for the GX decoder's fast address lookups;
++// anything else goes through the guest address resolver as before.
++void dol_aurora_set_guest_mem1(void* ram, uint32_t size);
 +// The guest read the EFB (GXPeek*): keep the frame fill above running (it is
 +// off while nothing peeks; see aurora_backend.cpp).
 +void dol_aurora_efb_peeked(void);
  
  // C2: walk nonzero gxcore GapCounters into the process-global gap_report.
  // Call once before gap_report_write_json on the live Strikers path so
-@@ -40,6 +49,85 @@ void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user);
+@@ -40,6 +52,85 @@ void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user);
  // from shutdown (second call only bumps if counters grew).
  void dol_aurora_flush_gap_report(void);
  

@@ -428,6 +428,7 @@ void interrupt_poll(CPUState* cpu) {
         dol_interrupts_assert_vi_retrace(&interrupts);
         speed_note_retrace();
 #ifdef ED_AURORA
+        dol_aurora_note_retrace();
         dol_aurora_pump_events_if_idle();
 #endif
         dol_si_latch_poll(&si, 0xFu);

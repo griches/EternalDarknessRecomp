@@ -343,6 +343,14 @@ void build_options() {
     aspect.change = [](int dir) { cycle(g_settings.aspect, 4, dir); changed(); };
     g_rows.push_back(aspect);
 
+    Row hud{"Widescreen HUD", g_settings.widescreen_hud ? "Screen edges" : "Centred (4:3)"};
+    hud.note = "In the game's widescreen mode, where prompts like Examine sit.";
+    hud.change = [](int) {
+        g_settings.widescreen_hud = !g_settings.widescreen_hud;
+        changed();
+    };
+    g_rows.push_back(hud);
+
     Row scale{"Resolution", kScale[g_settings.render_scale]};
     scale.note = "Window draws at your screen's resolution.";
     scale.change = [](int dir) { cycle(g_settings.render_scale, 5, dir); changed(); };
@@ -438,7 +446,8 @@ void build_in_game() {
     quit.note = "Unsaved progress is lost.";
     quit.activate = [] {
         settings_save();
-        std::exit(0);
+        dol_aurora_request_quit();
+        g_close = true;
     };
     g_rows.push_back(quit);
 }
@@ -673,6 +682,9 @@ bool run_menu() {
 extern "C" void frontend_init(int argc, char** argv) {
     g_argc = argc;
     g_argv = argv;
+    // Load the menus now so their key listener hears Esc even when the
+    // launcher is skipped (quick-load and test runs).
+    ensure_ui();
 }
 
 extern "C" bool frontend_run_launcher(const char* default_iso, char* iso_out,
@@ -713,6 +725,6 @@ extern "C" void frontend_frame(void) {
     g_options_return = Screen::InGame;
     g_selected = 0;
     if (!run_menu())
-        std::exit(0);
+        dol_aurora_request_quit();  // window closed while paused
     menu_was_held = false;
 }

@@ -13,6 +13,7 @@
 Settings g_settings = {
     .skip_intros = false,
     .aspect = 0,
+    .widescreen_hud = true,
     .render_scale = 0,
     .fullscreen = false,
     .fps_counter = true,
@@ -58,6 +59,8 @@ void settings_load(void) {
             g_settings.skip_intros = n != 0;
         else if (strcmp(key, "aspect") == 0)
             g_settings.aspect = clamp_int(n, 0, 3);
+        else if (strcmp(key, "widescreen_hud") == 0)
+            g_settings.widescreen_hud = n != 0;
         else if (strcmp(key, "render_scale") == 0)
             g_settings.render_scale = clamp_int(n, 0, 4);
         else if (strcmp(key, "fullscreen") == 0)
@@ -85,6 +88,7 @@ void settings_save(void) {
     fprintf(f, "# Eternal Darkness settings (written by the launcher)\n");
     fprintf(f, "skip_intros = %d\n", g_settings.skip_intros ? 1 : 0);
     fprintf(f, "aspect = %d\n", g_settings.aspect);
+    fprintf(f, "widescreen_hud = %d\n", g_settings.widescreen_hud ? 1 : 0);
     fprintf(f, "render_scale = %d\n", g_settings.render_scale);
     fprintf(f, "fullscreen = %d\n", g_settings.fullscreen ? 1 : 0);
     fprintf(f, "fps_counter = %d\n", g_settings.fps_counter ? 1 : 0);
@@ -98,6 +102,7 @@ void settings_save(void) {
 void settings_apply(void) {
 #ifdef ED_AURORA
     dol_aurora_set_aspect_mode(g_settings.aspect);
+    dol_aurora_set_widescreen_hud(g_settings.widescreen_hud);
     dol_aurora_set_render_scale(g_settings.render_scale);
     dol_aurora_set_fullscreen(g_settings.fullscreen);
     dol_aurora_set_audio_buffer_ms(g_settings.audio_buffer_ms);

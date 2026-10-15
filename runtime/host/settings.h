@@ -11,7 +11,7 @@ typedef struct {
     bool skip_intros;     // tap through the logo movies and the quote
     int aspect;           // 0 follow the game, 1 4:3, 2 16:9, 3 stretch
     bool widescreen_hud;  // move the game's widescreen HUD out to the edges
-    int render_scale;     // 0 window pixels, 1-4 x the GameCube resolution
+    int render_scale;     // 0 window pixels, 1-4 = 720p, 1080p, 1440p, 4K
     bool fullscreen;
     bool fps_counter;     // frames per second in the window title
     int music_volume;     // disc-streamed music, 0-100

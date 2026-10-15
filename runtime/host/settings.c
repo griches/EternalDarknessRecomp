@@ -151,7 +151,8 @@ void settings_apply(void) {
 #ifdef ED_AURORA
     dol_aurora_set_aspect_mode(g_settings.aspect);
     dol_aurora_set_widescreen_hud(g_settings.widescreen_hud);
-    dol_aurora_set_render_scale(g_settings.render_scale);
+    static const int kRenderLines[] = {0, 720, 1080, 1440, 2160};
+    dol_aurora_set_render_height(kRenderLines[g_settings.render_scale]);
     dol_aurora_set_fullscreen(g_settings.fullscreen);
     dol_aurora_set_audio_buffer_ms(g_settings.audio_buffer_ms);
     dol_aurora_set_vibration(g_settings.vibration);

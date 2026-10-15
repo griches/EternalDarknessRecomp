@@ -469,8 +469,8 @@ Row vibration_row() {
 
 void build_options() {
     static const char* const kAspect[] = {"Follow the game", "4:3", "16:9", "Stretch"};
-    // Each resolution as the pixels it draws at, for the display shape in use
-    // (the GameCube's 528 lines times the scale, at 4:3 or 16:9).
+    // Each resolution as the pixels it draws at, for the display shape in use:
+    // the window's own, or a standard height at 4:3 or 16:9.
     float display_aspect = 4.f / 3.f;
     uint32_t win_w = 0, win_h = 0;
     dol_aurora_get_display_info(&display_aspect, &win_w, &win_h);
@@ -484,15 +484,16 @@ void build_options() {
             else if (display_aspect > 0.f)
                 h = static_cast<uint32_t>(w / display_aspect + 0.5f);
         } else {
-            h = 528u * static_cast<uint32_t>(scale);
+            static const uint32_t kLines[] = {0, 720, 1080, 1440, 2160};
+            h = kLines[scale];
             w = static_cast<uint32_t>(h * display_aspect + 0.5f);
         }
         return std::to_string(w) + "\u00d7" + std::to_string(h);
     };
     const std::string kScale[] = {
-        "Window (" + size_label(0) + ")", "1x (" + size_label(1) + ")",
-        "2x (" + size_label(2) + ")", "3x (" + size_label(3) + ")",
-        "4x (" + size_label(4) + ")"};
+        "Window (" + size_label(0) + ")", "720p (" + size_label(1) + ")",
+        "1080p (" + size_label(2) + ")", "1440p (" + size_label(3) + ")",
+        "4K (" + size_label(4) + ")"};
     static const int kBuffers[] = {40, 60, 80, 100, 150, 200};
 
     Row full{"Fullscreen", on_off(g_settings.fullscreen)};
@@ -501,7 +502,7 @@ void build_options() {
     g_rows.push_back(full);
 
     Row scale{"Resolution", kScale[g_settings.render_scale]};
-    scale.note = "Window draws at your screen's resolution.";
+    scale.note = "Window draws at your screen's own resolution; the others draw at that size and scale to fit.";
     scale.change = [](int dir) { cycle(g_settings.render_scale, 5, dir); changed(); };
     g_rows.push_back(scale);
 

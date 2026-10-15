@@ -1,0 +1,189 @@
+diff --git a/src/backend/emitter.c b/src/backend/emitter.c
+index 4868b4c..64ec688 100644
+--- a/src/backend/emitter.c
++++ b/src/backend/emitter.c
+@@ -37,6 +37,19 @@ static void emit_set_cr1_from_fpscr(FILE* out) {
+     fprintf(out, "        ctx->cr = (ctx->cr & 0xF0FFFFFFu) | ((ctx->fpscr >> 4) & 0x0F000000u);\n");
+ }
+ 
++/* Emit a paired-single result whose two lanes are evaluated into temporaries
++ * before fD is written, so fD may alias any source register. */
++static void emit_ps_pair(FILE* out, const PPCInst* inst, const char* lane0,
++                         const char* lane1) {
++    fprintf(out, "    {\n");
++    fprintf(out, "        f64 lane0 = dolrecomp_ps_round(%s);\n", lane0);
++    fprintf(out, "        f64 lane1 = dolrecomp_ps_round(%s);\n", lane1);
++    fprintf(out, "        ctx->fpr[%u] = lane0;\n", inst->rD);
++    fprintf(out, "        ctx->ps1[%u] = lane1;\n", inst->rD);
++    if (inst->rc) emit_set_cr1_from_fpscr(out);
++    fprintf(out, "    }\n");
++}
++
+ static void emit_compare_s32(FILE* out, u8 crf, const char* lhs, const char* rhs) {
+     u32 shift = cr_field_shift(crf);
+ 
+@@ -456,6 +469,7 @@ void emit_footer(FILE* out) {
+ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+                                         u32 func_start, u32 func_end) {
+     char disasm[64];
++    char lane0[128], lane1[128];
+     ppc_disasm(disasm, sizeof(disasm), inst);
+     fprintf(out, "    // %08X: %s\n", inst->address, disasm);
+ 
+@@ -937,23 +951,27 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+         break;
+ 
+     case PPC_OP_FADDS:
+-        fprintf(out, "    ctx->fpr[%u] = (f64)(f32)(ctx->fpr[%u] + ctx->fpr[%u]);\n",
+-                inst->rD, inst->rA, inst->rB);
++        /* Single-precision results fill both paired-single lanes (Gekko). */
++        fprintf(out, "    ctx->fpr[%u] = ctx->ps1[%u] = (f64)(f32)(ctx->fpr[%u] + ctx->fpr[%u]);\n",
++                inst->rD, inst->rD, inst->rA, inst->rB);
+         break;
+ 
+     case PPC_OP_FSUBS:
+-        fprintf(out, "    ctx->fpr[%u] = (f64)(f32)(ctx->fpr[%u] - ctx->fpr[%u]);\n",
+-                inst->rD, inst->rA, inst->rB);
++        /* Single-precision results fill both paired-single lanes (Gekko). */
++        fprintf(out, "    ctx->fpr[%u] = ctx->ps1[%u] = (f64)(f32)(ctx->fpr[%u] - ctx->fpr[%u]);\n",
++                inst->rD, inst->rD, inst->rA, inst->rB);
+         break;
+ 
+     case PPC_OP_FMULS:
+-        fprintf(out, "    ctx->fpr[%u] = (f64)(f32)(ctx->fpr[%u] * ctx->fpr[%u]);\n",
+-                inst->rD, inst->rA, inst->rC);
++        /* Single-precision results fill both paired-single lanes (Gekko). */
++        fprintf(out, "    ctx->fpr[%u] = ctx->ps1[%u] = (f64)(f32)(ctx->fpr[%u] * ctx->fpr[%u]);\n",
++                inst->rD, inst->rD, inst->rA, inst->rC);
+         break;
+ 
+     case PPC_OP_FDIVS:
+-        fprintf(out, "    ctx->fpr[%u] = (f64)(f32)(ctx->fpr[%u] / ctx->fpr[%u]);\n",
+-                inst->rD, inst->rA, inst->rB);
++        /* Single-precision results fill both paired-single lanes (Gekko). */
++        fprintf(out, "    ctx->fpr[%u] = ctx->ps1[%u] = (f64)(f32)(ctx->fpr[%u] / ctx->fpr[%u]);\n",
++                inst->rD, inst->rD, inst->rA, inst->rB);
+         break;
+ 
+     case PPC_OP_FRES:
+@@ -1047,7 +1065,8 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+         break;
+ 
+     case PPC_OP_FRSP:
+-        fprintf(out, "    ctx->fpr[%u] = (f64)(f32)ctx->fpr[%u];\n", inst->rD, inst->rB);
++        fprintf(out, "    ctx->fpr[%u] = ctx->ps1[%u] = (f64)(f32)ctx->fpr[%u];\n",
++                inst->rD, inst->rD, inst->rB);
+         break;
+ 
+     case PPC_OP_FSEL:
+@@ -1222,76 +1241,68 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+         if (inst->rc) emit_set_cr1_from_fpscr(out);
+         break;
+ 
++    /* The two-lane ops below compute both lanes before writing either: fD is
++     * often also a source (ps_merge10 f7,f7,f7 swaps lanes; PSQUATMultiply
++     * and PSMTXRotTrig rely on it), and writing ps0 first would feed the new
++     * value into the ps1 lane. */
+     case PPC_OP_PS_SUM0:
+-        fprintf(out, "    ctx->fpr[%u] = dolrecomp_ps_round((f32)ctx->fpr[%u] + (f32)ctx->ps1[%u]);\n",
+-                inst->rD, inst->rA, inst->rB);
+-        fprintf(out, "    ctx->ps1[%u] = dolrecomp_ps_round(ctx->ps1[%u]);\n",
+-                inst->rD, inst->rC);
+-        if (inst->rc) emit_set_cr1_from_fpscr(out);
++        snprintf(lane0, sizeof lane0, "(f32)ctx->fpr[%u] + (f32)ctx->ps1[%u]", inst->rA, inst->rB);
++        snprintf(lane1, sizeof lane1, "ctx->ps1[%u]", inst->rC);
++        emit_ps_pair(out, inst, lane0, lane1);
+         break;
+ 
+     case PPC_OP_PS_SUM1:
+-        fprintf(out, "    ctx->fpr[%u] = dolrecomp_ps_round(ctx->fpr[%u]);\n",
+-                inst->rD, inst->rC);
+-        fprintf(out, "    ctx->ps1[%u] = dolrecomp_ps_round((f32)ctx->fpr[%u] + (f32)ctx->ps1[%u]);\n",
+-                inst->rD, inst->rA, inst->rB);
+-        if (inst->rc) emit_set_cr1_from_fpscr(out);
++        snprintf(lane0, sizeof lane0, "ctx->fpr[%u]", inst->rC);
++        snprintf(lane1, sizeof lane1, "(f32)ctx->fpr[%u] + (f32)ctx->ps1[%u]", inst->rA, inst->rB);
++        emit_ps_pair(out, inst, lane0, lane1);
+         break;
+ 
+     case PPC_OP_PS_MULS0:
+-        fprintf(out, "    ctx->fpr[%u] = dolrecomp_ps_round((f32)ctx->fpr[%u] * (f32)ctx->fpr[%u]);\n",
+-                inst->rD, inst->rA, inst->rC);
+-        fprintf(out, "    ctx->ps1[%u] = dolrecomp_ps_round((f32)ctx->ps1[%u] * (f32)ctx->fpr[%u]);\n",
+-                inst->rD, inst->rA, inst->rC);
+-        if (inst->rc) emit_set_cr1_from_fpscr(out);
++        snprintf(lane0, sizeof lane0, "(f32)ctx->fpr[%u] * (f32)ctx->fpr[%u]", inst->rA, inst->rC);
++        snprintf(lane1, sizeof lane1, "(f32)ctx->ps1[%u] * (f32)ctx->fpr[%u]", inst->rA, inst->rC);
++        emit_ps_pair(out, inst, lane0, lane1);
+         break;
+ 
+     case PPC_OP_PS_MULS1:
+-        fprintf(out, "    ctx->fpr[%u] = dolrecomp_ps_round((f32)ctx->fpr[%u] * (f32)ctx->ps1[%u]);\n",
+-                inst->rD, inst->rA, inst->rC);
+-        fprintf(out, "    ctx->ps1[%u] = dolrecomp_ps_round((f32)ctx->ps1[%u] * (f32)ctx->ps1[%u]);\n",
+-                inst->rD, inst->rA, inst->rC);
+-        if (inst->rc) emit_set_cr1_from_fpscr(out);
++        snprintf(lane0, sizeof lane0, "(f32)ctx->fpr[%u] * (f32)ctx->ps1[%u]", inst->rA, inst->rC);
++        snprintf(lane1, sizeof lane1, "(f32)ctx->ps1[%u] * (f32)ctx->ps1[%u]", inst->rA, inst->rC);
++        emit_ps_pair(out, inst, lane0, lane1);
+         break;
+ 
+     case PPC_OP_PS_MADDS0:
+-        fprintf(out, "    ctx->fpr[%u] = dolrecomp_ps_round((f32)ctx->fpr[%u] * (f32)ctx->fpr[%u] + (f32)ctx->fpr[%u]);\n",
+-                inst->rD, inst->rA, inst->rC, inst->rB);
+-        fprintf(out, "    ctx->ps1[%u] = dolrecomp_ps_round((f32)ctx->ps1[%u] * (f32)ctx->fpr[%u] + (f32)ctx->ps1[%u]);\n",
+-                inst->rD, inst->rA, inst->rC, inst->rB);
+-        if (inst->rc) emit_set_cr1_from_fpscr(out);
++        snprintf(lane0, sizeof lane0, "(f32)ctx->fpr[%u] * (f32)ctx->fpr[%u] + (f32)ctx->fpr[%u]", inst->rA, inst->rC, inst->rB);
++        snprintf(lane1, sizeof lane1, "(f32)ctx->ps1[%u] * (f32)ctx->fpr[%u] + (f32)ctx->ps1[%u]", inst->rA, inst->rC, inst->rB);
++        emit_ps_pair(out, inst, lane0, lane1);
+         break;
+ 
+     case PPC_OP_PS_MADDS1:
+-        fprintf(out, "    ctx->fpr[%u] = dolrecomp_ps_round((f32)ctx->fpr[%u] * (f32)ctx->ps1[%u] + (f32)ctx->fpr[%u]);\n",
+-                inst->rD, inst->rA, inst->rC, inst->rB);
+-        fprintf(out, "    ctx->ps1[%u] = dolrecomp_ps_round((f32)ctx->ps1[%u] * (f32)ctx->ps1[%u] + (f32)ctx->ps1[%u]);\n",
+-                inst->rD, inst->rA, inst->rC, inst->rB);
+-        if (inst->rc) emit_set_cr1_from_fpscr(out);
++        snprintf(lane0, sizeof lane0, "(f32)ctx->fpr[%u] * (f32)ctx->ps1[%u] + (f32)ctx->fpr[%u]", inst->rA, inst->rC, inst->rB);
++        snprintf(lane1, sizeof lane1, "(f32)ctx->ps1[%u] * (f32)ctx->ps1[%u] + (f32)ctx->ps1[%u]", inst->rA, inst->rC, inst->rB);
++        emit_ps_pair(out, inst, lane0, lane1);
+         break;
+ 
+     case PPC_OP_PS_MERGE00:
+-        fprintf(out, "    ctx->fpr[%u] = dolrecomp_ps_round(ctx->fpr[%u]);\n", inst->rD, inst->rA);
+-        fprintf(out, "    ctx->ps1[%u] = dolrecomp_ps_round(ctx->fpr[%u]);\n", inst->rD, inst->rB);
+-        if (inst->rc) emit_set_cr1_from_fpscr(out);
++        snprintf(lane0, sizeof lane0, "ctx->fpr[%u]", inst->rA);
++        snprintf(lane1, sizeof lane1, "ctx->fpr[%u]", inst->rB);
++        emit_ps_pair(out, inst, lane0, lane1);
+         break;
+ 
+     case PPC_OP_PS_MERGE01:
+-        fprintf(out, "    ctx->fpr[%u] = dolrecomp_ps_round(ctx->fpr[%u]);\n", inst->rD, inst->rA);
+-        fprintf(out, "    ctx->ps1[%u] = dolrecomp_ps_round(ctx->ps1[%u]);\n", inst->rD, inst->rB);
+-        if (inst->rc) emit_set_cr1_from_fpscr(out);
++        snprintf(lane0, sizeof lane0, "ctx->fpr[%u]", inst->rA);
++        snprintf(lane1, sizeof lane1, "ctx->ps1[%u]", inst->rB);
++        emit_ps_pair(out, inst, lane0, lane1);
+         break;
+ 
+     case PPC_OP_PS_MERGE10:
+-        fprintf(out, "    ctx->fpr[%u] = dolrecomp_ps_round(ctx->ps1[%u]);\n", inst->rD, inst->rA);
+-        fprintf(out, "    ctx->ps1[%u] = dolrecomp_ps_round(ctx->fpr[%u]);\n", inst->rD, inst->rB);
+-        if (inst->rc) emit_set_cr1_from_fpscr(out);
++        snprintf(lane0, sizeof lane0, "ctx->ps1[%u]", inst->rA);
++        snprintf(lane1, sizeof lane1, "ctx->fpr[%u]", inst->rB);
++        emit_ps_pair(out, inst, lane0, lane1);
+         break;
+ 
+     case PPC_OP_PS_MERGE11:
+-        fprintf(out, "    ctx->fpr[%u] = dolrecomp_ps_round(ctx->ps1[%u]);\n", inst->rD, inst->rA);
+-        fprintf(out, "    ctx->ps1[%u] = dolrecomp_ps_round(ctx->ps1[%u]);\n", inst->rD, inst->rB);
+-        if (inst->rc) emit_set_cr1_from_fpscr(out);
++        snprintf(lane0, sizeof lane0, "ctx->ps1[%u]", inst->rA);
++        snprintf(lane1, sizeof lane1, "ctx->ps1[%u]", inst->rB);
++        emit_ps_pair(out, inst, lane0, lane1);
+         break;
+ 
+     case PPC_OP_PS_CMPU0:

@@ -1,5 +1,5 @@
 diff --git a/backends/aurora/aurora_backend.cpp b/backends/aurora/aurora_backend.cpp
-index d94f811..db80a17 100644
+index d94f811..1d0ca67 100644
 --- a/backends/aurora/aurora_backend.cpp
 +++ b/backends/aurora/aurora_backend.cpp
 @@ -19,7 +19,9 @@
@@ -12,15 +12,20 @@ index d94f811..db80a17 100644
  #include <SDL3/SDL_scancode.h>
  #include <SDL3/SDL_timer.h>
  
-@@ -33,6 +35,7 @@
+@@ -30,9 +32,12 @@
+ #include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
++#include <algorithm>
  #include <array>
  #include <cstddef>
  #include <cstdint>
++#include <memory>
 +#include <optional>
  #include <span>
  #include <string>
  #include <unordered_map>
-@@ -57,8 +60,18 @@ bool peek(const std::uint8_t** rgba, std::uint32_t* width,
+@@ -57,8 +62,18 @@ bool peek(const std::uint8_t** rgba, std::uint32_t* width,
            std::uint32_t* height) noexcept;
  } // namespace aurora::gfx::efb_readback
  
@@ -39,7 +44,148 @@ index d94f811..db80a17 100644
  bool g_frame_open = false;
  bool g_should_quit = false;
  bool g_graphics_log = false;
-@@ -1114,6 +1127,12 @@ void dol_aurora_flush_gap_report(void) {
+@@ -379,13 +394,39 @@ unsigned long long g_trace_present_scope_frame = 0ull;
+ bool g_trace_frame_begun = false;
+ unsigned long long g_trace_frames_recorded = 0ull;
+ gxruntime::aurora_recomp::trace::TraceWriter g_trace_writer;
+-// (guest_addr,size) -> content FNV across the whole recording window;
+-// suppresses re-recording unchanged memory (menu scenes re-resolve the same
+-// textures every frame — per-frame dedup made 61-frame traces ~57MB, cross-
+-// frame ~few MB). Replay-correct because Mode A replays every record from
+-// the start and its shadow MEM1 persists across frames; changed content
+-// hashes differently and is re-recorded in order.
+-std::unordered_map<u64, u64> g_trace_mem_dedup;
++// What the replay's MEM1 holds once it has applied every MEM_UPDATE written
++// so far (replay MEM1 starts zeroed, so does this). A resolve records only the
++// bytes that differ from it. Keying on (address, size) instead re-recorded
++// every overlapping span: a scene's indexed arrays resolve the same buffers
++// with a different span per draw, and one gameplay frame came to 270 MB.
++std::vector<unsigned char> g_trace_mem_shadow;
++constexpr u32 kTraceMemBlock = 64u;  // diff granularity
++
++bool frontend_guest_address_resolver_bridge(
++    void*, u32 address, u32 size, DolGuestAddressSpace space,
++    DolGuestResourceKind resource, DolGuestResolvedRange* out);
++
++// The decoder's register state as one GX_STATE record, so a window that
++// starts mid-game (or follows a save-state load) replays from the state the
++// game set before it. The guest memory its texture and TLUT setup resolves
++// must precede it: a throwaway decoder replays the commands through the
++// recording resolver, which writes those MEM_UPDATEs.
++void trace_write_gx_state(std::span<const std::uint8_t> commands) {
++    if (commands.empty())
++        return;
++    auto scratch = std::make_unique<gxruntime::aurora_recomp::RetailGxFrontend>();
++    auto sink =
++        std::make_unique<gxruntime::aurora_recomp::ConsumingAuroraRenderSink>();
++    DolGuestAddressResolver resolver;
++    dol_guest_address_resolver_init_callback(
++        &resolver, frontend_guest_address_resolver_bridge, nullptr);
++    scratch->reset(&resolver);
++    scratch->set_packet_drain_enabled(true);
++    sink->set_guest_resolver(&scratch->state().resolver);
++    (void)scratch->replay_fifo(commands, sink.get());
++    g_trace_writer.gx_state(commands.data(),
++                            static_cast<std::uint32_t>(commands.size()));
++}
+ 
+ unsigned long long trace_current_frame() {
+     return g_trace_present_scope_frame != 0ull ? g_trace_present_scope_frame
+@@ -435,6 +476,17 @@ bool trace_should_record() {
+         g_trace_writer.frame_begin(static_cast<u32>(frame));
+         g_trace_frame_begun = true;
+         ++g_trace_frames_recorded;
++        if (g_trace_frames_recorded == 1ull && g_shadow_frontend_enabled &&
++            !g_shadow_frontend_failed) {
++            if (g_shadow_frontend.pending_fifo_size() != 0u)
++                std::fprintf(stderr,
++                             "[trace] window starts mid-command (%zu bytes "
++                             "pending); replay may misparse its first command\n",
++                             g_shadow_frontend.pending_fifo_size());
++            const std::vector<std::uint8_t> state =
++                g_shadow_frontend.state_preamble();
++            trace_write_gx_state(state);
++        }
+     }
+     return true;
+ }
+@@ -442,18 +494,46 @@ bool trace_should_record() {
+ void trace_record_mem_update(u32 address, u32 size, const void* data) {
+     if (size == 0 || data == nullptr || !trace_should_record())
+         return;
+-    const u64 key = (static_cast<u64>(address) << 32) | size;
+-    u64 hash = 1469598103934665603ull;
++    if (g_trace_mem_shadow.empty())
++        g_trace_mem_shadow.assign(0x01800000u, 0u);
++    const u32 physical = dol_gx_recomp_guest_to_physical(address);
+     const auto* bytes = static_cast<const unsigned char*>(data);
+-    for (u32 i = 0; i < size; ++i) {
+-        hash ^= bytes[i];
+-        hash *= 1099511628211ull;
++    if (physical >= g_trace_mem_shadow.size() ||
++        size > g_trace_mem_shadow.size() - physical) {
++        g_trace_writer.mem_update(address, data, size);  // outside MEM1
++        return;
+     }
+-    const auto it = g_trace_mem_dedup.find(key);
+-    if (it != g_trace_mem_dedup.end() && it->second == hash)
++    unsigned char* shadow = g_trace_mem_shadow.data() + physical;
++    if (std::memcmp(shadow, bytes, size) == 0)
+         return;
+-    g_trace_mem_dedup[key] = hash;
+-    g_trace_writer.mem_update(address, data, size);
++    // Record each run of changed blocks (a one-block gap joins two runs).
++    u32 at = 0;
++    while (at < size) {
++        const u32 len = std::min(kTraceMemBlock, size - at);
++        if (std::memcmp(shadow + at, bytes + at, len) == 0) {
++            at += len;
++            continue;
++        }
++        u32 end = at + len;
++        while (end < size) {
++            const u32 next = std::min(kTraceMemBlock, size - end);
++            if (std::memcmp(shadow + end, bytes + end, next) != 0) {
++                end += next;
++                continue;
++            }
++            const u32 after = end + next;
++            const u32 next2 = after < size ? std::min(kTraceMemBlock, size - after) : 0u;
++            if (next2 != 0u &&
++                std::memcmp(shadow + after, bytes + after, next2) != 0) {
++                end = after + next2;
++                continue;
++            }
++            break;
++        }
++        g_trace_writer.mem_update(address + at, bytes + at, end - at);
++        std::memcpy(shadow + at, bytes + at, end - at);
++        at = end;
++    }
+ }
+ 
+ void trace_close_and_log() {
+@@ -491,6 +571,10 @@ void trace_on_present() {
+         trace_close_and_log();
+     g_trace_present_scope_frame = 0ull;
+     g_trace_frame_begun = false;
++    // Open a window that starts after boot here, at the frame boundary where
++    // the decoder sits between commands, rather than at its first record.
++    if (g_trace_armed && g_present_count + 1ull == g_trace_first_frame)
++        (void)trace_should_record();
+ }
+ // ---------------------------------------------------------------------------
+ 
+@@ -937,7 +1021,7 @@ bool dol_aurora_initialize(int argc, char** argv,
+     g_trace_present_scope_frame = 0ull;
+     g_trace_frame_begun = false;
+     g_trace_frames_recorded = 0ull;
+-    g_trace_mem_dedup.clear();
++    g_trace_mem_shadow.clear();
+     const char* trace_out = std::getenv("DOL_AURORA_RECOMP_TRACE_OUT");
+     if (trace_out != nullptr && trace_out[0] != '\0') {
+         g_trace_path = trace_out;
+@@ -1114,6 +1198,12 @@ void dol_aurora_flush_gap_report(void) {
      flush_gxcore_gap_counters();
  }
  
@@ -52,7 +198,7 @@ index d94f811..db80a17 100644
  void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user) {
      g_efb_frame_fill = fn;
      g_efb_frame_fill_user = user;
-@@ -1432,6 +1451,7 @@ void aurora_backend_present(void) {
+@@ -1432,6 +1522,7 @@ void aurora_backend_present(void) {
      const unsigned long long present_fifo = g_fifo_bytes;
      g_fifo_bytes = 0;
      poll_events();
@@ -60,7 +206,7 @@ index d94f811..db80a17 100644
      if (!g_should_quit) {
          g_frame_open = aurora_begin_frame();
  #if GXRUNTIME_HAS_AURORA_RECOMP
-@@ -1848,6 +1868,7 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1848,6 +1939,7 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
  
      int queued = SDL_GetAudioStreamQueued(g_audio_stream);
      unsigned waited_ms = 0;
@@ -68,7 +214,7 @@ index d94f811..db80a17 100644
      while (queued > max_queued_bytes && waited_ms < 20u) {
          g_audio_throttle_count++;
          if (g_audio_queue_log &&
-@@ -1860,8 +1881,17 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1860,8 +1952,17 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
                           max_queued_bytes);
          SDL_Delay(1);
          waited_ms++;
@@ -86,7 +232,7 @@ index d94f811..db80a17 100644
  
      const bool low_queue =
          queued >= 0 && queued < bytes_per_second / 100;
-@@ -1886,6 +1916,164 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1886,6 +1987,169 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
      }
  }
  
@@ -210,6 +356,11 @@ index d94f811..db80a17 100644
 +        g_gx_core_enabled
 +            ? g_shadow_frontend.replay_fifo(bytes, &g_core_sink)
 +            : g_shadow_frontend.replay_fifo(bytes, &g_shadow_packet_sink);
++    // A load inside a recording window: the replay above already recorded
++    // the memory it resolved; the trace restarts its decoder here too.
++    if (ok && trace_should_record())
++        g_trace_writer.gx_state(bytes.data(),
++                                static_cast<std::uint32_t>(bytes.size()));
 +    if (!ok) {
 +        g_shadow_frontend_failed = true;
 +        std::fprintf(stderr,
@@ -427,6 +578,69 @@ index 1ef8382..85c5668 100644
    // Frame-relative fifo offset (GPNF §1).
    std::size_t frame_fifo_bytes_ = 0;
    std::size_t last_command_offset_ = 0;
+diff --git a/graphics/frontend/include/gxruntime/aurora_recomp/trace.hpp b/graphics/frontend/include/gxruntime/aurora_recomp/trace.hpp
+index 56ea697..1ef3293 100644
+--- a/graphics/frontend/include/gxruntime/aurora_recomp/trace.hpp
++++ b/graphics/frontend/include/gxruntime/aurora_recomp/trace.hpp
+@@ -34,6 +34,11 @@ enum class RecordKind : std::uint8_t {
+   SetArray = 4,        // u8 attr | u32 guest_addr | u16 stride — HLE bridge record
+   MemUpdate = 5,       // u32 guest_addr | u32 byte_size | bytes (resolved guest memory)
+   PresentStats = 6,    // u32 frame_index | 9 x u32 AuroraStats fields
++  // u32 byte_size | GX FIFO commands (CP/XF/BP loads). Reset the decoder and
++  // replay these: the register state at the start of a recording window, or
++  // the state a save-state load put back (RetailGxFrontend::state_preamble).
++  // Any MEM_UPDATE its texture/TLUT setup needs comes before it.
++  GxState = 7,
+ };
+ 
+ struct TraceHeader {
+@@ -75,6 +80,7 @@ public:
+   void mem_update(std::uint32_t guest_addr, const void* bytes,
+                   std::uint32_t byte_size);
+   void present_stats(const PresentStats& stats);
++  void gx_state(const void* bytes, std::uint32_t byte_size);
+ 
+   // Flushes and closes; returns false if any write failed at any point.
+   bool close();
+@@ -136,5 +142,6 @@ bool decode_set_array(const RecordView& r, std::uint8_t& attr,
+ bool decode_mem_update(const RecordView& r, std::uint32_t& guest_addr,
+                        std::span<const std::uint8_t>& bytes);
+ bool decode_present_stats(const RecordView& r, PresentStats& out);
++bool decode_gx_state(const RecordView& r, std::span<const std::uint8_t>& bytes);
+ 
+ } // namespace gxruntime::aurora_recomp::trace
+diff --git a/graphics/frontend/src/replay.cpp b/graphics/frontend/src/replay.cpp
+index e21b335..80dc91b 100644
+--- a/graphics/frontend/src/replay.cpp
++++ b/graphics/frontend/src/replay.cpp
+@@ -271,6 +271,27 @@ ReplayResult replay_trace(trace::TraceReader& reader,
+       close_frame(&stats);
+       break;
+     }
++    case trace::RecordKind::GxState: {
++      std::span<const std::uint8_t> bytes;
++      if (!trace::decode_gx_state(record, bytes)) {
++        fail("malformed GX_STATE");
++        break;
++      }
++      // Start the decoder over from the recorded register state. Packet
++      // numbering restarts with it, so the sink and the per-frame counter
++      // baselines restart too.
++      ctx->frontend.reset(&resolver);
++      ctx->frontend.set_packet_drain_enabled(true);
++      ctx->sink.reset();
++      last_draws = last_zero_draws = last_verts = last_topo = last_store =
++          last_elems = 0;
++      if (!bytes.empty() && !ctx->frontend.replay_fifo(bytes, &ctx->sink)) {
++        fail("frontend rejected GX_STATE: " +
++             frontend_error_detail(ctx->frontend));
++        break;
++      }
++      break;
++    }
+     default:
+       // Unknown kinds are forward-compatible: skip.
+       break;
 diff --git a/graphics/frontend/src/retail_gx_frontend.cpp b/graphics/frontend/src/retail_gx_frontend.cpp
 index 06fff92..4151d2d 100644
 --- a/graphics/frontend/src/retail_gx_frontend.cpp
@@ -648,6 +862,96 @@ index 06fff92..4151d2d 100644
  } // namespace gxruntime::aurora_recomp
  
  extern "C" {
+diff --git a/graphics/frontend/src/trace_io.cpp b/graphics/frontend/src/trace_io.cpp
+index 945ff7f..0b0915a 100644
+--- a/graphics/frontend/src/trace_io.cpp
++++ b/graphics/frontend/src/trace_io.cpp
+@@ -135,6 +135,12 @@ void TraceWriter::present_stats(const PresentStats& stats) {
+   write_record(RecordKind::PresentStats, p, sizeof p);
+ }
+ 
++void TraceWriter::gx_state(const void* bytes, std::uint32_t byte_size) {
++  std::uint8_t p[4];
++  store_u32le(p, byte_size);
++  write_record(RecordKind::GxState, p, sizeof p, bytes, byte_size);
++}
++
+ bool TraceWriter::close() {
+   if (!file_)
+     return ok_;
+@@ -259,6 +265,16 @@ bool decode_mem_update(const RecordView& r, std::uint32_t& guest_addr,
+   return true;
+ }
+ 
++bool decode_gx_state(const RecordView& r, std::span<const std::uint8_t>& bytes) {
++  if (r.kind != RecordKind::GxState || r.payload.size() < 4)
++    return false;
++  const std::uint32_t byte_size = load_u32le(r.payload.data());
++  if (r.payload.size() - 4 != byte_size)
++    return false;
++  bytes = r.payload.subspan(4);
++  return true;
++}
++
+ bool decode_present_stats(const RecordView& r, PresentStats& out) {
+   if (r.kind != RecordKind::PresentStats || r.payload.size() != 40)
+     return false;
+diff --git a/graphics/frontend/tools/dolgx_replay_core.cpp b/graphics/frontend/tools/dolgx_replay_core.cpp
+index 25515c3..895bdcc 100644
+--- a/graphics/frontend/tools/dolgx_replay_core.cpp
++++ b/graphics/frontend/tools/dolgx_replay_core.cpp
+@@ -617,6 +617,26 @@ int dolgx_replay_core_main(const char* trace_path,
+       std::memcpy(ctx.mem1.data() + physical, bytes.data(), bytes.size());
+       break;
+     }
++    case trace::RecordKind::GxState: {
++      std::span<const std::uint8_t> bytes;
++      if (!trace::decode_gx_state(record, bytes)) {
++        fail("malformed GX_STATE");
++        break;
++      }
++      // Start the decoder over from the recorded register state (a window
++      // that starts mid-game, or a save-state load inside the window), as
++      // the backend's dol_aurora_gx_state_load does live.
++      frontend.reset(&resolver);
++      frontend.set_packet_drain_enabled(true);
++      sink.reset();
++      aurora::gfx::gxcore::reset_texture_cache();
++      ctx.gpnf_draw_payload_cursor = 0;
++      if (!bytes.empty() && !frontend.replay_fifo(bytes, &sink)) {
++        fail("frontend rejected GX_STATE: " + frontend_error_detail(frontend));
++        break;
++      }
++      break;
++    }
+     case trace::RecordKind::PresentStats: {
+       present_and_capture();
+       break;
+diff --git a/graphics/frontend/tools/dolgx_replay_pixels.cpp b/graphics/frontend/tools/dolgx_replay_pixels.cpp
+index adb5231..fe4b6aa 100644
+--- a/graphics/frontend/tools/dolgx_replay_pixels.cpp
++++ b/graphics/frontend/tools/dolgx_replay_pixels.cpp
+@@ -480,6 +480,20 @@ int dolgx_replay_pixels_main(const char* trace_path,
+       std::memcpy(ctx.mem1.data() + physical, bytes.data(), bytes.size());
+       break;
+     }
++    case trace::RecordKind::GxState: {
++      std::span<const std::uint8_t> bytes;
++      if (!trace::decode_gx_state(record, bytes)) {
++        fail("malformed GX_STATE");
++        break;
++      }
++      // Mode B1 drives the live Aurora gx layer (DOL_GX_CORE=0), which has no
++      // reset: feed the register writes through it like a display list. A
++      // window's first GX_STATE lands on a fresh layer anyway.
++      if (!bytes.empty())
++        aurora_backend_call_display_list(bytes.data(),
++                                         static_cast<u32>(bytes.size()));
++      break;
++    }
+     case trace::RecordKind::PresentStats: {
+       present_and_capture();
+       break;
 diff --git a/graphics/gxcore/include/gxruntime/gxcore/gxcore.hpp b/graphics/gxcore/include/gxruntime/gxcore/gxcore.hpp
 index 4d14391..71dbfb2 100644
 --- a/graphics/gxcore/include/gxruntime/gxcore/gxcore.hpp
@@ -663,6 +967,54 @@ index 4d14391..71dbfb2 100644
  
    const GapCounters& counters() const { return counters_; }
    GapCounters& counters() { return counters_; }
+diff --git a/graphics/gxcore/src/gp_state_dump.cpp b/graphics/gxcore/src/gp_state_dump.cpp
+index 2d64013..1de36d6 100644
+--- a/graphics/gxcore/src/gp_state_dump.cpp
++++ b/graphics/gxcore/src/gp_state_dump.cpp
+@@ -3,6 +3,7 @@
+ 
+ #include <cinttypes>
+ #include <cstdio>
++#include <cstdlib>
+ #include <cstring>
+ #include <string>
+ 
+@@ -248,6 +249,35 @@ std::string format_gp_state_draw_json(const DrawPlan& plan,
+                             true);
+   append_matrix_fingerprint(s, "nrm_mtx_fnv", plan.constants.posnormalmatrix + 3,
+                             3, true);
++  // DOL_GP_DUMP_MTX=1: the matrices and first vertices themselves, to see
++  // where a draw lands (a broken model matrix shows up here).
++  static const bool dump_mtx = std::getenv("DOL_GP_DUMP_MTX") != nullptr;
++  if (dump_mtx) {
++    char buf[96];
++    s += ",\"pos_mtx\":[";
++    for (int r = 0; r < 3; ++r)
++      for (int c = 0; c < 4; ++c) {
++        std::snprintf(buf, sizeof buf, "%s%g", (r | c) ? "," : "",
++                      plan.constants.posnormalmatrix[r][c]);
++        s += buf;
++      }
++    s += "],\"proj\":[";
++    for (int r = 0; r < 4; ++r)
++      for (int c = 0; c < 4; ++c) {
++        std::snprintf(buf, sizeof buf, "%s%g", (r | c) ? "," : "",
++                      plan.constants.projection[r][c]);
++        s += buf;
++      }
++    s += "],\"verts\":[";
++    const std::uint32_t nv = plan.vertex_count < 6 ? plan.vertex_count : 6;
++    for (std::uint32_t v = 0; v < nv; ++v) {
++      const float* p = plan.vertices.data() + v * kVertexFloats;
++      std::snprintf(buf, sizeof buf, "%s[%g,%g,%g,%g]", v ? "," : "", p[0], p[1],
++                    p[2], p[3]);
++      s += buf;
++    }
++    s += ']';
++  }
+ 
+   append_u32(s, "num_tex_gens", sk.num_tex_gens, true);
+   append_u32(s, "dualtex_enabled", sk.dualtex_enabled, true);
 diff --git a/graphics/gxcore/src/gxcore.cpp b/graphics/gxcore/src/gxcore.cpp
 index 2fb6944..7fefce3 100644
 --- a/graphics/gxcore/src/gxcore.cpp

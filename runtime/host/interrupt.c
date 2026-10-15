@@ -207,16 +207,23 @@ void interrupt_init(void) {
 }
 
 // GPU time for a draw-done that nobody waits on: the PE finish interrupt is
-// raised this many work units after GXSetDrawDone, not at once. This game's
-// draw-done callback does a blocking OSReceiveMessage for the message the main
-// loop sends right after GXSetDrawDone; on hardware the GPU is always later than
-// that send, and finishing first would block the callback inside the interrupt.
+// raised a little after GXSetDrawDone, not at once. This game's draw-done
+// callback does a blocking OSReceiveMessage for the message the main loop sends
+// right after GXSetDrawDone; on hardware the GPU is always later than that send,
+// and finishing first would block the callback inside the interrupt.
+// On the wall clock the delay is real time: counted in dispatch-loop visits it
+// grew with block chaining (one visit can run a whole spin loop), to a frame
+// or more, and the game missed retraces. Block-paced runs keep the unit count.
 #define PE_FINISH_LATENCY 4096u
+#define PE_FINISH_WALL_NS 250000ull
 static u32 pe_finish_countdown;
+static u64 pe_finish_due_ns;
 
 void interrupt_defer_pe_finish(void) {
-    if (pe_finish_countdown == 0)
+    if (pe_finish_countdown == 0) {
         pe_finish_countdown = PE_FINISH_LATENCY;
+        pe_finish_due_ns = wall_ns() + PE_FINISH_WALL_NS;
+    }
 }
 
 void interrupt_commit_pe_finish(void) {
@@ -393,8 +400,9 @@ void interrupt_poll(CPUState* cpu) {
     const u64 units = interrupt_poll_accum;
     interrupt_poll_accum = 0;
     u64 vi_units = units;
+    u64 now = 0;
     if (wall_clock) {
-        const u64 now = wall_ns();
+        now = wall_ns();
         u64 elapsed = now - wall_last_ns;
         wall_last_ns = now;
         if (elapsed > WALL_MAX_STEP_NS)
@@ -409,9 +417,12 @@ void interrupt_poll(CPUState* cpu) {
         }
     }
     if (pe_finish_countdown != 0) {
-        pe_finish_countdown = pe_finish_countdown > units
-                                  ? pe_finish_countdown - (u32)units
-                                  : 0;
+        if (wall_clock)
+            pe_finish_countdown = now >= pe_finish_due_ns ? 0u : pe_finish_countdown;
+        else
+            pe_finish_countdown = pe_finish_countdown > units
+                                      ? pe_finish_countdown - (u32)units
+                                      : 0;
         if (pe_finish_countdown == 0)
             interrupt_commit_pe_finish();
     }
@@ -501,6 +512,7 @@ void interrupt_state_load(const void* in) {
                                GC_TIMEBASE_HZ);
     interrupt_poll_accum = s.poll_accum;
     pe_finish_countdown = s.pe_finish_countdown;
+    pe_finish_due_ns = wall_ns() + PE_FINISH_WALL_NS;
     pe_ctrl_enables = s.pe_ctrl_enables;
     gp_breakpoint_armed = s.gp_breakpoint_armed;
     gp_held_count = s.gp_held_count <= GP_HELD_TOKENS_MAX ? s.gp_held_count

@@ -3179,7 +3179,7 @@ index 56ea697..1ef3293 100644
  
  } // namespace gxruntime::aurora_recomp::trace
 diff --git a/graphics/frontend/src/render_sink.cpp b/graphics/frontend/src/render_sink.cpp
-index 2ef5b3d..08d3378 100644
+index 2ef5b3d..c6556f2 100644
 --- a/graphics/frontend/src/render_sink.cpp
 +++ b/graphics/frontend/src/render_sink.cpp
 @@ -1,10 +1,65 @@
@@ -3435,13 +3435,13 @@ index 2ef5b3d..08d3378 100644
 +  packet.kind = RenderPacketKind::TraceEvent;
 +  packet.sequence = sequence;
 +  packet.event = event;
-+  packet.stream = {};
-+  packet.state = {};
-+  packet.resource = {};
++  // Each case below sets its own member whole (designated initializers zero
++  // the rest), and consumers read only the member packet.kind names, so the
++  // others are not cleared for every event (tens of thousands a frame).
  
    switch (event.kind) {
    case DOL_GX_RECOMP_EVENT_FIFO_BYTES:
-@@ -681,18 +741,16 @@ RenderPacket make_render_packet(std::uint32_t sequence,
+@@ -681,18 +741,19 @@ RenderPacket make_render_packet(std::uint32_t sequence,
      break;
    case DOL_GX_RECOMP_EVENT_DRAW:
      packet.kind = RenderPacketKind::Draw;
@@ -3459,6 +3459,9 @@ index 2ef5b3d..08d3378 100644
 +    packet.draw.vertex_payload_size = 0;
      break;
    default:
++    packet.stream = {};
++    packet.state = {};
++    packet.resource = {};
      break;
    }
 -

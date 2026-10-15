@@ -4287,6 +4287,14 @@ static void initialize_hle_dispatch(void) {
             entry->intercept = kAddrHandlers[i].fn;
     }
     for (size_t i = 0; i < sizeof kNotify / sizeof kNotify[0]; i++) {
+        // The texture and TLUT bindings feed only the live Aurora gx layer
+        // (emit_gx_resource_metadata, from the GX shortcuts above). gxcore reads
+        // textures from the FIFO stream itself, so without ED_GX_HLE these hooks
+        // would only hash every loaded texture on the game thread (and run the
+        // Strikers host's THP movie-plane check, which reads a G4QE01 address).
+        if (!use_gx_hle && (strcmp(kNotify[i].name, "GXLoadTexObj") == 0 ||
+                            strcmp(kNotify[i].name, "GXLoadTlut") == 0))
+            continue;
         HleDispatchEntry* entry =
             hle_dispatch_entry(hle_entry_address(kNotify[i].address, kNotify[i].name));
         if (entry != NULL)
@@ -4359,6 +4367,20 @@ static bool hle_dispatch(CPUState* cpu, u32 address) {
     // model the absent callback as a no-op and return to the caller instead of
     // halting. Loud + counted so genuine wild branches stay visible.
     if (address < HLE_CODE_BASE) {
+        // __OSInitMemoryProtection calls Config24MB (Config48MB on a 48 MB
+        // devkit) through its physical address with translation off, to set
+        // the BATs. There is no MMU here: skip it, and say so by name.
+        if (address != 0u) {
+            const u32 cached = address | GC_RAM_BASE;
+            const char* config = cached == sdk_symbol_address("Config24MB")   ? "Config24MB"
+                                 : cached == sdk_symbol_address("Config48MB") ? "Config48MB"
+                                                                              : NULL;
+            if (config != NULL) {
+                fprintf(stderr, "[hle] %s (real-mode call) skipped\n", config);
+                hle_return(cpu);
+                return true;
+            }
+        }
         static unsigned long null_calls = 0;
         if (cpu->lr >= HLE_CODE_BASE) {
             if (g_hle_log || null_calls < 8)

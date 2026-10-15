@@ -14,6 +14,9 @@
 #include "host/frontend.h"
 #include "host/settings.h"
 
+#include <SDL3/SDL_cpuinfo.h>
+#include <SDL3/SDL_thread.h>
+
 #include <algorithm>
 #include <condition_variable>
 #include <cstdio>
@@ -84,14 +87,21 @@ void build_mips(Loaded& img) {
     }
 }
 
+// Shared with the loader threads, which never stop: on the heap and never
+// destroyed, so exit neither waits on nor frees what they use (glibc's
+// pthread_cond_destroy blocks while a thread waits on the condition, which
+// kept the process alive after quitting on Linux).
+struct Shared {
+    std::unordered_map<Key, std::string, KeyHash> files;  // read-only after init
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::deque<Key> queue;
+    std::unordered_set<Key, KeyHash> queued;  // queued or loading
+    std::unordered_map<Key, Loaded, KeyHash> ready;
+    std::unordered_set<Key, KeyHash> failed;
+};
+Shared& g = *new Shared;
 std::string g_dir;
-std::unordered_map<Key, std::string, KeyHash> g_files;  // read-only after init
-std::mutex g_mutex;
-std::condition_variable g_cv;
-std::deque<Key> g_queue;
-std::unordered_set<Key, KeyHash> g_queued;  // queued or loading
-std::unordered_map<Key, Loaded, KeyHash> g_ready;
-std::unordered_set<Key, KeyHash> g_failed;
 bool g_log = false;
 
 // tex1_<w>x<h>[_m]_<hash16>_<fmt>.png (paletted and per-mip files are skipped).
@@ -120,41 +130,43 @@ bool parse_name(const std::string& name, Key* key) {
 }
 
 void loader() {
+    // Below the game's own threads: decoding waits, a frame does not.
+    SDL_SetCurrentThreadPriority(SDL_THREAD_PRIORITY_LOW);
     for (;;) {
         Key key;
         {
-            std::unique_lock<std::mutex> lock(g_mutex);
-            g_cv.wait(lock, [] { return !g_queue.empty(); });
-            key = g_queue.front();
-            g_queue.pop_front();
+            std::unique_lock<std::mutex> lock(g.mutex);
+            g.cv.wait(lock, [] { return !g.queue.empty(); });
+            key = g.queue.front();
+            g.queue.pop_front();
         }
         Loaded img;
-        const bool ok = load_png_rgba(g_files.at(key), &img.rgba, &img.width, &img.height);
+        const bool ok = load_png_rgba(g.files.at(key), &img.rgba, &img.width, &img.height);
         static const bool mips = [] {
             const char* env = std::getenv("ED_TEXPACK_MIPS");
             return env == nullptr || std::strcmp(env, "0") != 0;
         }();
         if (ok && mips)
             build_mips(img);
-        std::lock_guard<std::mutex> lock(g_mutex);
-        g_queued.erase(key);
+        std::lock_guard<std::mutex> lock(g.mutex);
+        g.queued.erase(key);
         if (ok)
-            g_ready[key] = std::move(img);
+            g.ready[key] = std::move(img);
         else
-            g_failed.insert(key);
+            g.failed.insert(key);
         if (g_log)
             std::fprintf(stderr, "[texpack] %s %s\n", ok ? "loaded" : "FAILED",
-                         g_files.at(key).c_str());
+                         g.files.at(key).c_str());
     }
 }
 
 int lookup(uint32_t format, uint32_t width, uint32_t height, uint64_t hash, uint8_t** out_rgba,
            uint32_t* out_width, uint32_t* out_height, uint32_t* out_mips) {
     const Key key{format, width, height, hash};
-    if (g_files.find(key) == g_files.end())
+    if (g.files.find(key) == g.files.end())
         return 0;
-    std::lock_guard<std::mutex> lock(g_mutex);
-    if (auto it = g_ready.find(key); it != g_ready.end()) {
+    std::lock_guard<std::mutex> lock(g.mutex);
+    if (auto it = g.ready.find(key); it != g.ready.end()) {
         Loaded& img = it->second;
         *out_rgba = static_cast<uint8_t*>(std::malloc(img.rgba.size()));
         if (*out_rgba == nullptr)
@@ -163,19 +175,19 @@ int lookup(uint32_t format, uint32_t width, uint32_t height, uint64_t hash, uint
         *out_width = img.width;
         *out_height = img.height;
         *out_mips = img.mips;
-        g_ready.erase(it);  // the renderer keeps it now
+        g.ready.erase(it);  // the renderer keeps it now
         return 1;
     }
-    if (g_failed.count(key) != 0)
+    if (g.failed.count(key) != 0)
         return 0;
-    if (g_queued.insert(key).second) {
-        g_queue.push_back(key);
-        g_cv.notify_one();
+    if (g.queued.insert(key).second) {
+        g.queue.push_back(key);
+        g.cv.notify_one();
     }
     return 2;
 }
 
-uint64_t generation() { return g_settings.hd_textures && !g_files.empty() ? 1u : 0u; }
+uint64_t generation() { return g_settings.hd_textures && !g.files.empty() ? 1u : 0u; }
 
 std::string pack_dir() {
     if (const char* env = std::getenv("ED_TEXTURE_PACK"); env != nullptr && env[0] != '\0')
@@ -207,19 +219,22 @@ extern "C" void texpack_init(void) {
             continue;
         Key key;
         if (parse_name(name, &key))
-            g_files.emplace(key, it->path().string());
+            g.files.emplace(key, it->path().string());
         else
             skipped++;
     }
-    std::fprintf(stderr, "[texpack] %zu textures in %s (%zu skipped)\n", g_files.size(),
+    std::fprintf(stderr, "[texpack] %zu textures in %s (%zu skipped)\n", g.files.size(),
                  g_dir.c_str(), skipped);
-    if (g_files.empty())
+    if (g.files.empty())
         return;
-    // Two loaders: PNG decoding is the slow part and must not hold up a frame.
-    for (int i = 0; i < 2; i++)
+    // PNG decoding is the slow part and must not hold up a frame: two loaders,
+    // or one on a machine of 8 threads or fewer (the Steam Deck), where they
+    // share cores with the game's.
+    const int loaders = SDL_GetNumLogicalCPUCores() > 8 ? 2 : 1;
+    for (int i = 0; i < loaders; i++)
         std::thread(loader).detach();
     static const DolAuroraTexturePack ops = {lookup, generation};
     dol_aurora_set_texture_pack(&ops);
 }
 
-size_t texpack_count() { return g_files.size(); }
+size_t texpack_count() { return g.files.size(); }

@@ -5,6 +5,7 @@
 #include "host/frontend.h"
 
 #include "gxruntime/aurora_backend.h"
+#include "host/buttons.h"
 #include "host/controls.h"
 #include "host/settings.h"
 
@@ -712,6 +713,8 @@ void render() {
         g_screen == Screen::InGame
             ? "Up/Down choose &#183; Left/Right change &#183; A select &#183; B resume"
             : "Up/Down choose &#183; Left/Right change &#183; A select &#183; B back");
+    // Before the game (main menu, Play) the emblem stands in for the title.
+    g_doc->SetClass("branded", g_screen == Screen::Launcher || g_screen == Screen::Play);
     // The controls list is long: drop the title and tighten the rows.
     g_doc->SetClass("compact", g_screen == Screen::Mapping);
     // Over the game the menu dims the paused frame; the launcher is opaque.
@@ -967,6 +970,11 @@ extern "C" void frontend_init(int argc, char** argv) {
     // Load the menus now so their key listener hears Esc even when the
     // launcher is skipped (quick-load and test runs).
     ensure_ui();
+    // The window and Dock icon: the Recomp emblem.
+    std::vector<uint8_t> icon;
+    uint32_t w = 0, h = 0;
+    if (load_png_rgba(res_dir() + "/icon/window.png", &icon, &w, &h))
+        dol_aurora_set_window_icon(icon.data(), w, h);
 }
 
 extern "C" bool frontend_run_launcher(const char* default_iso, char* iso_out,

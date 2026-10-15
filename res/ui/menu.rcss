@@ -156,3 +156,20 @@ body.compact .row {
 	margin: 1dp 0;
 	align-items: center;
 }
+
+/* The Recomp emblem replaces the text title on the main menu and Play. */
+#emblem {
+	display: none;
+}
+
+body.branded #emblem {
+	display: block;
+	width: 280dp;
+	height: 280dp;
+	margin: -12dp auto 6dp auto;
+}
+
+body.branded #title,
+body.branded #subtitle {
+	display: none;
+}

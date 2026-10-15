@@ -39,16 +39,8 @@ const Image* load_icon(const std::string& file) {
         return it->second.rgba.empty() ? nullptr : &it->second;
     Image& img = cache[file];
     const std::string path = frontend_res_dir() + "/ui/glyphs/" + file;
-    png_image png{};
-    png.version = PNG_IMAGE_VERSION;
-    if (png_image_begin_read_from_file(&png, path.c_str())) {
-        png.format = PNG_FORMAT_RGBA;
-        img.w = png.width;
-        img.h = png.height;
-        img.rgba.resize(PNG_IMAGE_SIZE(png));
-        if (!png_image_finish_read(&png, nullptr, img.rgba.data(), 0, nullptr))
-            img.rgba.clear();
-    }
+    if (!load_png_rgba(path, &img.rgba, &img.w, &img.h))
+        img.rgba.clear();
     if (img.rgba.empty())
         std::fprintf(stderr, "[buttons] icon missing: %s\n", path.c_str());
     return img.rgba.empty() ? nullptr : &img;
@@ -184,6 +176,23 @@ bool apply(const uint8_t* rgba, uint32_t width, uint32_t height, uint8_t** out_r
 uint64_t generation() { return controls::glyph_signature(); }
 
 }  // namespace
+
+bool load_png_rgba(const std::string& path, std::vector<uint8_t>* rgba, uint32_t* width,
+                   uint32_t* height) {
+    png_image png{};
+    png.version = PNG_IMAGE_VERSION;
+    if (!png_image_begin_read_from_file(&png, path.c_str()))
+        return false;
+    png.format = PNG_FORMAT_RGBA;
+    rgba->resize(PNG_IMAGE_SIZE(png));
+    if (!png_image_finish_read(&png, nullptr, rgba->data(), 0, nullptr)) {
+        rgba->clear();
+        return false;
+    }
+    *width = png.width;
+    *height = png.height;
+    return true;
+}
 
 extern "C" void buttons_init(void) {
     static const DolAuroraTextureOverride ops = {claims, apply, generation};

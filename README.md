@@ -64,6 +64,8 @@ another file). Memory-card saves are never touched by a load.
   [unending-occlusion](https://github.com/PattyTrish/unending-occlusion) decomp (CC0).
 - `patches/gxruntime/`, `patches/dolrecomp/`: fixes to GXRuntime and the
   recompiler this game needs.
+- `res/icon/`: the Eternal Darkness Recomp emblem (window and Dock icon,
+  `AppIcon.icns` for the Mac app).
 - `res/`: the launcher and in-game menu (RmlUi documents) and their fonts
   (Alegreya SC and Fira Sans, SIL Open Font License, licences alongside), and
   button icons from Kenney's Input Prompts (CC0).

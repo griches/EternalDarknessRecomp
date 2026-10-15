@@ -5,6 +5,7 @@
 </head>
 <body>
 	<div id="panel">
+		<img id="emblem" src="emblem.png"/>
 		<div id="title">Eternal Darkness</div>
 		<div id="subtitle">Sanity's Requiem</div>
 		<div id="heading"></div>

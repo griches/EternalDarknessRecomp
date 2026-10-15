@@ -1,8 +1,8 @@
 diff --git a/backends/aurora/aurora_backend.cpp b/backends/aurora/aurora_backend.cpp
-index d94f811..3f6e02b 100644
+index d94f811..14bbe77 100644
 --- a/backends/aurora/aurora_backend.cpp
 +++ b/backends/aurora/aurora_backend.cpp
-@@ -19,7 +19,9 @@
+@@ -19,9 +19,13 @@
  #include <dolphin/pad.h>
  #include <dolphin/vi.h>
  #include <SDL3/SDL_audio.h>
@@ -11,8 +11,12 @@ index d94f811..3f6e02b 100644
 +#include <SDL3/SDL_keyboard.h>
  #include <SDL3/SDL_scancode.h>
  #include <SDL3/SDL_timer.h>
++#include <SDL3/SDL_surface.h>
++#include <SDL3/SDL_video.h>
  
-@@ -30,12 +32,16 @@
+ #include <gx/fifo.hpp>
+ #include <gx/gx.hpp>
+@@ -30,12 +34,16 @@
  #include <cstdio>
  #include <cstdlib>
  #include <cstring>
@@ -29,7 +33,7 @@ index d94f811..3f6e02b 100644
  
  #if GXRUNTIME_HAS_AURORA_RECOMP
  // gxcore substrate submission lives in the Aurora fork (lib/gfx/gxcore_draw.cpp),
-@@ -46,9 +52,30 @@ namespace aurora::gfx::gxcore {
+@@ -46,9 +54,31 @@ namespace aurora::gfx::gxcore {
  bool submit_draw_plan(const gxruntime::gxcore::DrawPlan& plan);
  void copy_efb_to_texture(const gxruntime::gxcore::EfbCopyCommand& cmd);
  void reset_texture_cache();
@@ -50,6 +54,7 @@ index d94f811..3f6e02b 100644
 +// Window controls for the front end (Aurora fork-internal window.cpp).
 +namespace aurora::window {
 +AuroraWindowSize get_window_size();
++SDL_Window* get_sdl_window();
 +void set_frame_buffer_scale(float scale);
 +void set_fullscreen(bool fullscreen);
 +void set_frame_buffer_aspect_fit(bool fit);
@@ -60,7 +65,7 @@ index d94f811..3f6e02b 100644
  // Forward for continuous EFB readback attach (fork-internal).
  namespace aurora::gfx::efb_readback {
  void set_continuous(bool enabled) noexcept;
-@@ -57,8 +84,18 @@ bool peek(const std::uint8_t** rgba, std::uint32_t* width,
+@@ -57,8 +87,18 @@ bool peek(const std::uint8_t** rgba, std::uint32_t* width,
            std::uint32_t* height) noexcept;
  } // namespace aurora::gfx::efb_readback
  
@@ -79,7 +84,7 @@ index d94f811..3f6e02b 100644
  bool g_frame_open = false;
  bool g_should_quit = false;
  bool g_graphics_log = false;
-@@ -112,6 +149,24 @@ std::array<PendingTlutMetadata, 20> g_pending_tluts{};
+@@ -112,6 +152,24 @@ std::array<PendingTlutMetadata, 20> g_pending_tluts{};
  // validating sink checked. The live Aurora path stays authoritative; this only
  // proves the consumer survives real FIFO traffic ahead of renderer cutover.
  gxruntime::aurora_recomp::RetailGxFrontend g_shadow_frontend;
@@ -104,7 +109,7 @@ index d94f811..3f6e02b 100644
  gxruntime::aurora_recomp::ConsumingAuroraRenderSink g_shadow_packet_sink;
  bool g_shadow_frontend_enabled = false;
  bool g_shadow_frontend_failed = false;
-@@ -379,13 +434,39 @@ unsigned long long g_trace_present_scope_frame = 0ull;
+@@ -379,13 +437,39 @@ unsigned long long g_trace_present_scope_frame = 0ull;
  bool g_trace_frame_begun = false;
  unsigned long long g_trace_frames_recorded = 0ull;
  gxruntime::aurora_recomp::trace::TraceWriter g_trace_writer;
@@ -151,7 +156,7 @@ index d94f811..3f6e02b 100644
  
  unsigned long long trace_current_frame() {
      return g_trace_present_scope_frame != 0ull ? g_trace_present_scope_frame
-@@ -435,6 +516,17 @@ bool trace_should_record() {
+@@ -435,6 +519,17 @@ bool trace_should_record() {
          g_trace_writer.frame_begin(static_cast<u32>(frame));
          g_trace_frame_begun = true;
          ++g_trace_frames_recorded;
@@ -169,7 +174,7 @@ index d94f811..3f6e02b 100644
      }
      return true;
  }
-@@ -442,18 +534,46 @@ bool trace_should_record() {
+@@ -442,18 +537,46 @@ bool trace_should_record() {
  void trace_record_mem_update(u32 address, u32 size, const void* data) {
      if (size == 0 || data == nullptr || !trace_should_record())
          return;
@@ -225,7 +230,7 @@ index d94f811..3f6e02b 100644
  }
  
  void trace_close_and_log() {
-@@ -491,6 +611,10 @@ void trace_on_present() {
+@@ -491,6 +614,10 @@ void trace_on_present() {
          trace_close_and_log();
      g_trace_present_scope_frame = 0ull;
      g_trace_frame_begun = false;
@@ -236,7 +241,7 @@ index d94f811..3f6e02b 100644
  }
  // ---------------------------------------------------------------------------
  
-@@ -937,7 +1061,7 @@ bool dol_aurora_initialize(int argc, char** argv,
+@@ -937,7 +1064,7 @@ bool dol_aurora_initialize(int argc, char** argv,
      g_trace_present_scope_frame = 0ull;
      g_trace_frame_begun = false;
      g_trace_frames_recorded = 0ull;
@@ -245,7 +250,7 @@ index d94f811..3f6e02b 100644
      const char* trace_out = std::getenv("DOL_AURORA_RECOMP_TRACE_OUT");
      if (trace_out != nullptr && trace_out[0] != '\0') {
          g_trace_path = trace_out;
-@@ -1114,6 +1238,99 @@ void dol_aurora_flush_gap_report(void) {
+@@ -1114,6 +1241,112 @@ void dol_aurora_flush_gap_report(void) {
      flush_gxcore_gap_counters();
  }
  
@@ -332,6 +337,19 @@ index d94f811..3f6e02b 100644
 +    aurora::window::set_frame_buffer_scale(scale > 0 ? static_cast<float>(scale) : 0.f);
 +}
 +
++void dol_aurora_set_window_icon(const uint8_t* rgba, uint32_t width, uint32_t height) {
++    SDL_Window* window = aurora::window::get_sdl_window();
++    if (window == nullptr || rgba == nullptr || width == 0 || height == 0)
++        return;
++    SDL_Surface* surface = SDL_CreateSurfaceFrom(
++        static_cast<int>(width), static_cast<int>(height), SDL_PIXELFORMAT_RGBA32,
++        const_cast<uint8_t*>(rgba), static_cast<int>(width * 4));
++    if (surface == nullptr)
++        return;
++    SDL_SetWindowIcon(window, surface);
++    SDL_DestroySurface(surface);
++}
++
 +void dol_aurora_set_fullscreen(bool fullscreen) {
 +    aurora::window::set_fullscreen(fullscreen);
 +}
@@ -345,7 +363,7 @@ index d94f811..3f6e02b 100644
  void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user) {
      g_efb_frame_fill = fn;
      g_efb_frame_fill_user = user;
-@@ -1212,6 +1429,60 @@ void aurora_backend_present(void) {
+@@ -1212,6 +1445,60 @@ void aurora_backend_present(void) {
          }
      }
      ++g_present_count;
@@ -406,7 +424,7 @@ index d94f811..3f6e02b 100644
      if (g_frame_pacing_log &&
          (g_present_count <= 10 || (g_present_count % 60) == 0)) {
          const AuroraStats* stats = aurora_get_stats();
-@@ -1432,6 +1703,7 @@ void aurora_backend_present(void) {
+@@ -1432,6 +1719,7 @@ void aurora_backend_present(void) {
      const unsigned long long present_fifo = g_fifo_bytes;
      g_fifo_bytes = 0;
      poll_events();
@@ -414,7 +432,7 @@ index d94f811..3f6e02b 100644
      if (!g_should_quit) {
          g_frame_open = aurora_begin_frame();
  #if GXRUNTIME_HAS_AURORA_RECOMP
-@@ -1482,7 +1754,13 @@ void aurora_backend_gx_write(u64 value, u8 size) {
+@@ -1482,7 +1770,13 @@ void aurora_backend_gx_write(u64 value, u8 size) {
          return;
      g_fifo_bytes += size;
  #if GXRUNTIME_HAS_AURORA_RECOMP
@@ -429,7 +447,7 @@ index d94f811..3f6e02b 100644
      // Record AFTER the shadow write so MEM_UPDATEs its resolves emitted
      // precede this GX_WRITE in the trace (replay reads them first), and
      // BEFORE the live-Aurora forwarding below so the pristine value is
-@@ -1796,6 +2074,9 @@ u32 aurora_backend_pad_read(DolPadState state[4]) {
+@@ -1796,6 +2090,9 @@ u32 aurora_backend_pad_read(DolPadState state[4]) {
              .error = status[i].err,
          };
      }
@@ -439,7 +457,7 @@ index d94f811..3f6e02b 100644
      return motor_mask;
  }
  
-@@ -1807,7 +2088,18 @@ bool aurora_backend_pad_recalibrate(u32 mask) {
+@@ -1807,7 +2104,18 @@ bool aurora_backend_pad_recalibrate(u32 mask) {
      return PADRecalibrate(mask) != FALSE;
  }
  
@@ -458,7 +476,7 @@ index d94f811..3f6e02b 100644
      PADControlMotor(channel, command);
  }
  
-@@ -1848,6 +2140,7 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1848,6 +2156,7 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
  
      int queued = SDL_GetAudioStreamQueued(g_audio_stream);
      unsigned waited_ms = 0;
@@ -466,7 +484,7 @@ index d94f811..3f6e02b 100644
      while (queued > max_queued_bytes && waited_ms < 20u) {
          g_audio_throttle_count++;
          if (g_audio_queue_log &&
-@@ -1860,8 +2153,17 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1860,8 +2169,17 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
                           max_queued_bytes);
          SDL_Delay(1);
          waited_ms++;
@@ -484,7 +502,7 @@ index d94f811..3f6e02b 100644
  
      const bool low_queue =
          queued >= 0 && queued < bytes_per_second / 100;
-@@ -1876,6 +2178,20 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1876,6 +2194,20 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
                       g_audio_push_count, queued, queued + bytes,
                       g_audio_playing ? 1u : 0u, g_audio_throttle_count);
      }
@@ -505,7 +523,7 @@ index d94f811..3f6e02b 100644
      if (!SDL_PutAudioStreamData(g_audio_stream, samples, bytes))
          std::fprintf(stderr, "[audio] failed to queue samples: %s\n", SDL_GetError());
      else if (!g_audio_playing && queued + bytes >= prebuffer_bytes) {
-@@ -1886,6 +2202,169 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1886,6 +2218,169 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
      }
  }
  
@@ -2450,7 +2468,7 @@ index 9c2f7bb..6dd6411 100644
 +
  #endif
 diff --git a/include/gxruntime/aurora_backend.h b/include/gxruntime/aurora_backend.h
-index 6ef4cf4..f506b52 100644
+index 6ef4cf4..1b60db5 100644
 --- a/include/gxruntime/aurora_backend.h
 +++ b/include/gxruntime/aurora_backend.h
 @@ -5,6 +5,7 @@
@@ -2473,7 +2491,7 @@ index 6ef4cf4..f506b52 100644
  // Optional: after each present, push latest present-source RGBA8 into software
  // EFB (e.g. Strikers mmio_efb + dol_efb_access_fill_color_rgba8). Enables
  // continuous framebuffer readback while registered. NULL clears.
-@@ -40,6 +46,71 @@ void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user);
+@@ -40,6 +46,73 @@ void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user);
  // from shutdown (second call only bumps if counters grew).
  void dol_aurora_flush_gap_report(void);
  
@@ -2533,6 +2551,8 @@ index 6ef4cf4..f506b52 100644
 +// Render resolution: 0 = the window's pixels, N = N x the GameCube EFB.
 +void dol_aurora_set_render_scale(int scale);
 +void dol_aurora_set_fullscreen(bool fullscreen);
++// The window's (and on macOS the Dock's) icon, from RGBA8 pixels.
++void dol_aurora_set_window_icon(const uint8_t* rgba, uint32_t width, uint32_t height);
 +// Widescreen HUD: move a squeezed 4:3 HUD's corner elements to the edges.
 +void dol_aurora_set_widescreen_hud(bool edges);
 +// Audio queued ahead of the output before playback starts (latency vs. gaps).

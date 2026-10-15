@@ -1,5 +1,5 @@
 diff --git a/backends/aurora/aurora_backend.cpp b/backends/aurora/aurora_backend.cpp
-index d94f811..eb5d2c6 100644
+index d94f811..ed53e31 100644
 --- a/backends/aurora/aurora_backend.cpp
 +++ b/backends/aurora/aurora_backend.cpp
 @@ -19,9 +19,20 @@
@@ -646,7 +646,7 @@ index d94f811..eb5d2c6 100644
 +
 +struct RenderItem {
 +    Item kind = Item::Done;
-+    gxruntime::gxcore::GxCoreState state;
++    std::shared_ptr<const gxruntime::gxcore::GxCoreState> state;
 +    gxruntime::aurora_recomp::ConsumedDraw draw;
 +    gxruntime::gxcore::EfbCopyCommand copy{};
 +    SetArrayArgs set_array{};
@@ -777,7 +777,7 @@ index d94f811..eb5d2c6 100644
 +}
 +
 +void plan_draw(RenderItem& item, gxruntime::gxcore::GapCounters& counters) {
-+    item.state.build_draw_plan_into(item.plan, item.draw, counters, nullptr,
++    item.state->build_draw_plan_into(item.plan, item.draw, counters, nullptr,
 +                                    nullptr, /*record_cross=*/true);
 +    gxruntime::gxcore::DrawPlan& plan = item.plan;
 +    if (plan.ok) {
@@ -914,7 +914,7 @@ index d94f811..eb5d2c6 100644
 +    return &item.draw;
 +}
 +
-+gxruntime::gxcore::GxCoreState* reserved_state(void*) {
++std::shared_ptr<const gxruntime::gxcore::GxCoreState>* reserved_state(void*) {
 +    return &g_reserved->state;
 +}
 +
@@ -1488,7 +1488,7 @@ index d94f811..eb5d2c6 100644
          const std::uint8_t* rgba = nullptr;
          std::uint32_t w = 0;
          std::uint32_t h = 0;
-@@ -1212,6 +2445,79 @@ void aurora_backend_present(void) {
+@@ -1212,6 +2445,86 @@ void aurora_backend_present(void) {
          }
      }
      ++g_present_count;
@@ -1543,7 +1543,7 @@ index d94f811..eb5d2c6 100644
 +        // wait: the game thread held at the present for the main thread;
 +        // idle: the main thread waiting for the game's next commands.
 +        // plan/submit: the parts of gx in build_draw_plan / submit_draw_plan.
-+        std::fprintf(stderr, "[gx-time] frame=%llu gx=%.2fms frame=%.2fms wait=%.2fms idle=%.2fms plan=%.2fms wplan=%.2fms submit=%.2fms full=%.2fms pwait=%.2fms present=%.2fms pace=%.2fms xfblocks=%llu\n",
++        std::fprintf(stderr, "[gx-time] frame=%llu gx=%.2fms frame=%.2fms wait=%.2fms idle=%.2fms plan=%.2fms wplan=%.2fms submit=%.2fms full=%.2fms pwait=%.2fms present=%.2fms pace=%.2fms xfblocks=%llu statechg=%llu\n",
 +                     g_present_count, g_gx_time_ns / 1e6,
 +                     last_present_ns ? (now - last_present_ns) / 1e6 : 0.0,
 +                     gxq::g_wait_ns.exchange(0) / 1e6, gxq::g_idle_ns / 1e6,
@@ -1554,6 +1554,13 @@ index d94f811..eb5d2c6 100644
 +                     [] {
 +                         static unsigned long long last = 0;
 +                         const unsigned long long now = g_shadow_frontend.xf_blocks_built();
++                         const unsigned long long d = now - last;
++                         last = now;
++                         return d;
++                     }(),
++                     [] {
++                         static unsigned long long last = 0;
++                         const unsigned long long now = gxruntime::gxcore::g_state_changed_draws;
 +                         const unsigned long long d = now - last;
 +                         last = now;
 +                         return d;
@@ -1568,7 +1575,7 @@ index d94f811..eb5d2c6 100644
      if (g_frame_pacing_log &&
          (g_present_count <= 10 || (g_present_count % 60) == 0)) {
          const AuroraStats* stats = aurora_get_stats();
-@@ -1432,6 +2738,7 @@ void aurora_backend_present(void) {
+@@ -1432,6 +2745,7 @@ void aurora_backend_present(void) {
      const unsigned long long present_fifo = g_fifo_bytes;
      g_fifo_bytes = 0;
      poll_events();
@@ -1576,7 +1583,7 @@ index d94f811..eb5d2c6 100644
      if (!g_should_quit) {
          g_frame_open = aurora_begin_frame();
  #if GXRUNTIME_HAS_AURORA_RECOMP
-@@ -1482,7 +2789,13 @@ void aurora_backend_gx_write(u64 value, u8 size) {
+@@ -1482,7 +2796,13 @@ void aurora_backend_gx_write(u64 value, u8 size) {
          return;
      g_fifo_bytes += size;
  #if GXRUNTIME_HAS_AURORA_RECOMP
@@ -1591,7 +1598,7 @@ index d94f811..eb5d2c6 100644
      // Record AFTER the shadow write so MEM_UPDATEs its resolves emitted
      // precede this GX_WRITE in the trace (replay reads them first), and
      // BEFORE the live-Aurora forwarding below so the pristine value is
-@@ -1737,6 +3050,7 @@ void aurora_backend_set_xfb_black(bool black) {
+@@ -1737,6 +3057,7 @@ void aurora_backend_set_xfb_black(bool black) {
  }
  
  bool aurora_backend_pad_init(void) {
@@ -1599,7 +1606,7 @@ index d94f811..eb5d2c6 100644
      if (PADInit() == FALSE)
          return false;
  
-@@ -1780,6 +3094,7 @@ bool aurora_backend_pad_init(void) {
+@@ -1780,6 +3101,7 @@ bool aurora_backend_pad_init(void) {
  }
  
  u32 aurora_backend_pad_read(DolPadState state[4]) {
@@ -1607,7 +1614,7 @@ index d94f811..eb5d2c6 100644
      PADStatus status[4]{};
      const u32 motor_mask = PADRead(status);
      for (u32 i = 0; i < 4; i++) {
-@@ -1796,22 +3111,41 @@ u32 aurora_backend_pad_read(DolPadState state[4]) {
+@@ -1796,22 +3118,41 @@ u32 aurora_backend_pad_read(DolPadState state[4]) {
              .error = status[i].err,
          };
      }
@@ -1649,7 +1656,7 @@ index d94f811..eb5d2c6 100644
      PADSetSpec(spec);
  }
  
-@@ -1848,6 +3182,7 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1848,6 +3189,7 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
  
      int queued = SDL_GetAudioStreamQueued(g_audio_stream);
      unsigned waited_ms = 0;
@@ -1657,7 +1664,7 @@ index d94f811..eb5d2c6 100644
      while (queued > max_queued_bytes && waited_ms < 20u) {
          g_audio_throttle_count++;
          if (g_audio_queue_log &&
-@@ -1860,8 +3195,17 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1860,8 +3202,17 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
                           max_queued_bytes);
          SDL_Delay(1);
          waited_ms++;
@@ -1675,7 +1682,7 @@ index d94f811..eb5d2c6 100644
  
      const bool low_queue =
          queued >= 0 && queued < bytes_per_second / 100;
-@@ -1876,6 +3220,20 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1876,6 +3227,20 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
                       g_audio_push_count, queued, queued + bytes,
                       g_audio_playing ? 1u : 0u, g_audio_throttle_count);
      }
@@ -1696,7 +1703,7 @@ index d94f811..eb5d2c6 100644
      if (!SDL_PutAudioStreamData(g_audio_stream, samples, bytes))
          std::fprintf(stderr, "[audio] failed to queue samples: %s\n", SDL_GetError());
      else if (!g_audio_playing && queued + bytes >= prebuffer_bytes) {
-@@ -1886,10 +3244,343 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1886,10 +3251,343 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
      }
  }
  
@@ -2040,7 +2047,7 @@ index d94f811..eb5d2c6 100644
      const DolPlatformOps ops = {
          .should_quit = aurora_backend_should_quit,
          .present = aurora_backend_present,
-@@ -1918,6 +3609,7 @@ void install_platform_ops() {
+@@ -1918,6 +3616,7 @@ void install_platform_ops() {
          .audio_set_sample_rate = aurora_backend_audio_set_sample_rate,
          .audio_push = aurora_backend_audio_push,
      };
@@ -4257,21 +4264,26 @@ index 623f047..554428e 100644
 +
  } // namespace gxruntime::gxcore
 diff --git a/graphics/gxcore/include/gxruntime/gxcore/gxcore.hpp b/graphics/gxcore/include/gxruntime/gxcore/gxcore.hpp
-index 4d14391..deb27bc 100644
+index 4d14391..c141b7d 100644
 --- a/graphics/gxcore/include/gxruntime/gxcore/gxcore.hpp
 +++ b/graphics/gxcore/include/gxruntime/gxcore/gxcore.hpp
-@@ -16,6 +16,10 @@
+@@ -13,9 +13,15 @@
+ #include "gxruntime/aurora_recomp/render_sink.hpp"
+ 
+ #include <cstdint>
++#include <memory>
  
  namespace gxruntime::gxcore {
  
 +// DOL_GX_TIME: time spent in build_draw_plan, summed while g_plan_timing.
 +extern bool g_plan_timing;
 +extern std::uint64_t g_plan_time_ns;
++extern std::uint64_t g_state_changed_draws;
 +
  // GapCounters now lives in counters.hpp (Program 66 A0) so the coverage gate and
  // the domain files reference the counter taxonomy without the sink header.
  
-@@ -57,10 +61,21 @@ public:
+@@ -57,12 +63,25 @@ public:
    // VertexLoaderManager normal_cache write on m_remaining==0). nullptr in unit
    // tests that don't exercise the fallback (fields stay zero, matching a fresh
    // cache).
@@ -4293,8 +4305,12 @@ index 4d14391..deb27bc 100644
 +                            bool record_cross = false) const;
  
    std::uint32_t bp(std::uint8_t reg) const { return bp_regs_[reg]; }
++  // Bumped when apply() changes a value (rewriting the same value does not).
++  std::uint32_t version() const { return version_; }
    bool bp_valid(std::uint8_t reg) const { return bp_valid_[reg]; }
-@@ -83,6 +98,13 @@ public:
+ 
+   // U2: BP TX_SETMODE0/1 register addresses for texmap unit 0..7
+@@ -83,6 +102,13 @@ public:
    }
  
  private:
@@ -4308,8 +4324,11 @@ index 4d14391..deb27bc 100644
    std::uint32_t bp_regs_[256]{};
    bool bp_valid_[256]{};
    // TEV color registers (BP 0xE0-0xE7). Konst and tev-color writes alias the
-@@ -98,6 +120,11 @@ private:
+@@ -96,8 +122,14 @@ private:
+   bool vcd_hi_valid_ = false;
+   std::uint32_t vat_[8][3]{};
    std::uint8_t vat_valid_[8]{}; // bit per group
++  std::uint32_t version_ = 0;
  };
  
 +// In stream order, after a record_cross build: fill the plan from the caches
@@ -4320,7 +4339,7 @@ index 4d14391..deb27bc 100644
  // AuroraRenderSink that owns a ConsumingAuroraRenderSink (streaming mode) and
  // pairs every span-complete draw with the register state that was current at
  // its Draw packet. The observer receives (plan-ready) ConsumedDraws; the
-@@ -110,6 +137,13 @@ public:
+@@ -110,6 +142,13 @@ public:
    // flushed (its geometry is in the pass) — so a GPU observer can resolve the
    // EFB into a texture at the copy's stream position.
    using CopyObserver = void (*)(const EfbCopyCommand& cmd, void* user);
@@ -4334,7 +4353,7 @@ index 4d14391..deb27bc 100644
  
    GxCoreSink();
  
-@@ -124,11 +158,35 @@ public:
+@@ -124,11 +163,37 @@ public:
      copy_observer_ = observer;
      copy_observer_user_ = user;
    }
@@ -4343,11 +4362,13 @@ index 4d14391..deb27bc 100644
 +    defer_observer_ = observer;
 +    defer_observer_user_ = user;
 +  }
-+  // With a defer observer: build each draw, and the register state current
-+  // at it, straight into caller storage (the render ring) instead of copying
-+  // them there later. `state` returns where the newest draw's state goes; the
-+  // observer's arguments are then that storage. nullptr: no storage.
-+  using StateStorage = GxCoreState* (*)(void* user);
++  // With a defer observer: build each draw straight into caller storage (the
++  // render ring), and hand it the register state current at it as a shared
++  // read-only copy, made only when the state changed since the previous draw
++  // (most draws repeat it). `state` returns where the newest draw's state
++  // pointer goes; the observer's arguments are then that storage. nullptr: no
++  // storage.
++  using StateStorage = std::shared_ptr<const GxCoreState>* (*)(void* user);
 +  void set_storage(gxruntime::aurora_recomp::ConsumingAuroraRenderSink::DrawStorage draw,
 +                   StateStorage state, void* user) {
 +    consumer_.set_draw_storage(draw, user);
@@ -4370,7 +4391,7 @@ index 4d14391..deb27bc 100644
  
    const GapCounters& counters() const { return counters_; }
    GapCounters& counters() { return counters_; }
-@@ -151,6 +209,10 @@ private:
+@@ -151,6 +216,12 @@ private:
    void* plan_observer_user_ = nullptr;
    CopyObserver copy_observer_ = nullptr;
    void* copy_observer_user_ = nullptr;
@@ -4378,6 +4399,8 @@ index 4d14391..deb27bc 100644
 +  void* defer_observer_user_ = nullptr;
 +  StateStorage state_storage_ = nullptr;
 +  void* state_storage_user_ = nullptr;
++  std::shared_ptr<const GxCoreState> shared_state_;  // live_state_ at shared_version_
++  std::uint32_t shared_version_ = 0;
    GapCounters counters_{};
  };
  
@@ -4555,7 +4578,7 @@ index 2d64013..04da7f7 100644
    append_u32(s, "num_tex_gens", sk.num_tex_gens, true);
    append_u32(s, "dualtex_enabled", sk.dualtex_enabled, true);
 diff --git a/graphics/gxcore/src/gxcore.cpp b/graphics/gxcore/src/gxcore.cpp
-index 2fb6944..02cc2fc 100644
+index 2fb6944..e9a7c0a 100644
 --- a/graphics/gxcore/src/gxcore.cpp
 +++ b/graphics/gxcore/src/gxcore.cpp
 @@ -1,4 +1,6 @@
@@ -4565,17 +4588,18 @@ index 2fb6944..02cc2fc 100644
  #include "gxruntime/gxcore/gxcore.hpp"
  
  // GxCoreSink: the AuroraRenderSink that pairs every span-complete draw with the
-@@ -11,6 +13,9 @@ namespace gxruntime::gxcore {
+@@ -11,6 +13,10 @@ namespace gxruntime::gxcore {
  
  namespace ar = gxruntime::aurora_recomp;
  
 +bool g_plan_timing = false;
 +std::uint64_t g_plan_time_ns = 0;
++std::uint64_t g_state_changed_draws = 0;  // DOL_GX_TIME: draws with new BP/CP state
 +
  // --- Sink ---------------------------------------------------------------------
  
  GxCoreSink::GxCoreSink() {
-@@ -21,10 +26,26 @@ GxCoreSink::GxCoreSink() {
+@@ -21,10 +27,26 @@ GxCoreSink::GxCoreSink() {
  void GxCoreSink::on_consumed_draw(const ar::ConsumedDraw& draw,
                                    unsigned long long, void* user) {
    auto* self = static_cast<GxCoreSink*>(user);
@@ -4602,15 +4626,25 @@ index 2fb6944..02cc2fc 100644
    self->plan_observer_(plan, self->plan_observer_user_);
  }
  
-@@ -105,11 +126,23 @@ bool GxCoreSink::submit_packet(const ar::RenderPacket& packet) {
+@@ -105,11 +127,34 @@ bool GxCoreSink::submit_packet(const ar::RenderPacket& packet) {
    // fires the observer, which must see the state that was current at that
    // previous draw (pending_state_), not this packet's.
    const bool ok = consumer_.submit_packet(packet);
 -  if (packet.kind == ar::RenderPacketKind::Draw)
 -    pending_state_ = live_state_;
 +  if (packet.kind == ar::RenderPacketKind::Draw) {
-+    if (state_storage_ != nullptr)
-+      *state_storage_(state_storage_user_) = live_state_;
++    static std::uint32_t last_version = ~0u;
++    if (live_state_.version() != last_version) {
++      last_version = live_state_.version();
++      ++g_state_changed_draws;
++    }
++    if (state_storage_ != nullptr) {
++      if (shared_state_ == nullptr || shared_version_ != live_state_.version()) {
++        shared_state_ = std::make_shared<const GxCoreState>(live_state_);
++        shared_version_ = live_state_.version();
++      }
++      *state_storage_(state_storage_user_) = shared_state_;
++    }
 +    else
 +      pending_state_ = live_state_;
 +  }
@@ -4620,6 +4654,7 @@ index 2fb6944..02cc2fc 100644
  void GxCoreSink::flush_frame() { consumer_.flush_assembly(); }
  
 +void GxCoreSink::reset() {
++  shared_state_.reset();
 +  consumer_.reset();
 +  live_state_.reset();
 +  pending_state_.reset();
@@ -5056,6 +5091,36 @@ index c3d1557..b1b2e1f 100644
  }
  
  } // namespace gxruntime::gxcore
+diff --git a/graphics/gxcore/src/state.cpp b/graphics/gxcore/src/state.cpp
+index 10b1a33..c431379 100644
+--- a/graphics/gxcore/src/state.cpp
++++ b/graphics/gxcore/src/state.cpp
+@@ -19,6 +19,8 @@ void GxCoreState::apply(const ar::RenderStatePacket& state) {
+   switch (state.kind) {
+   case RenderStateKind::BpReg:
+     if (state.index < 256u) {
++      if (bp_regs_[state.index] != state.value || !bp_valid_[state.index])
++        ++version_;
+       bp_regs_[state.index] = state.value;
+       bp_valid_[state.index] = true;
+       // TEV color/konst registers (BP 0xE0-0xE7, TevReg RA/BG). The TevRegType
+@@ -43,6 +45,7 @@ void GxCoreState::apply(const ar::RenderStatePacket& state) {
+     }
+     break;
+   case RenderStateKind::CpVcd:
++    ++version_;
+     if (state.index == 0u) {
+       vcd_lo_ = state.value;
+       vcd_lo_valid_ = true;
+@@ -53,6 +56,8 @@ void GxCoreState::apply(const ar::RenderStatePacket& state) {
+     break;
+   case RenderStateKind::CpVat:
+     if (state.index < 8u && state.aux0 < 3u) {
++      if (vat_[state.index][state.aux0] != state.value)
++        ++version_;
+       vat_[state.index][state.aux0] = state.value;
+       vat_valid_[state.index] |= static_cast<std::uint8_t>(1u << state.aux0);
+     }
 diff --git a/graphics/gxcore/src/tev.cpp b/graphics/gxcore/src/tev.cpp
 index 2c074d7..bc31d92 100644
 --- a/graphics/gxcore/src/tev.cpp

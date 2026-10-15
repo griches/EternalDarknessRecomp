@@ -2,6 +2,8 @@
 div { display: block; }
 span { display: inline; }
 
+/* The Tome: ink on parchment pages bound in dark leather. Art drawn by
+   tools/ui/make_tome_art.py. */
 body {
 	width: 100%;
 	height: 100%;
@@ -10,95 +12,173 @@ body {
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	font-family: "Fira Sans";
+	font-family: "IM FELL English";
 	font-weight: normal;
-	font-size: 22dp;
-	color: #d9cba8;
-	background-color: #070505;
+	font-size: 25dp;
+	color: #2a1810;
+	background-color: #120a05;
+	decorator: image(tome/leather.png fill);
 }
 
-/* Over the game the menu dims the paused frame instead of hiding it. */
+/* Over the game the page sits on the dimmed, paused frame. */
 body.overlay {
-	background-color: #000000b8;
+	background-color: #000000b0;
+	decorator: none;
 }
 
-#panel {
-	width: 640dp;
-	padding: 36dp 44dp 30dp 44dp;
-	background-color: #120c0bf0;
-	border: 1dp #5a1a14;
-	border-radius: 6dp;
+#book {
+	display: flex;
+	padding: 6dp;
+	background-color: #5e3f1c;
+	border: 1dp #2a1a0c;
+	border-radius: 3dp;
 }
 
-#title {
-	font-family: "Alegreya SC";
-	font-weight: bold;
-	font-size: 48dp;
-	color: #c9372a;
-	text-align: center;
-	letter-spacing: 2dp;
+.page {
+	position: relative;
+	display: flex;
+	flex-direction: column;
+	width: 470dp;
+	padding: 30dp 50dp 20dp 50dp;
+	border: 1dp #8a6a3a;
+	decorator: image(tome/parchment.png fill);
 }
 
-#subtitle {
-	font-family: "Alegreya SC";
-	font-size: 22dp;
-	color: #a08b6a;
-	text-align: center;
-	margin-bottom: 22dp;
+/* Options opens as a spread; every other menu is a single page. */
+#page1 {
+	display: none;
+}
+
+body.spread #page1 {
+	display: flex;
+}
+
+body.spread .page {
+	width: 430dp;
+}
+
+/* Hand-ruled frame inside the page edge. */
+.rule {
+	position: absolute;
+	left: 13dp;
+	top: 13dp;
+	right: 13dp;
+	bottom: 13dp;
+	border: 1dp #7a201266;
+}
+
+#emblem,
+#emblem-divider {
+	display: none;
+}
+
+body.branded #emblem {
+	display: block;
+	width: 220dp;
+	height: 220dp;
+	margin: 0 auto 2dp auto;
+}
+
+body.branded #emblem-divider {
+	display: block;
+	width: 300dp;
+	height: 18dp;
+	margin: 0 auto 12dp auto;
 }
 
 #heading {
-	font-family: "Alegreya SC";
-	font-size: 26dp;
-	color: #e8dcc0;
-	border-bottom: 1dp #5a1a14;
-	padding-bottom: 6dp;
-	margin-bottom: 10dp;
+	font-family: "IM FELL English SC";
+	font-size: 38dp;
+	color: #8e1b12;
+	text-align: center;
+	margin-bottom: 4dp;
+}
+
+body.branded #heading {
+	display: none;
+}
+
+/* "I · Display": a section of a spread. */
+.section {
+	font-family: "IM FELL English SC";
+	font-size: 22dp;
+	color: #7a2012;
+	border-bottom: 1dp #7a201280;
+	padding: 0 2dp 2dp 2dp;
+	margin: 16dp 0 4dp 0;
+}
+
+/* A break between groups of rows on a single page. */
+.gap {
+	height: 24dp;
+	margin: 4dp 70dp;
+	decorator: image(tome/rule.png contain center center);
 }
 
 .row {
 	display: flex;
-	justify-content: space-between;
-	padding: 9dp 14dp;
-	margin: 2dp 0;
-	border-left: 4dp transparent;
-	border-radius: 3dp;
-	color: #bfb090;
+	align-items: center;
+	padding: 4dp 2dp;
 }
 
-.row.selected {
-	background-color: #3a1410;
-	border-left-color: #d13a2c;
-	color: #fff4dc;
+/* The red-ink diamond beside the chosen row. */
+.mark {
+	width: 14dp;
+	height: 14dp;
+	margin-right: 10dp;
+	visibility: hidden;
 }
 
-.row.disabled {
-	color: #6b6152;
-}
-
-.row.selected.disabled {
-	color: #8a7d68;
+/* Dotted leader from a setting to its value. */
+.leader {
+	flex: 1;
+	height: 22dp;
+	margin: 0 8dp;
+	decorator: image(tome/leader.png repeat-x left bottom);
 }
 
 .label { }
 
 .value {
-	color: #e0a060;
-	text-align: right;
+	font-style: italic;
+	color: #5a3a20;
+	white-space: nowrap;
 }
 
+.row.selected {
+	color: #8e1b12;
+}
+
+.row.selected .mark {
+	visibility: visible;
+}
+
+.row.selected .value {
+	color: #8e1b12;
+}
+
+.row.selected .leader {
+	decorator: image(tome/leader-red.png repeat-x left bottom);
+}
+
+.row.disabled,
 .row.disabled .value {
-	color: #7a6a52;
+	color: #8a7a62;
 }
 
-#note {
+.row.selected.disabled {
+	color: #9a6a5a;
+}
+
+.note {
 	/* Always two lines tall, so a longer help text never resizes (and so
-	   re-centres) the panel as the selection moves. */
-	height: 46dp;
+	   re-centres) the page as the selection moves. */
+	height: 48dp;
 	overflow: hidden;
 	margin-top: 14dp;
-	font-size: 17dp;
-	color: #a08b6a;
+	font-style: italic;
+	font-size: 18dp;
+	color: #6a4a2a;
 	text-align: center;
 }
 
@@ -106,70 +186,60 @@ body.overlay {
 	position: absolute;
 	left: 0;
 	right: 0;
-	bottom: 18dp;
-	font-size: 16dp;
-	color: #8a7a60;
+	bottom: 16dp;
+	font-size: 17dp;
+	font-style: italic;
+	color: #a08660;
 	text-align: center;
 }
 
-/* Button and key icons (Kenney Input Prompts, CC0). */
+body.overlay #hint {
+	color: #d2bf98;
+}
+
+/* Button and key icons (Kenney Input Prompts, CC0), set on a dark ink
+   plate so the light icons read on parchment. */
 img.glyph {
-	width: 34dp;
-	height: 34dp;
+	width: 32dp;
+	height: 32dp;
 	margin-left: 4dp;
 	vertical-align: middle;
+	background-color: #2a1810;
+	border-radius: 6dp;
 }
 
 .sep {
 	display: inline-block;
-	width: 22dp;
+	width: 18dp;
 }
 
 .keycap {
 	display: inline-block;
-	padding: 2dp 8dp;
+	padding: 1dp 8dp;
 	margin-left: 4dp;
-	border: 1dp #a08b6a;
+	border: 1dp #5a3a20;
 	border-radius: 4dp;
-	font-size: 16dp;
-	color: #e8dcc0;
+	font-size: 17dp;
+	font-style: normal;
+	color: #2a1810;
 	vertical-align: middle;
 }
 
 .unbound {
-	color: #6b6152;
+	color: #8a7a62;
 }
 
-/* Long lists (Controls): no title, tighter rows. */
-body.compact #title,
-body.compact #subtitle {
-	display: none;
-}
-
-body.compact #panel {
-	padding-top: 22dp;
-	padding-bottom: 18dp;
-}
-
+/* Long lists (Button mapping): tighter rows. */
 body.compact .row {
-	padding: 2dp 14dp;
-	margin: 1dp 0;
-	align-items: center;
+	padding: 1dp 2dp;
+	font-size: 21dp;
 }
 
-/* The Recomp emblem replaces the text title on the main menu and Play. */
-#emblem {
-	display: none;
+body.compact .page {
+	width: 560dp;
+	padding-top: 22dp;
 }
 
-body.branded #emblem {
-	display: block;
-	width: 280dp;
-	height: 280dp;
-	margin: -12dp auto 6dp auto;
-}
-
-body.branded #title,
-body.branded #subtitle {
-	display: none;
+body.compact #heading {
+	font-size: 32dp;
 }

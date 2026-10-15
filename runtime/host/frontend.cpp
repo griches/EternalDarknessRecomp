@@ -250,6 +250,9 @@ struct Row {
     std::string note;            // shown under the menu while selected
     std::function<void(int)> change;  // left/right (-1/+1); null: no value
     std::function<void()> activate;   // A / click; null: same as change(+1)
+    std::string section;         // starts a section with this heading
+    bool gap = false;            // an ornament before it: a new group
+    int page = 0;                // 1: the right-hand page of a spread
 };
 
 Rml::ElementDocument* g_doc = nullptr;
@@ -317,7 +320,7 @@ Row disc_row() {
     const Disc& d = g_discs[g_disc];
     disc.value = d.name + " (" + region_name(d.id) + ")";
     if (g_discs.size() > 1)
-        disc.value = "< " + disc.value + " >";
+        disc.value = "\u2039 " + disc.value + " \u203a";
     disc.note = d.path + "  |  " + d.id;
     if (d.id != ED_GAME_ID)
         disc.note = d.id + ": this build runs " ED_GAME_ID " only.";
@@ -375,20 +378,34 @@ void build_launcher() {
     if (g_disc_on_main)
         g_rows.push_back(disc_row());
 
-    Row play{"Play"};
-    play.enabled = disc_playable();
-    play.note = newest_slot() != 0 ? "Continue from a save slot or start a new game." : "";
-    play.activate = [] {
-        if (newest_slot() != 0) {
+    const int newest = newest_slot();
+    if (newest != 0) {
+        Row cont{"Continue", "Slot " + std::to_string(newest) + " \u00b7 " + slot_time(newest)};
+        cont.enabled = disc_playable();
+        cont.note = "Back where you saved last.";
+        cont.activate = [newest] { start_game(newest); };
+        g_rows.push_back(cont);
+    }
+
+    Row fresh{"New game"};
+    fresh.enabled = disc_playable();
+    fresh.note = "Start from the title screen (your memory card saves are there).";
+    fresh.activate = [] { start_game(0); };
+    g_rows.push_back(fresh);
+
+    if (newest != 0) {
+        Row load{"Load game"};
+        load.enabled = disc_playable();
+        load.note = "Choose one of your save slots.";
+        load.activate = [] {
             g_screen = Screen::Play;
             g_selected = 0;
-        } else {
-            start_game(0);
-        }
-    };
-    g_rows.push_back(play);
+        };
+        g_rows.push_back(load);
+    }
 
     Row options{"Options"};
+    options.gap = true;
     options.activate = [] {
         g_options_return = Screen::Launcher;
         g_screen = Screen::Options;
@@ -397,6 +414,7 @@ void build_launcher() {
     g_rows.push_back(options);
 
     Row quit{"Quit"};
+    quit.gap = true;
     quit.activate = [] {
         g_play = false;
         g_close = true;
@@ -404,18 +422,8 @@ void build_launcher() {
     g_rows.push_back(quit);
 }
 
+// Load game: the used save slots.
 void build_play() {
-    const int newest = newest_slot();
-    Row cont{"Continue", "Slot " + std::to_string(newest) + " \u00b7 " + slot_time(newest)};
-    cont.note = "Back where you saved last.";
-    cont.activate = [newest] { start_game(newest); };
-    g_rows.push_back(cont);
-
-    Row fresh{"New game"};
-    fresh.note = "Start from the title screen (your memory card saves are there).";
-    fresh.activate = [] { start_game(0); };
-    g_rows.push_back(fresh);
-
     for (int slot = 1; slot <= 4; slot++) {
         if (!slot_used(slot))
             continue;
@@ -426,11 +434,37 @@ void build_play() {
     }
 
     Row back{"Back"};
+    back.gap = true;
     back.activate = [] {
         g_screen = Screen::Launcher;
         g_selected = 0;
     };
     g_rows.push_back(back);
+}
+
+Row layout_row() {
+    Row layout{"Layout", "\u2039 " + std::string(controls::layout_name(controls::layout())) + " \u203a"};
+    static const char* const kLayoutNotes[] = {
+        "The GameCube's button positions.",
+        "Attack RT/A, action B, aim LT, sprint L3, creep R3; LB/RB page menus.",
+        "Your own buttons: change them in Button mapping."};
+    layout.note = kLayoutNotes[controls::layout()];
+    layout.change = [](int dir) {
+        int l = controls::layout();
+        cycle(l, controls::kLayoutCount, dir);
+        controls::set_layout(l);
+    };
+    return layout;
+}
+
+Row vibration_row() {
+    Row vibration{"Vibration", on_off(g_settings.vibration)};
+    vibration.change = [](int) {
+        g_settings.vibration = !g_settings.vibration;
+        changed();
+        settings_save();
+    };
+    return vibration;
 }
 
 void build_options() {
@@ -453,7 +487,7 @@ void build_options() {
             h = 528u * static_cast<uint32_t>(scale);
             w = static_cast<uint32_t>(h * display_aspect + 0.5f);
         }
-        return std::to_string(w) + "x" + std::to_string(h);
+        return std::to_string(w) + "\u00d7" + std::to_string(h);
     };
     const std::string kScale[] = {
         "Window (" + size_label(0) + ")", "1x (" + size_label(1) + ")",
@@ -461,15 +495,17 @@ void build_options() {
         "4x (" + size_label(4) + ")"};
     static const int kBuffers[] = {40, 60, 80, 100, 150, 200};
 
-    if (g_options_return == Screen::Launcher && !g_disc_on_main)
-        g_rows.push_back(disc_row());
+    Row full{"Fullscreen", on_off(g_settings.fullscreen)};
+    full.section = "I \u00b7 Display";
+    full.change = [](int) { g_settings.fullscreen = !g_settings.fullscreen; changed(); };
+    g_rows.push_back(full);
 
-    Row skip{"Skip intros", on_off(g_settings.skip_intros)};
-    skip.note = "Skip the logo movies and the opening quote (next start).";
-    skip.change = [](int) { g_settings.skip_intros = !g_settings.skip_intros; };
-    g_rows.push_back(skip);
+    Row scale{"Resolution", kScale[g_settings.render_scale]};
+    scale.note = "Window draws at your screen's resolution.";
+    scale.change = [](int dir) { cycle(g_settings.render_scale, 5, dir); changed(); };
+    g_rows.push_back(scale);
 
-    Row aspect{"Display", kAspect[g_settings.aspect]};
+    Row aspect{"Aspect ratio", kAspect[g_settings.aspect]};
     aspect.note = "Follow the game: 16:9 when its widescreen option is on.";
     aspect.change = [](int dir) { cycle(g_settings.aspect, 4, dir); changed(); };
     g_rows.push_back(aspect);
@@ -482,28 +518,20 @@ void build_options() {
     };
     g_rows.push_back(hud);
 
-    Row scale{"Resolution", kScale[g_settings.render_scale]};
-    scale.note = "Window draws at your screen's resolution.";
-    scale.change = [](int dir) { cycle(g_settings.render_scale, 5, dir); changed(); };
-    g_rows.push_back(scale);
-
-    Row full{"Fullscreen", on_off(g_settings.fullscreen)};
-    full.change = [](int) { g_settings.fullscreen = !g_settings.fullscreen; changed(); };
-    g_rows.push_back(full);
-
     Row fps{"FPS counter", on_off(g_settings.fps_counter)};
-    fps.note = "Frames per second in the window title.";
+    fps.note = "Frames per second in the corner of the screen.";
     fps.change = [](int) { g_settings.fps_counter = !g_settings.fps_counter; };
     g_rows.push_back(fps);
 
-    Row music{"Music volume", std::to_string(g_settings.music_volume) + "%"};
+    Row music{"Music", std::to_string(g_settings.music_volume) + "%"};
+    music.section = "II \u00b7 Sound";
     music.note = "Music streamed from the disc.";
     music.change = [](int dir) {
         g_settings.music_volume = std::clamp(g_settings.music_volume + dir * 10, 0, 100);
     };
     g_rows.push_back(music);
 
-    Row effects{"Sound effects & voices", std::to_string(g_settings.effects_volume) + "%"};
+    Row effects{"Effects & voices", std::to_string(g_settings.effects_volume) + "%"};
     effects.note = "The game's own mix: effects, voices and some music.";
     effects.change = [](int dir) {
         g_settings.effects_volume = std::clamp(g_settings.effects_volume + dir * 10, 0, 100);
@@ -522,15 +550,40 @@ void build_options() {
     };
     g_rows.push_back(buffer);
 
-    Row controls{"Controls", controls::layout_name(controls::layout())};
-    controls.note = "Controller and keyboard layout: Original, Modern or Custom.";
-    controls.activate = [] {
+    Row layout = layout_row();
+    layout.section = "III \u00b7 Controls";
+    layout.page = 1;
+    g_rows.push_back(layout);
+
+    Row vibration = vibration_row();
+    vibration.page = 1;
+    g_rows.push_back(vibration);
+
+    Row more{"More controls"};
+    more.note = "Hold or toggle, stick deadzone and button mapping.";
+    more.page = 1;
+    more.activate = [] {
         g_screen = Screen::Controls;
         g_selected = 0;
     };
-    g_rows.push_back(controls);
+    g_rows.push_back(more);
+
+    Row skip{"Skip intros", on_off(g_settings.skip_intros)};
+    skip.section = "IV \u00b7 Game";
+    skip.page = 1;
+    skip.note = "Skip the logo movies and the opening quote (next start).";
+    skip.change = [](int) { g_settings.skip_intros = !g_settings.skip_intros; };
+    g_rows.push_back(skip);
+
+    if (g_options_return == Screen::Launcher && !g_disc_on_main) {
+        Row disc = disc_row();
+        disc.page = 1;
+        g_rows.push_back(disc);
+    }
 
     Row back{"Back"};
+    back.gap = true;
+    back.page = 1;
     back.activate = [] {
         settings_save();
         g_screen = g_options_return;
@@ -540,18 +593,7 @@ void build_options() {
 }
 
 void build_controls() {
-    Row layout{"Layout", "< " + std::string(controls::layout_name(controls::layout())) + " >"};
-    static const char* const kLayoutNotes[] = {
-        "The GameCube's button positions.",
-        "Attack RT/A, action B, aim LT, sprint L3, creep R3; LB/RB page menus.",
-        "Your own buttons: change them in Button mapping."};
-    layout.note = kLayoutNotes[controls::layout()];
-    layout.change = [](int dir) {
-        int l = controls::layout();
-        cycle(l, controls::kLayoutCount, dir);
-        controls::set_layout(l);
-    };
-    g_rows.push_back(layout);
+    g_rows.push_back(layout_row());
 
     Row pad{"Controller", controls::controller_name()};
     pad.enabled = false;
@@ -583,13 +625,7 @@ void build_controls() {
     };
     g_rows.push_back(deadzone);
 
-    Row vibration{"Vibration", on_off(g_settings.vibration)};
-    vibration.change = [](int) {
-        g_settings.vibration = !g_settings.vibration;
-        changed();
-        settings_save();
-    };
-    g_rows.push_back(vibration);
+    g_rows.push_back(vibration_row());
 
     Row mapping{"Button mapping"};
     mapping.note = "See and change which button or key does what.";
@@ -600,6 +636,7 @@ void build_controls() {
     g_rows.push_back(mapping);
 
     Row back{"Back"};
+    back.gap = true;
     back.activate = [] {
         g_screen = Screen::Options;
         g_selected = 0;
@@ -624,6 +661,7 @@ void build_mapping() {
     }
 
     Row back{"Back"};
+    back.gap = true;
     back.activate = [] {
         g_screen = Screen::Controls;
         g_selected = 0;
@@ -636,7 +674,9 @@ void build_in_game() {
     resume.activate = [] { g_close = true; };
     g_rows.push_back(resume);
 
-    Row save{"Save to", "< Slot " + std::to_string(g_slot) + (slot_used(g_slot) ? " (used) >" : " (empty) >")};
+    Row save{"Save game", "\u2039 Slot " + std::to_string(g_slot) +
+                              (slot_used(g_slot) ? " \u00b7 used \u203a" : " \u00b7 empty \u203a")};
+    save.gap = true;
     save.note = "Saves everything, exactly where you are.";
     save.change = [](int dir) { g_slot = (g_slot - 1 + dir + 4) % 4 + 1; };
     save.activate = [] {
@@ -645,7 +685,8 @@ void build_in_game() {
     };
     g_rows.push_back(save);
 
-    Row load{"Load from", "< Slot " + std::to_string(g_slot) + (slot_used(g_slot) ? " >" : " (empty) >")};
+    Row load{"Load game", "\u2039 Slot " + std::to_string(g_slot) +
+                              (slot_used(g_slot) ? " \u203a" : " \u00b7 empty \u203a")};
     load.enabled = slot_used(g_slot);
     load.change = [](int dir) { g_slot = (g_slot - 1 + dir + 4) % 4 + 1; };
     load.activate = [] {
@@ -655,6 +696,7 @@ void build_in_game() {
     g_rows.push_back(load);
 
     Row options{"Options"};
+    options.gap = true;
     options.activate = [] {
         g_options_return = Screen::InGame;
         g_screen = Screen::Options;
@@ -663,6 +705,7 @@ void build_in_game() {
     g_rows.push_back(options);
 
     Row launcher{"Return to launcher"};
+    launcher.gap = true;
     launcher.note = "Unsaved progress is lost.";
     launcher.activate = [] {
         settings_save();
@@ -690,42 +733,58 @@ void build_in_game() {
 void render() {
     if (g_doc == nullptr)
         return;
-    const char* heading = g_screen == Screen::Launcher   ? "Main Menu"
-                          : g_screen == Screen::Play     ? "Play"
+    const char* heading = g_screen == Screen::Launcher   ? ""
+                          : g_screen == Screen::Play     ? "Load Game"
                           : g_screen == Screen::Options  ? "Options"
                           : g_screen == Screen::Controls ? "Controls"
                           : g_screen == Screen::Mapping  ? "Button Mapping"
                                                          : "Paused";
     g_doc->GetElementById("heading")->SetInnerRML(heading);
-    std::string rml;
+    std::string rml[2];
+    bool spread = false;
     for (size_t i = 0; i < g_rows.size(); i++) {
         const Row& r = g_rows[i];
-        rml += "<div class=\"row";
+        const int page = r.page == 1 ? 1 : 0;
+        spread = spread || page == 1;
+        std::string& out = rml[page];
+        if (!r.section.empty())
+            out += "<div class=\"section\">" + escape(r.section) + "</div>";
+        else if (r.gap)
+            out += "<div class=\"gap\"></div>";
+        out += "<div class=\"row";
         if (static_cast<int>(i) == g_selected)
-            rml += " selected";
+            out += " selected";
         if (!r.enabled)
-            rml += " disabled";
-        rml += "\" id=\"row" + std::to_string(i) + "\"><span class=\"label\">" +
+            out += " disabled";
+        out += "\" id=\"row" + std::to_string(i) +
+               "\"><img class=\"mark\" src=\"tome/mark.png\"/><span class=\"label\">" +
                escape(r.label) + "</span>";
         if (!r.value_rml.empty())
-            rml += "<span class=\"value\">" + r.value_rml + "</span>";
+            out += "<span class=\"leader\"></span><span class=\"value\">" + r.value_rml +
+                   "</span>";
         else if (!r.value.empty())
-            rml += "<span class=\"value\">" + escape(r.value) + "</span>";
-        rml += "</div>";
+            out += "<span class=\"leader\"></span><span class=\"value\">" +
+                   escape(r.value) + "</span>";
+        out += "</div>";
     }
-    g_doc->GetElementById("menu")->SetInnerRML(rml);
-    const std::string note =
-        g_selected < static_cast<int>(g_rows.size()) ? g_rows[g_selected].note : "";
-    g_doc->GetElementById("note")->SetInnerRML(escape(note));
+    g_doc->GetElementById("menu0")->SetInnerRML(rml[0]);
+    g_doc->GetElementById("menu1")->SetInnerRML(rml[1]);
+    // The help note sits under the page holding the chosen row.
+    const bool have = g_selected < static_cast<int>(g_rows.size());
+    const std::string note = have ? escape(g_rows[g_selected].note) : "";
+    const int note_page = have && g_rows[g_selected].page == 1 ? 1 : 0;
+    g_doc->GetElementById("note0")->SetInnerRML(note_page == 0 ? note : "");
+    g_doc->GetElementById("note1")->SetInnerRML(note_page == 1 ? note : "");
     g_doc->GetElementById("hint")->SetInnerRML(
         g_screen == Screen::InGame
             ? "Up/Down choose &#183; Left/Right change &#183; A select &#183; B resume"
             : "Up/Down choose &#183; Left/Right change &#183; A select &#183; B back");
-    // Before the game (main menu, Play) the emblem stands in for the title.
-    g_doc->SetClass("branded", g_screen == Screen::Launcher || g_screen == Screen::Play);
-    // The controls list is long: drop the title and tighten the rows.
+    g_doc->SetClass("spread", spread);
+    // The main menu opens with the emblem instead of a heading.
+    g_doc->SetClass("branded", g_screen == Screen::Launcher);
+    // The mapping list is long: tighten the rows.
     g_doc->SetClass("compact", g_screen == Screen::Mapping);
-    // Over the game the menu dims the paused frame; the launcher is opaque.
+    // Over the game the page lies on the dimmed, paused frame.
     g_doc->SetClass("overlay", g_screen == Screen::InGame ||
                                    ((g_screen == Screen::Options ||
                                      g_screen == Screen::Controls ||
@@ -867,7 +926,8 @@ bool ensure_ui() {
     }
     const std::string res = res_dir();
     for (const char* font : {"FiraSans-Regular.ttf", "FiraSans-Bold.ttf",
-                             "AlegreyaSC-Regular.ttf", "AlegreyaSC-Bold.ttf"})
+                             "IMFellEnglish-Regular.ttf", "IMFellEnglish-Italic.ttf",
+                             "IMFellEnglishSC-Regular.ttf"})
         if (!Rml::LoadFontFace(res + "/fonts/" + font))
             std::fprintf(stderr, "[frontend] font missing: %s/fonts/%s\n", res.c_str(), font);
     g_hud = context->LoadDocument(res + "/ui/hud.rml");
@@ -878,7 +938,7 @@ bool ensure_ui() {
         return false;
     }
     context->GetRootElement()->AddEventListener(Rml::EventId::Keydown, &g_key_listener);
-    Rml::Element* menu = g_doc->GetElementById("menu");
+    Rml::Element* menu = g_doc->GetElementById("book");
     menu->AddEventListener(Rml::EventId::Click, &g_listener);
     // Mousemove, not mouseover: rebuilt rows would otherwise grab the
     // selection from the keyboard whenever the pointer rests over the menu.

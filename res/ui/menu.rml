@@ -4,13 +4,21 @@
 	<link type="text/rcss" href="menu.rcss"/>
 </head>
 <body>
-	<div id="panel">
-		<img id="emblem" src="emblem.png"/>
-		<div id="title">Eternal Darkness</div>
-		<div id="subtitle">Sanity's Requiem</div>
-		<div id="heading"></div>
-		<div id="menu"></div>
-		<div id="note"></div>
+	<!-- The Tome: each menu is a parchment page (Options a two-page spread). -->
+	<div id="book">
+		<div class="page" id="page0">
+			<div class="rule"></div>
+			<img id="emblem" src="emblem.png"/>
+			<img id="emblem-divider" src="tome/divider.png"/>
+			<div id="heading"></div>
+			<div class="menu" id="menu0"></div>
+			<div class="note" id="note0"></div>
+		</div>
+		<div class="page" id="page1">
+			<div class="rule"></div>
+			<div class="menu" id="menu1"></div>
+			<div class="note" id="note1"></div>
+		</div>
 	</div>
 	<div id="hint"></div>
 </body>

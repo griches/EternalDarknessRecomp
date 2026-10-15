@@ -171,24 +171,23 @@ static void parse_input_script(const char* text) {
             g_input_script_count, skipped_events);
 }
 
-// ED_SKIP_INTRO=1 (testing): tap A every 16 frames to skip the intro movies
-// and accept the language and memory-card prompts, until the title screen
-// loads, then leave the pad alone. The title loads /UBookInv.tpl after the
-// opening movie (fmv0001) and the save prompts; boot opens it too, so only an
-// open after fmv0001 counts. Needs a memory card that already holds the save
-// (a fresh card loops on "create game file").
+// ED_SKIP_INTRO=1 (testing): tap A every 16 frames to skip the intro movies,
+// and stop once the opening movie (fmv0001) is over, leaving the pad to the
+// player for the language and memory-card prompts. The game opens a non-movie
+// file (/UMemcardText.bin) as soon as fmv0001 ends.
 static bool g_skip_intro;
 static bool g_skip_intro_done;
-static const char* g_skip_intro_until = "/UBookInv.tpl";
 static bool g_skip_intro_armed;
 
 static void skip_intro_note_open(const char* path) {
-    if (strstr(path, "/fmv/fmv0001.avi"))
+    if (!g_skip_intro || g_skip_intro_done)
+        return;
+    if (strstr(path, "/fmv/fmv0001."))
         g_skip_intro_armed = true;
-    if (g_skip_intro && !g_skip_intro_done && g_skip_intro_armed &&
-        strstr(path, g_skip_intro_until)) {
+    else if (g_skip_intro_armed && !strstr(path, "/fmv/")) {
         g_skip_intro_done = true;
-        fprintf(stderr, "[input] title screen reached (%s); skip-intro off\n", path);
+        fprintf(stderr, "[input] opening movie over (%s); skip-intro off\n",
+                path);
     }
 }
 
@@ -4296,8 +4295,6 @@ void hle_install(CPUState* cpu) {
     g_skip_intro = getenv("ED_SKIP_INTRO") != NULL;
     g_skip_intro_done = false;
     g_skip_intro_armed = false;
-    if (getenv("ED_SKIP_INTRO_UNTIL") != NULL)
-        g_skip_intro_until = getenv("ED_SKIP_INTRO_UNTIL");
     g_trace_fn_count = 0;
     if (getenv("ED_TRACE_FN") != NULL) {
         char names[512];

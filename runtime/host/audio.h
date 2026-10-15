@@ -12,6 +12,10 @@
 void audio_init(void);
 void audio_shutdown(void);
 void audio_set_vi_clock(u64 work_units_per_frame, u32 refresh_hz);
+// Wall-clock pacing: the caller runs audio_poll once per AID chunk due, at
+// audio_chunks_per_second, instead of once per block.
+void audio_use_wall_clock(void);
+u32 audio_chunks_per_second(void);
 
 bool audio_mmio_contains(u32 address);
 u64  audio_mmio_read(u32 address, u8 size);

@@ -279,7 +279,7 @@ int main(int argc, char** argv) {
         .app_name = "Eternal Darkness",
         .window_width = 1280,
         .window_height = 960,
-        .vsync = true,
+        .vsync = getenv("ED_NO_VSYNC") == NULL,
         .allow_texture_dumps = getenv("ED_TEXTURE_DUMP") != NULL,
         .info_logging = getenv("ED_AURORA_LOG") != NULL,
         .graphics_logging = getenv("ED_GFX_LOG") != NULL,

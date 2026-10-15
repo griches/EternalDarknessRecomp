@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define MSR_EE 0x00008000u  // MSR[EE], external interrupts enabled (bit 16)
 #define MSR_FP 0x00002000u  // MSR[FP], floating point available
@@ -55,6 +56,45 @@ static DolInterrupts interrupts;
 static DolSiDevice si;
 static DolViClock vi_clock;
 static u64 frame_work_units;
+
+// The windowed build runs retraces and audio chunks off the wall clock, so the
+// game keeps real time whatever the host's block rate: the movie decoder needs
+// the 2M-block cadence, which ran the title screen at 67% speed on an M4 Pro
+// and the audio with it. The headless build, or ED_FRAME_BLOCKS=N, counts N
+// blocks per retrace instead (deterministic, for debugging).
+#define WALL_UNITS_PER_FRAME 1000000ull  // VI clock units, 60,000,000 a second
+#define WALL_MAX_STEP_NS 100000000ull     // after a stall, drop time, don't race
+static bool wall_clock;
+static u64 wall_last_ns;
+static u64 wall_vi_rem;     // ns * 3 not yet turned into units (units = ns*3/50)
+static u64 wall_audio_rem;  // ns * chunks/s not yet turned into chunks
+
+static u64 wall_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (u64)ts.tv_sec * 1000000000ull + (u64)ts.tv_nsec;
+}
+
+// ED_SPEED_LOG=1: wall-clock seconds per 60 retraces (1.00 is full speed).
+static bool speed_log;
+static u64 speed_retraces;
+static double speed_mark;
+
+static double wall_seconds(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
+static void speed_note_retrace(void) {
+    if (!speed_log || ++speed_retraces % VI_REFRESH_HZ != 0u)
+        return;
+    const double now = wall_seconds();
+    if (speed_mark != 0.0)
+        fprintf(stderr, "[speed] 60 retraces in %.3f s (%.0f%% speed)\n",
+                now - speed_mark, 100.0 / (now - speed_mark));
+    speed_mark = now;
+}
 
 // Blocks between batched retrace/interrupt-delivery evaluations (see
 // interrupt_poll). Accumulator of guest blocks since the last batched pass.
@@ -133,16 +173,31 @@ void interrupt_init(void) {
     dol_vi_clock_init(&vi_clock);
     interrupt_poll_accum = 0;
     frame_work_units = DEFAULT_FRAME_BLOCKS;
+#ifdef ED_AURORA
+    wall_clock = true;
+#endif
     const char* env = getenv("ED_FRAME_BLOCKS");
     if (env != NULL && env[0] != '\0') {
         char* end = NULL;
         unsigned long long value = strtoull(env, &end, 0);
-        if (end != env && value != 0)
+        if (end != env && value != 0) {
             frame_work_units = value;
+            wall_clock = false;
+        }
     }
-    dol_vi_clock_configure(&vi_clock, frame_work_units, (u32)VI_REFRESH_HZ,
-                           GC_TIMEBASE_HZ);
-    audio_set_vi_clock(frame_work_units, (u32)VI_REFRESH_HZ);
+    if (wall_clock) {
+        dol_vi_clock_configure(&vi_clock, WALL_UNITS_PER_FRAME,
+                               (u32)VI_REFRESH_HZ, GC_TIMEBASE_HZ);
+        audio_use_wall_clock();
+        wall_last_ns = wall_ns();
+        wall_vi_rem = 0;
+        wall_audio_rem = 0;
+    } else {
+        dol_vi_clock_configure(&vi_clock, frame_work_units, (u32)VI_REFRESH_HZ,
+                               GC_TIMEBASE_HZ);
+        audio_set_vi_clock(frame_work_units, (u32)VI_REFRESH_HZ);
+    }
+    speed_log = getenv("ED_SPEED_LOG") != NULL;
 }
 
 // GPU time for a draw-done that nobody waits on: the PE finish interrupt is
@@ -281,12 +336,29 @@ static void deliver_external(CPUState* cpu) {
 // (INTERRUPT_POLL_INTERVAL + interrupt_poll_accum declared once above.)
 
 void interrupt_poll(CPUState* cpu) {
-    audio_poll(cpu);
+    if (!wall_clock)
+        audio_poll(cpu);
 
     if (++interrupt_poll_accum < INTERRUPT_POLL_INTERVAL)
         return;
     const u64 units = interrupt_poll_accum;
     interrupt_poll_accum = 0;
+    u64 vi_units = units;
+    if (wall_clock) {
+        const u64 now = wall_ns();
+        u64 elapsed = now - wall_last_ns;
+        wall_last_ns = now;
+        if (elapsed > WALL_MAX_STEP_NS)
+            elapsed = WALL_MAX_STEP_NS;
+        wall_vi_rem += elapsed * 3u;
+        vi_units = wall_vi_rem / 50u;
+        wall_vi_rem %= 50u;
+        wall_audio_rem += elapsed * audio_chunks_per_second();
+        while (wall_audio_rem >= 1000000000ull) {
+            wall_audio_rem -= 1000000000ull;
+            audio_poll(cpu);
+        }
+    }
     if (pe_finish_countdown != 0) {
         pe_finish_countdown = pe_finish_countdown > units
                                   ? pe_finish_countdown - (u32)units
@@ -300,11 +372,12 @@ void interrupt_poll(CPUState* cpu) {
     // one generated-block dispatch advances one work unit. DolViClock owns the
     // periodic retrace schedule; replacing the feed with instruction/cycle
     // counts will not change this interrupt/device path.
-    dol_vi_clock_advance(&vi_clock, units);
+    dol_vi_clock_advance(&vi_clock, vi_units);
     u64 ticks = 0;
     while (dol_vi_clock_pop_retrace(&vi_clock, &ticks)) {
         cpu->timebase += ticks;
         dol_interrupts_assert_vi_retrace(&interrupts);
+        speed_note_retrace();
         dol_si_latch_poll(&si, 0xFu);
         sync_si_interrupt();
     }

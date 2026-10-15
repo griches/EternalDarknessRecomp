@@ -79,6 +79,16 @@ void audio_set_vi_clock(u64 work_units_per_frame, u32 refresh_hz) {
     dol_audio_dma_set_vi_clock(&g_audio_dma, work_units_per_frame, refresh_hz);
 }
 
+void audio_use_wall_clock(void) {
+    // A work rate of one unit per second makes every audio_poll call one chunk.
+    dol_audio_dma_set_work_rate(&g_audio_dma, 1);
+}
+
+u32 audio_chunks_per_second(void) {
+    const u32 rate = dol_audio_dma_sample_rate(&g_audio_dma);
+    return (rate != 0u ? rate : 32000u) / 8u;  // 8 stereo frames per chunk
+}
+
 bool audio_mmio_contains(u32 address) {
     return (address >= DSP_BASE && address < DSP_BASE + DSP_SIZE) ||
            (address >= AI_BASE && address < AI_BASE + AI_SIZE);

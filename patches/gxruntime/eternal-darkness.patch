@@ -681,10 +681,29 @@ index 2fb6944..7fefce3 100644
 +
  } // namespace gxruntime::gxcore
 diff --git a/graphics/gxcore/src/plan.cpp b/graphics/gxcore/src/plan.cpp
-index c3d1557..e28b1d5 100644
+index c3d1557..bd69e78 100644
 --- a/graphics/gxcore/src/plan.cpp
 +++ b/graphics/gxcore/src/plan.cpp
-@@ -1185,22 +1185,41 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -773,6 +773,18 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+     plan.pe_control_valid = pe.valid;
+     plan.efb_pixel_format = pe.pixel_format;
+     plan.efb_z_format = pe.z_format;
++    // Dolphin BlendingState::Generate: an EFB format without an alpha channel
++    // reads destination alpha as 1, so DSTALPHA blends as ONE and INVDSTALPHA
++    // as ZERO. The host render target always keeps alpha; without this a
++    // dst-alpha blend (Eternal Darkness's sepia overlay quad) followed
++    // whatever alpha earlier draws left there and flickered frame to frame.
++    if (pe.pixel_format != static_cast<std::uint8_t>(PixelFormat::RGBA6_Z24)) {
++      const auto drop_dst_alpha = [](std::uint8_t factor) -> std::uint8_t {
++        return factor == 6u ? 1u : factor == 7u ? 0u : factor;  // GX_BL_(INV)DSTALPHA
++      };
++      pipe.src_factor = drop_dst_alpha(pipe.src_factor);
++      pipe.dst_factor = drop_dst_alpha(pipe.dst_factor);
++    }
+     plan.early_ztest = pe.early_ztest;
+     if (!pe.valid)
+       ++counters.efb_format_defaulted;
+@@ -1185,22 +1197,41 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
        ++counters.scissor_multi_rect;
    }
    if (key.textured != 0u) {

@@ -9,3 +9,5 @@ __pycache__/
 settings.ini
 saves/
 logs/
+# HD texture packs you add (Dolphin format, tex1_*.png).
+textures/

@@ -13,6 +13,7 @@ typedef struct {
     bool widescreen_hud;  // move the game's widescreen HUD out to the edges
     int render_scale;     // 0 window pixels, 1-4 = 720p, 1080p, 1440p, 4K
     int game_font;        // the game's text: 0 sharp, 1 tome, 2 as on the disc
+    bool hd_textures;     // use the texture pack in textures/ when there is one
     bool fullscreen;
     bool fps_counter;     // frames per second in the window title
     int music_volume;     // disc-streamed music, 0-100

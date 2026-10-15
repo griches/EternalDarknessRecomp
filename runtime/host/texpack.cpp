@@ -1,0 +1,181 @@
+// HD texture packs in Dolphin's format: a folder of tex1_<w>x<h>[_m]_<hash>_<fmt>.png
+// files, the hash being XXH64 of the texture's base level (the renderer
+// computes it for each texture it decodes and asks here). The folder is
+// indexed by name at start-up; a texture's PNG is decoded on a loader thread
+// the first time it is drawn, the original showing until it is ready.
+//
+// The pack lives in textures/ beside res/ (any layout of subfolders), or
+// ED_TEXTURE_PACK=<folder>. Options > Game > HD textures turns it off.
+#include "host/texpack.h"
+
+#include "gxruntime/aurora_backend.h"
+#include "host/buttons.h"
+#include "host/frontend.h"
+#include "host/settings.h"
+
+#include <condition_variable>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <filesystem>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+namespace {
+
+struct Key {
+    uint32_t format, width, height;
+    uint64_t hash;
+    bool operator==(const Key& o) const {
+        return format == o.format && width == o.width && height == o.height && hash == o.hash;
+    }
+};
+struct KeyHash {
+    size_t operator()(const Key& k) const {
+        return static_cast<size_t>(k.hash ^ (static_cast<uint64_t>(k.width) << 40) ^
+                                   (static_cast<uint64_t>(k.height) << 20) ^ k.format);
+    }
+};
+
+struct Loaded {
+    std::vector<uint8_t> rgba;
+    uint32_t width = 0, height = 0;
+};
+
+std::string g_dir;
+std::unordered_map<Key, std::string, KeyHash> g_files;  // read-only after init
+std::mutex g_mutex;
+std::condition_variable g_cv;
+std::deque<Key> g_queue;
+std::unordered_set<Key, KeyHash> g_queued;  // queued or loading
+std::unordered_map<Key, Loaded, KeyHash> g_ready;
+std::unordered_set<Key, KeyHash> g_failed;
+bool g_log = false;
+
+// tex1_<w>x<h>[_m]_<hash16>_<fmt>.png (paletted and per-mip files are skipped).
+bool parse_name(const std::string& name, Key* key) {
+    unsigned w = 0, h = 0, fmt = 0;
+    unsigned long long hash = 0;
+    char m[3] = {};
+    int used = 0;
+    if (std::sscanf(name.c_str(), "tex1_%ux%u_%2[m_]%n", &w, &h, m, &used) == 3 &&
+        std::strcmp(m, "m_") == 0) {
+        if (std::sscanf(name.c_str() + used, "%16llx_%u.png", &hash, &fmt) != 2)
+            return false;
+    } else if (std::sscanf(name.c_str(), "tex1_%ux%u_%16llx_%u.png", &w, &h, &hash, &fmt) != 4) {
+        return false;
+    }
+    if (name.find("_mip") != std::string::npos || name.size() < 6 ||
+        name.compare(name.size() - 4, 4, ".png") != 0)
+        return false;
+    // "_<16 hex>_<fmt>.png" ends the name: a second hash means a palette.
+    const size_t tail = name.rfind('_');
+    const size_t before = name.rfind('_', tail - 1);
+    if (tail == std::string::npos || before == std::string::npos || tail - before != 17)
+        return false;
+    *key = Key{fmt, w, h, hash};
+    return true;
+}
+
+void loader() {
+    for (;;) {
+        Key key;
+        {
+            std::unique_lock<std::mutex> lock(g_mutex);
+            g_cv.wait(lock, [] { return !g_queue.empty(); });
+            key = g_queue.front();
+            g_queue.pop_front();
+        }
+        Loaded img;
+        const bool ok = load_png_rgba(g_files.at(key), &img.rgba, &img.width, &img.height);
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_queued.erase(key);
+        if (ok)
+            g_ready[key] = std::move(img);
+        else
+            g_failed.insert(key);
+        if (g_log)
+            std::fprintf(stderr, "[texpack] %s %s\n", ok ? "loaded" : "FAILED",
+                         g_files.at(key).c_str());
+    }
+}
+
+int lookup(uint32_t format, uint32_t width, uint32_t height, uint64_t hash, uint8_t** out_rgba,
+           uint32_t* out_width, uint32_t* out_height) {
+    const Key key{format, width, height, hash};
+    if (g_files.find(key) == g_files.end())
+        return 0;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (auto it = g_ready.find(key); it != g_ready.end()) {
+        Loaded& img = it->second;
+        *out_rgba = static_cast<uint8_t*>(std::malloc(img.rgba.size()));
+        if (*out_rgba == nullptr)
+            return 0;
+        std::memcpy(*out_rgba, img.rgba.data(), img.rgba.size());
+        *out_width = img.width;
+        *out_height = img.height;
+        g_ready.erase(it);  // the renderer keeps it now
+        return 1;
+    }
+    if (g_failed.count(key) != 0)
+        return 0;
+    if (g_queued.insert(key).second) {
+        g_queue.push_back(key);
+        g_cv.notify_one();
+    }
+    return 2;
+}
+
+uint64_t generation() { return g_settings.hd_textures && !g_files.empty() ? 1u : 0u; }
+
+std::string pack_dir() {
+    if (const char* env = std::getenv("ED_TEXTURE_PACK"); env != nullptr && env[0] != '\0')
+        return env;
+    std::error_code ec;
+    const std::filesystem::path beside_res =
+        std::filesystem::path(frontend_res_dir()).parent_path() / "textures";
+    if (std::filesystem::is_directory(beside_res, ec))
+        return beside_res.string();
+    return "textures";
+}
+
+}  // namespace
+
+extern "C" void texpack_init(void) {
+    g_log = std::getenv("ED_TEXPACK_LOG") != nullptr;
+    g_dir = pack_dir();
+    std::error_code ec;
+    if (!std::filesystem::is_directory(g_dir, ec))
+        return;
+    size_t skipped = 0;
+    for (auto it = std::filesystem::recursive_directory_iterator(
+             g_dir, std::filesystem::directory_options::skip_permission_denied, ec);
+         !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+        if (!it->is_regular_file(ec))
+            continue;
+        const std::string name = it->path().filename().string();
+        if (name.rfind("tex1_", 0) != 0)
+            continue;
+        Key key;
+        if (parse_name(name, &key))
+            g_files.emplace(key, it->path().string());
+        else
+            skipped++;
+    }
+    std::fprintf(stderr, "[texpack] %zu textures in %s (%zu skipped)\n", g_files.size(),
+                 g_dir.c_str(), skipped);
+    if (g_files.empty())
+        return;
+    // Two loaders: PNG decoding is the slow part and must not hold up a frame.
+    for (int i = 0; i < 2; i++)
+        std::thread(loader).detach();
+    static const DolAuroraTexturePack ops = {lookup, generation};
+    dol_aurora_set_texture_pack(&ops);
+}
+
+size_t texpack_count() { return g_files.size(); }

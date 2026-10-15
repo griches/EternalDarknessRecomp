@@ -8,6 +8,7 @@
 #include "host/buttons.h"
 #include "host/controls.h"
 #include "host/settings.h"
+#include "host/texpack.h"
 
 #include <aurora/rmlui.hpp>
 
@@ -577,6 +578,16 @@ void build_options() {
                 "typefaces, Original as on the disc.";
     font.change = [](int dir) { cycle(g_settings.game_font, 3, dir); };
     g_rows.push_back(font);
+
+    Row hd{"HD textures", texpack_count() != 0 ? on_off(g_settings.hd_textures) : "No pack"};
+    hd.page = 1;
+    hd.enabled = texpack_count() != 0;
+    hd.note = texpack_count() != 0
+                  ? "The texture pack in your textures folder (" +
+                        std::to_string(texpack_count()) + " images)."
+                  : "Put a Dolphin-format texture pack (tex1_*.png) in the textures folder.";
+    hd.change = [](int) { g_settings.hd_textures = !g_settings.hd_textures; };
+    g_rows.push_back(hd);
 
     Row skip{"Skip intros", on_off(g_settings.skip_intros)};
     skip.page = 1;

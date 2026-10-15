@@ -10,6 +10,7 @@
 
 #include "gxruntime/aurora_backend.h"
 #include "host/buttons.h"
+#include "host/texpack.h"
 #include "host/controls.h"
 #include "host/frontend.h"
 #include "host/settings.h"
@@ -468,6 +469,7 @@ int main(int argc, char** argv) {
         controls_init();
         buttons_init();
         frontend_init(argc, argv);
+        texpack_init();
         if (!no_launcher && getenv("ED_QUICKLOAD") == NULL &&
             getenv("ED_NO_LAUNCHER") == NULL) {
             const char* default_iso = iso_path != NULL ? iso_path : getenv("ED_ISO");

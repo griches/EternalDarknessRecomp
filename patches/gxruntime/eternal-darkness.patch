@@ -446,7 +446,7 @@ index b09ef4d..efb1a26 100644
        xfbTex && *xfbTex ? (*xfbTex)->size.width : efbSource.size.width;
    const uint32_t contentH =
 diff --git a/graphics/aurora/lib/gfx/gxcore_draw.cpp b/graphics/aurora/lib/gfx/gxcore_draw.cpp
-index 71136b9..e7490a2 100644
+index 71136b9..2232954 100644
 --- a/graphics/aurora/lib/gfx/gxcore_draw.cpp
 +++ b/graphics/aurora/lib/gfx/gxcore_draw.cpp
 @@ -242,6 +242,13 @@ TextureCacheStats g_textureCacheStats;
@@ -483,7 +483,18 @@ index 71136b9..e7490a2 100644
      return &it->second;
  
    const auto dims = aurora::vi::configured_xfb_size();
-@@ -593,6 +604,8 @@ void reset_texture_cache() {
+@@ -536,6 +547,10 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+   default:
+     break; // None here; All was skipped at plan time
+   }
++  // DOL_GXCORE_NOCULL=1 (debug): draw both faces of everything.
++  static const bool no_cull = std::getenv("DOL_GXCORE_NOCULL") != nullptr;
++  if (no_cull)
++    cullMode = wgpu::CullMode::None;
+ 
+   const wgpu::RenderPipelineDescriptor descriptor{
+       .label = "GXCore Pipeline",
+@@ -593,6 +608,8 @@ void reset_texture_cache() {
    g_textureCache.clear();
    g_textureAddrKey.clear();
    g_efbCopyTextures.clear();
@@ -492,7 +503,7 @@ index 71136b9..e7490a2 100644
    g_ramXfbTextures.clear();
    g_last_xfb_dest_stride = 0;
    g_last_xfb_height = 0;
-@@ -660,8 +673,9 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -660,8 +677,9 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
        dstHeight = xfb_h;
    }
  
@@ -504,7 +515,7 @@ index 71136b9..e7490a2 100644
        it->second->size.width != dstWidth || it->second->size.height != dstHeight) {
      TextureHandle handle;
      if (!is_xfb && gfx::tex_copy_conv::needs_conversion(fmt)) {
-@@ -670,7 +684,7 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -670,7 +688,7 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
        handle = gfx::new_render_texture(dstWidth, dstHeight, GX_TF_RGBA8,
                                         is_xfb ? "GXCore XFB" : "GXCore Copy");
      }
@@ -513,7 +524,7 @@ index 71136b9..e7490a2 100644
    }
    if (!it->second) {
      return;
-@@ -714,6 +728,20 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -714,6 +732,20 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
        efb_readback::set_continuous(true);
      efb_readback::request();
    }
@@ -549,7 +560,7 @@ index b205cfa..ee13954 100644
  
  } // namespace aurora::gfx::gxcore
 diff --git a/graphics/frontend/include/gxruntime/aurora_recomp/retail_gx_frontend.hpp b/graphics/frontend/include/gxruntime/aurora_recomp/retail_gx_frontend.hpp
-index 1ef8382..85c5668 100644
+index 1ef8382..c27c418 100644
 --- a/graphics/frontend/include/gxruntime/aurora_recomp/retail_gx_frontend.hpp
 +++ b/graphics/frontend/include/gxruntime/aurora_recomp/retail_gx_frontend.hpp
 @@ -116,6 +116,13 @@ public:
@@ -566,7 +577,36 @@ index 1ef8382..85c5668 100644
    const DolGxRecompState& state() const { return state_; }
    DolGxRecompState& state() { return state_; }
  
-@@ -177,6 +184,11 @@ private:
+@@ -150,6 +157,19 @@ private:
+                    std::size_t command_offset);
+   bool emit_new_packets(AuroraRenderSink& sink, std::uint32_t first_event);
+   void drain_emitted_packets(std::uint32_t emitted_count);
++  bool drain_events_mid_parse();
++  // Arms the mid-parse drain for one flush/replay call (drain mode only).
++  class MidParseDrain {
++  public:
++    MidParseDrain(RetailGxFrontend& frontend, AuroraRenderSink* sink,
++                  std::uint32_t first_event);
++    ~MidParseDrain();
++
++  private:
++    RetailGxFrontend& frontend_;
++  };
++  // Events one command can add (a draw plus its indexed-attribute spans).
++  static constexpr std::uint32_t kMidParseDrainHeadroom = 64u;
+ 
+   DolGxRecompState state_{};
+   std::vector<std::uint8_t> fifo_buffer_;
+@@ -165,6 +185,8 @@ private:
+   void notify_events(std::uint32_t first_event);
+ 
+   bool packet_drain_enabled_ = false;
++  AuroraRenderSink* drain_sink_ = nullptr;
++  std::uint32_t drain_first_event_ = 0u;
+   std::uint64_t zero_vertex_draws_ = 0;
+   TraceEventObserver event_observer_ = nullptr;
+   void* event_observer_user_ = nullptr;
+@@ -177,9 +199,15 @@ private:
    std::uint32_t last_error_b_ = 0;
    std::uint32_t last_error_c_ = 0;
    std::uint32_t last_error_d_ = 0;
@@ -578,6 +618,10 @@ index 1ef8382..85c5668 100644
    // Frame-relative fifo offset (GPNF §1).
    std::size_t frame_fifo_bytes_ = 0;
    std::size_t last_command_offset_ = 0;
++  std::uint64_t draw_count_for_log_ = 0;
+   std::size_t dl_command_offset_ = 0;
+   bool in_display_list_ = false;
+ };
 diff --git a/graphics/frontend/include/gxruntime/aurora_recomp/trace.hpp b/graphics/frontend/include/gxruntime/aurora_recomp/trace.hpp
 index 56ea697..1ef3293 100644
 --- a/graphics/frontend/include/gxruntime/aurora_recomp/trace.hpp
@@ -642,7 +686,7 @@ index e21b335..80dc91b 100644
        // Unknown kinds are forward-compatible: skip.
        break;
 diff --git a/graphics/frontend/src/retail_gx_frontend.cpp b/graphics/frontend/src/retail_gx_frontend.cpp
-index 06fff92..4151d2d 100644
+index 06fff92..2445472 100644
 --- a/graphics/frontend/src/retail_gx_frontend.cpp
 +++ b/graphics/frontend/src/retail_gx_frontend.cpp
 @@ -324,6 +324,8 @@ void RetailGxFrontend::reset(const DolGuestAddressResolver* resolver) {
@@ -654,7 +698,150 @@ index 06fff92..4151d2d 100644
  }
  
  bool RetailGxFrontend::set_vertex_layout(std::uint8_t vtx_fmt,
-@@ -754,6 +756,11 @@ bool RetailGxFrontend::handle_bp(std::uint32_t raw) {
+@@ -386,6 +388,9 @@ bool RetailGxFrontend::flush(AuroraRenderSink* sink) {
+     (void)dol_gx_recomp_trace_events(&state_, &first_event);
+   }
+ 
++  // Drain events to the sink mid-parse when the fixed trace buffer
++  // nears full (one CALL_DL can hold more draws than it fits).
++  MidParseDrain drain_scope(*this, sink, first_event);
+   std::size_t consumed = 0;
+   if (!parse_stream(fifo_buffer_, true, true, 0u, &consumed))
+     return false;
+@@ -395,6 +400,7 @@ bool RetailGxFrontend::flush(AuroraRenderSink* sink) {
+                        fifo_buffer_.begin() +
+                            static_cast<std::ptrdiff_t>(consumed));
+   }
++  first_event = drain_first_event_;
+   notify_events(first_event);
+ 
+   if (sink == nullptr)
+@@ -419,6 +425,9 @@ bool RetailGxFrontend::write_display_list(std::span<const std::uint8_t> bytes,
+   // Mirrors the 0x40 opcode branch of parse_stream: a zero-size list is a
+   // no-op, the list bytes are recorded, then parsed at DL depth with partial
+   // commands forbidden and full consumption required.
++  // Drain events to the sink mid-parse when the fixed trace buffer
++  // nears full (one CALL_DL can hold more draws than it fits).
++  MidParseDrain drain_scope(*this, sink, first_event);
+   if (!bytes.empty()) {
+     if (!dol_gx_recomp_push_fifo(&state_, bytes.data(),
+                                  static_cast<std::uint32_t>(bytes.size())))
+@@ -429,6 +438,7 @@ bool RetailGxFrontend::write_display_list(std::span<const std::uint8_t> bytes,
+       return false;
+     }
+   }
++  first_event = drain_first_event_;
+   notify_events(first_event);
+ 
+   if (sink == nullptr)
+@@ -450,12 +460,16 @@ bool RetailGxFrontend::replay_fifo(std::span<const std::uint8_t> bytes,
+     (void)dol_gx_recomp_trace_events(&state_, &first_event);
+   }
+ 
++  // Drain events to the sink mid-parse when the fixed trace buffer
++  // nears full (one CALL_DL can hold more draws than it fits).
++  MidParseDrain drain_scope(*this, sink, first_event);
+   std::size_t consumed = 0;
+   if (bytes.empty() ||
+       !parse_stream(bytes, false, true, 0u, &consumed) ||
+       consumed != bytes.size()) {
+     return false;
+   }
++  first_event = drain_first_event_;
+   notify_events(first_event);
+ 
+   if (sink == nullptr)
+@@ -467,6 +481,33 @@ bool RetailGxFrontend::replay_fifo(std::span<const std::uint8_t> bytes,
+   return true;
+ }
+ 
++RetailGxFrontend::MidParseDrain::MidParseDrain(RetailGxFrontend& frontend,
++                                              AuroraRenderSink* sink,
++                                              std::uint32_t first_event)
++    : frontend_(frontend) {
++  frontend_.drain_sink_ =
++      frontend_.packet_drain_enabled_ ? sink : nullptr;
++  frontend_.drain_first_event_ = first_event;
++}
++
++RetailGxFrontend::MidParseDrain::~MidParseDrain() {
++  frontend_.drain_sink_ = nullptr;
++}
++
++// Emit and drop everything parsed so far, as the end of flush() would. Called
++// between commands, so a draw and its trailing INDEXED_SPAN events always go
++// out together. Without this, events past DOL_GX_RECOMP_MAX_TRACE_EVENTS were
++// silently dropped: Eternal Darkness calls its room display list (6,700 draws)
++// in one CALL_DL, and the walls, floor and stairs never reached the renderer.
++bool RetailGxFrontend::drain_events_mid_parse() {
++  notify_events(drain_first_event_);
++  if (!emit_new_packets(*drain_sink_, drain_first_event_))
++    return false;
++  drain_emitted_packets(state_.trace_count);
++  drain_first_event_ = 0u;
++  return true;
++}
++
+ void RetailGxFrontend::notify_events(std::uint32_t first_event) {
+   if (event_observer_ == nullptr)
+     return;
+@@ -515,6 +556,11 @@ bool RetailGxFrontend::parse_stream(std::span<const std::uint8_t> bytes,
+ 
+   std::size_t pos = 0;
+   while (pos < bytes.size()) {
++    if (drain_sink_ != nullptr &&
++        state_.trace_count + kMidParseDrainHeadroom >=
++            DOL_GX_RECOMP_MAX_TRACE_EVENTS &&
++        !drain_events_mid_parse())
++      return false;
+     const std::uint8_t cmd = bytes[pos];
+     if (cmd == 0x00u) {
+       if (record_fifo_bytes &&
+@@ -631,11 +677,17 @@ bool RetailGxFrontend::parse_stream(std::span<const std::uint8_t> bytes,
+       in_display_list_ = true;
+       dl_command_offset_ = call_offset;
+       std::size_t dl_consumed = 0;
+-      if (!parse_stream(
+-              std::span<const std::uint8_t>{
+-                  static_cast<const std::uint8_t*>(range.data), range.size},
+-              false, false, depth + 1u, &dl_consumed) ||
+-          dl_consumed != range.size) {
++      static const bool dl_log = std::getenv("DOL_FRONTEND_DL_LOG") != nullptr;
++      const std::uint64_t draws_before = draw_count_for_log_;
++      const bool dl_ok = parse_stream(
++          std::span<const std::uint8_t>{
++              static_cast<const std::uint8_t*>(range.data), range.size},
++          false, false, depth + 1u, &dl_consumed);
++      if (dl_log)
++        std::fprintf(stderr, "[fe-dl] addr=0x%08X size=0x%X consumed=0x%zX ok=%d draws=%llu\n",
++                     address, size, dl_consumed, dl_ok ? 1 : 0,
++                     static_cast<unsigned long long>(draw_count_for_log_ - draws_before));
++      if (!dl_ok || dl_consumed != range.size) {
+         in_display_list_ = prev_in_dl;
+         dl_command_offset_ = prev_dl_off;
+         return false;
+@@ -710,13 +762,19 @@ bool RetailGxFrontend::parse_stream(std::span<const std::uint8_t> bytes,
+       const std::size_t vertex_bytes =
+           static_cast<std::size_t>(vertex_count) * vertex_size;
+       const std::size_t command_size = 3u + vertex_bytes;
+-      if (pos + command_size > bytes.size())
++      if (pos + command_size > bytes.size()) {
++        static const bool dl_log = std::getenv("DOL_FRONTEND_DL_LOG") != nullptr;
++        if (dl_log && in_display_list_)
++          std::fprintf(stderr, "[fe-dl] draw 0x%02X fmt=%u count=%u vsize=%u overruns list at 0x%zX (have 0x%zX)\n",
++                       cmd, vtx_fmt, vertex_count, vertex_size, pos, bytes.size());
+         break;
++      }
+       if (record_fifo_bytes &&
+           !dol_gx_recomp_push_fifo(&state_, bytes.data() + pos,
+                                    static_cast<std::uint32_t>(command_size)))
+         return false;
+       last_command_offset_ = command_offset_at(pos);
++      ++draw_count_for_log_;
+       if (!handle_draw(cmd,
+                        std::span<const std::uint8_t>{bytes.data() + pos + 3u,
+                                                      vertex_bytes},
+@@ -754,6 +812,11 @@ bool RetailGxFrontend::handle_bp(std::uint32_t raw) {
    const std::uint32_t value = raw & 0x00FFFFFFu;
    if (!dol_gx_recomp_note_bp_reg(&state_, reg, value))
      return false;
@@ -666,7 +853,7 @@ index 06fff92..4151d2d 100644
  
    std::uint8_t slot = 0;
    if (map_image0_reg(reg, &slot) || map_image3_reg(reg, &slot))
-@@ -1021,6 +1028,195 @@ void RetailGxFrontend::drain_emitted_packets(std::uint32_t emitted_count) {
+@@ -1021,6 +1084,195 @@ void RetailGxFrontend::drain_emitted_packets(std::uint32_t emitted_count) {
    emitted_trace_count_ = 0u;
  }
  
@@ -968,7 +1155,7 @@ index 4d14391..71dbfb2 100644
    const GapCounters& counters() const { return counters_; }
    GapCounters& counters() { return counters_; }
 diff --git a/graphics/gxcore/src/gp_state_dump.cpp b/graphics/gxcore/src/gp_state_dump.cpp
-index 2d64013..1de36d6 100644
+index 2d64013..04da7f7 100644
 --- a/graphics/gxcore/src/gp_state_dump.cpp
 +++ b/graphics/gxcore/src/gp_state_dump.cpp
 @@ -3,6 +3,7 @@
@@ -979,7 +1166,7 @@ index 2d64013..1de36d6 100644
  #include <cstring>
  #include <string>
  
-@@ -248,6 +249,35 @@ std::string format_gp_state_draw_json(const DrawPlan& plan,
+@@ -248,6 +249,93 @@ std::string format_gp_state_draw_json(const DrawPlan& plan,
                              true);
    append_matrix_fingerprint(s, "nrm_mtx_fnv", plan.constants.posnormalmatrix + 3,
                              3, true);
@@ -1003,11 +1190,69 @@ index 2d64013..1de36d6 100644
 +        s += buf;
 +      }
 +    s += "],\"verts\":[";
-+    const std::uint32_t nv = plan.vertex_count < 6 ? plan.vertex_count : 6;
++    const std::uint32_t nv = plan.vertex_count < 64 ? plan.vertex_count : 64;
 +    for (std::uint32_t v = 0; v < nv; ++v) {
 +      const float* p = plan.vertices.data() + v * kVertexFloats;
 +      std::snprintf(buf, sizeof buf, "%s[%g,%g,%g,%g]", v ? "," : "", p[0], p[1],
 +                    p[2], p[3]);
++      s += buf;
++    }
++    // Colour 0 (0..1 floats) and the first two UV sets of the same vertices.
++    s += "],\"vcol\":[";
++    for (std::uint32_t v = 0; v < nv; ++v) {
++      const float* p = plan.vertices.data() + v * kVertexFloats + kVertexColor0Offset / 4;
++      std::snprintf(buf, sizeof buf, "%s[%.3g,%.3g,%.3g,%.3g]", v ? "," : "", p[0],
++                    p[1], p[2], p[3]);
++      s += buf;
++    }
++    s += "],\"uv\":[";
++    for (std::uint32_t v = 0; v < nv; ++v) {
++      const float* p = plan.vertices.data() + v * kVertexFloats + kVertexUvOffset / 4;
++      std::snprintf(buf, sizeof buf, "%s[%.4g,%.4g,%.4g,%.4g]", v ? "," : "", p[0],
++                    p[1], p[2], p[3]);
++      s += buf;
++    }
++    s += "],\"materials\":[";
++    for (int m = 0; m < 4; ++m) {
++      std::snprintf(buf, sizeof buf, "%s[%d,%d,%d,%d]", m ? "," : "",
++                    plan.constants.materials[m][0], plan.constants.materials[m][1],
++                    plan.constants.materials[m][2], plan.constants.materials[m][3]);
++      s += buf;
++    }
++    std::snprintf(buf, sizeof buf, "],\"viewport\":[%d,%g,%g,%g,%g,%g,%g", plan.viewport_valid ? 1 : 0,
++                  plan.viewport[0], plan.viewport[1], plan.viewport[2], plan.viewport[3],
++                  plan.viewport[4], plan.viewport[5]);
++    s += buf;
++    std::snprintf(buf, sizeof buf, "],\"alpha_ref\":[%d,%d,%d,%d",
++                  plan.pixel_constants.alpha_ref[0], plan.pixel_constants.alpha_ref[1],
++                  plan.pixel_constants.alpha_ref[2], plan.pixel_constants.alpha_ref[3]);
++    s += buf;
++    s += "],\"texmtx0\":[";
++    for (int r = 0; r < 3; ++r)
++      for (int c = 0; c < 4; ++c) {
++        std::snprintf(buf, sizeof buf, "%s%g", (r | c) ? "," : "",
++                      plan.constants.texmatrices[r][c]);
++        s += buf;
++      }
++    s += "],\"postmtx61\":[";
++    for (int r = 61; r < 64; ++r)
++      for (int c = 0; c < 4; ++c) {
++        std::snprintf(buf, sizeof buf, "%s%g", (r != 61 || c) ? "," : "",
++                      plan.constants.posttransformmatrices[r][c]);
++        s += buf;
++      }
++    s += "],\"kcolors\":[";
++    for (int m = 0; m < 4; ++m) {
++      std::snprintf(buf, sizeof buf, "%s[%d,%d,%d,%d]", m ? "," : "",
++                    plan.pixel_constants.kcolors[m][0], plan.pixel_constants.kcolors[m][1],
++                    plan.pixel_constants.kcolors[m][2], plan.pixel_constants.kcolors[m][3]);
++      s += buf;
++    }
++    s += "],\"tevregs\":[";
++    for (int m = 0; m < 4; ++m) {
++      std::snprintf(buf, sizeof buf, "%s[%d,%d,%d,%d]", m ? "," : "",
++                    plan.pixel_constants.colors[m][0], plan.pixel_constants.colors[m][1],
++                    plan.pixel_constants.colors[m][2], plan.pixel_constants.colors[m][3]);
 +      s += buf;
 +    }
 +    s += ']';
@@ -1110,6 +1355,22 @@ index c3d1557..bd69e78 100644
      // U2: decode sampler state for every used texmap from TX_SETMODE0/1.
      // Count sampler_defaulted when mode0 was never written for a live texmap
      // (plan falls back to BP-zero defaults: clamp/near/no-mip).
+diff --git a/graphics/gxcore/src/tev.cpp b/graphics/gxcore/src/tev.cpp
+index 2c074d7..bc31d92 100644
+--- a/graphics/gxcore/src/tev.cpp
++++ b/graphics/gxcore/src/tev.cpp
+@@ -506,6 +506,11 @@ void emit_tev_fragment(std::string& out, const ShaderKey& key) {
+   const std::string c1 = alpha_cond(key.alpha_comp1, "psc.alpha_ref.y");
+   emitf(out, "    if (!( %s%s%s )) { discard; }\n", c0.c_str(),
+         kAlphaLogic[key.alpha_logic], c1.c_str());
++  // DOL_GXCORE_FLAT=1 (debug): every fragment that survives the alpha test
++  // comes out magenta, to tell "not rasterised" from "computed black".
++  static const bool flat = std::getenv("DOL_GXCORE_FLAT") != nullptr;
++  if (flat)
++    emit(out, "    prev = vec4i(255, 0, 255, 255);\n");
+ 
+   // U5/U8: emit zCoord before fog when per_pixel_depth or ztex-for-fog so
+   // fog reuses it (Dolphin order). Fog alone still owns the classic body.
 diff --git a/graphics/gxcore/src/wgsl.cpp b/graphics/gxcore/src/wgsl.cpp
 index bbefbee..8297108 100644
 --- a/graphics/gxcore/src/wgsl.cpp

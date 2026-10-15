@@ -25,6 +25,17 @@ cp /path/to/disc.iso dump/GEDP01.iso      # or GEDE01.iso for the USA disc
 Keyboard: arrows = d-pad, J = A, K = B, U = X, I = Y, Q = Z, E/R = L/R,
 Enter = Start. Controllers work through SDL.
 
+`./play.sh` opens the launcher: pick the disc (images in `dump/` or the
+project folder; this build runs the disc it was generated from), Play, or
+Options. In the game, Esc or the controller's Back/Select button pauses into a
+menu with four save slots (`saves/`), the same options, and a way back to the
+launcher. Menus work with the keyboard (arrows, Enter, Esc), a controller
+(d-pad or stick, A, B) or the mouse.
+
+Options (kept in `settings.ini`): skip intros, display (follow the game's
+widescreen setting, 4:3, 16:9 or stretch), resolution, fullscreen, FPS counter,
+music and sound-effect volumes, audio buffer.
+
 Quick save: 2 saves the whole machine to `build/runs/quick.state` and 1 loads
 it back, in the same session or after a restart (`ED_QUICKSTATE=path` picks
 another file). Memory-card saves are never touched by a load.
@@ -39,7 +50,10 @@ another file). Memory-card saves are never touched by a load.
   constants read from the game's code (`gamedata.py`), and debugging helpers.
 - `config/GEDE01/symbols.txt`: function names from the
   [unending-occlusion](https://github.com/PattyTrish/unending-occlusion) decomp (CC0).
-- `patches/gxruntime/`: fixes to GXRuntime this game needs.
+- `patches/gxruntime/`, `patches/dolrecomp/`: fixes to GXRuntime and the
+  recompiler this game needs.
+- `res/`: the launcher and in-game menu (RmlUi documents) and their fonts
+  (Alegreya SC and Fira Sans, SIL Open Font License, licences alongside).
 
 ## Licence
 

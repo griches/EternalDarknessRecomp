@@ -9,6 +9,8 @@
 #include "generated.h"
 
 #include "gxruntime/aurora_backend.h"
+#include "host/frontend.h"
+#include "host/settings.h"
 #include "gxruntime/boot.h"
 #include "gxruntime/gap_report.h"
 #include "gxruntime/dvd.h"
@@ -191,6 +193,7 @@ int main(int argc, char** argv) {
     unsigned long long max_blocks = DEFAULT_MAX_BLOCKS;
     unsigned long long trace_every = 0;
     const char* snapshot_out = NULL;   // SIGUSR1 / --snapshot-at-block target
+    bool no_launcher = false;          // --no-launcher: boot straight in
     const char* restore_path = NULL;   // load a snapshot at boot and resume
     const char* dump_mem_path = NULL;  // raw MEM1 at exit (Dolphin differential)
     const char* gap_report_path = NULL;  // C2 structured tripwire report (JSON)
@@ -216,6 +219,8 @@ int main(int argc, char** argv) {
             iso_path = argv[++i];
         } else if (strcmp(argv[i], "--card") == 0 && i + 1 < argc) {
             card_path = argv[++i];
+        } else if (strcmp(argv[i], "--no-launcher") == 0) {
+            no_launcher = true;
         } else if (strcmp(argv[i], "--no-card") == 0) {
             card_enabled = false;
         } else if (strcmp(argv[i], "--mmio-log") == 0) {
@@ -263,6 +268,7 @@ int main(int argc, char** argv) {
             fprintf(stderr,
                     "usage: %s [dol-path] [--iso path] [--max-blocks N] "
                     "[--card path | --no-card] [--trace-every N] [--mmio-log]\n"
+                    "  --no-launcher           boot straight into the game\n"
                     "  deterministic save-state harness:\n"
                     "    --snapshot-out PATH   write a snapshot on SIGUSR1\n"
                     "    --restore PATH        load a snapshot at boot and resume\n"
@@ -292,6 +298,28 @@ int main(int argc, char** argv) {
     const bool aurora_enabled = (call_addr == 0);
     if (aurora_enabled && !dol_aurora_initialize(argc, argv, &backend_config))
         return 1;
+    // Settings and the launcher (disc + options). Test runs (--no-launcher,
+    // a boot quick load or ED_NO_LAUNCHER) go straight in.
+    static char launcher_iso[1024];
+    if (aurora_enabled) {
+        settings_load();
+        settings_apply();
+        frontend_init(argc, argv);
+        if (!no_launcher && getenv("ED_QUICKLOAD") == NULL &&
+            getenv("ED_NO_LAUNCHER") == NULL) {
+            const char* default_iso = iso_path != NULL ? iso_path : getenv("ED_ISO");
+            if (default_iso == NULL || default_iso[0] == '\0')
+                default_iso = "dump/" ED_GAME_ID ".iso";
+            if (!frontend_run_launcher(default_iso, launcher_iso, sizeof launcher_iso)) {
+                dol_aurora_shutdown();
+                return 0;
+            }
+            iso_path = launcher_iso;
+        } else if (g_settings.skip_intros && getenv("ED_SKIP_INTRO") == NULL &&
+                   getenv("ED_QUICKLOAD") == NULL) {
+            setenv("ED_SKIP_INTRO", "1", 1);
+        }
+    }
 #endif
 
     CPUState cpu;

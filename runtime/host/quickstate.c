@@ -144,6 +144,17 @@ static void request(QsKind kind, const char* path) {
     g_quickstate_pending = 1;
 }
 
+static void make_parent_dirs(const char* path);
+
+void quickstate_request_save(const char* path) {
+    make_parent_dirs(path);
+    request(QS_SAVE, path);
+}
+
+void quickstate_request_load(const char* path) {
+    request(QS_LOAD, path);
+}
+
 void quickstate_init(void) {
     // Leave SIGUSR1 to the --snapshot-out harness when it claimed it.
     void (*previous)(int) = signal(SIGUSR1, on_save_signal);

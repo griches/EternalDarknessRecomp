@@ -1,0 +1,16 @@
+<rml>
+<head>
+	<title>Eternal Darkness</title>
+	<link type="text/rcss" href="menu.rcss"/>
+</head>
+<body>
+	<div id="panel">
+		<div id="title">Eternal Darkness</div>
+		<div id="subtitle">Sanity's Requiem</div>
+		<div id="heading"></div>
+		<div id="menu"></div>
+		<div id="note"></div>
+	</div>
+	<div id="hint"></div>
+</body>
+</rml>

@@ -21,6 +21,10 @@
 #include "host/interrupt.h"
 #include "host/mmio.h"
 #include "host/sdk_map.h"
+#include "host/settings.h"
+#ifdef ED_AURORA
+#include "host/frontend.h"
+#endif
 #include "game_data.h"
 #include "host/dtk.h"
 
@@ -4401,12 +4405,19 @@ static bool hle_dispatch(CPUState* cpu, u32 address) {
     // Game frames per second (VIFlush calls) in the window title, refreshed
     // each second. ED_NO_FPS=1 leaves the title alone.
     if (address == g_call_prof_vi && g_call_prof_vi != 0u) {
-        static int fps_on = -1;
+        static int fps_env = -1;
         static unsigned frames;
         static struct timespec mark;
-        if (fps_on < 0)
-            fps_on = getenv("ED_NO_FPS") == NULL;
+        static bool shown;
+        if (fps_env < 0)
+            fps_env = getenv("ED_NO_FPS") == NULL;
+        const bool fps_on = fps_env && g_settings.fps_counter;
+        if (!fps_on && shown) {
+            VISetWindowTitle("Eternal Darkness");
+            shown = false;
+        }
         if (fps_on) {
+            shown = true;
             struct timespec now;
             clock_gettime(CLOCK_MONOTONIC, &now);
             frames++;
@@ -4426,6 +4437,9 @@ static bool hle_dispatch(CPUState* cpu, u32 address) {
                 }
             }
         }
+        // Esc / the controller's Back button opens the in-game menu here, at
+        // a frame boundary, with the frame just drawn behind it.
+        frontend_frame();
     }
 #endif
     if (g_call_prof_fn != 0u) {

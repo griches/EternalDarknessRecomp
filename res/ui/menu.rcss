@@ -1,0 +1,110 @@
+/* RmlUi has no default style sheet: declare what the menu uses. */
+div { display: block; }
+span { display: inline; }
+
+body {
+	width: 100%;
+	height: 100%;
+	margin: 0;
+	padding: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-family: "Fira Sans";
+	font-weight: normal;
+	font-size: 22dp;
+	color: #d9cba8;
+	background-color: #070505;
+}
+
+/* Over the game the menu dims the paused frame instead of hiding it. */
+body.overlay {
+	background-color: #000000b8;
+}
+
+#panel {
+	width: 640dp;
+	padding: 36dp 44dp 30dp 44dp;
+	background-color: #120c0bf0;
+	border: 1dp #5a1a14;
+	border-radius: 6dp;
+}
+
+#title {
+	font-family: "Alegreya SC";
+	font-weight: bold;
+	font-size: 48dp;
+	color: #c9372a;
+	text-align: center;
+	letter-spacing: 2dp;
+}
+
+#subtitle {
+	font-family: "Alegreya SC";
+	font-size: 22dp;
+	color: #a08b6a;
+	text-align: center;
+	margin-bottom: 22dp;
+}
+
+#heading {
+	font-family: "Alegreya SC";
+	font-size: 26dp;
+	color: #e8dcc0;
+	border-bottom: 1dp #5a1a14;
+	padding-bottom: 6dp;
+	margin-bottom: 10dp;
+}
+
+.row {
+	display: flex;
+	justify-content: space-between;
+	padding: 9dp 14dp;
+	margin: 2dp 0;
+	border-left: 4dp transparent;
+	border-radius: 3dp;
+	color: #bfb090;
+}
+
+.row.selected {
+	background-color: #3a1410;
+	border-left-color: #d13a2c;
+	color: #fff4dc;
+}
+
+.row.disabled {
+	color: #6b6152;
+}
+
+.row.selected.disabled {
+	color: #8a7d68;
+}
+
+.label { }
+
+.value {
+	color: #e0a060;
+	text-align: right;
+}
+
+.row.disabled .value {
+	color: #7a6a52;
+}
+
+#note {
+	min-height: 24dp;
+	margin-top: 14dp;
+	font-size: 17dp;
+	color: #a08b6a;
+	text-align: center;
+}
+
+#hint {
+	position: absolute;
+	left: 0;
+	right: 0;
+	bottom: 18dp;
+	font-size: 16dp;
+	color: #8a7a60;
+	text-align: center;
+}

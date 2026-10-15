@@ -8,7 +8,7 @@
 cd "$(dirname "$0")/.."
 secs=$1; prefix=$2; shift 2
 [ -f build/runs/test.dolcard ] || cp ed-GEDP01-slot-a.dolcard build/runs/test.dolcard 2>/dev/null
-env "$@" ./build-mac/EternalDarkness generated/main.dol --iso dump/GEDP01.iso \
+env ED_SETTINGS=build/runs/test-settings.ini "$@" ./build-mac/EternalDarkness generated/main.dol --no-launcher --iso dump/GEDP01.iso \
     --card "${CARD:-build/runs/test.dolcard}" \
     --max-blocks 100000000000 > "build/runs/$prefix.log" 2>&1 &
 pid=$!

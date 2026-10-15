@@ -23,6 +23,10 @@ void quickstate_init(void);
 // few thousand blocks.
 void quickstate_poll(unsigned long long blocks);
 
+// Queue a save to / load from a given file (the in-game menu's slots).
+void quickstate_request_save(const char* path);
+void quickstate_request_load(const char* path);
+
 // Nonzero while a save or load waits for a safe point.
 extern int g_quickstate_pending;
 

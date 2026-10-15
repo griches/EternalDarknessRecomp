@@ -1,0 +1,105 @@
+// settings.ini: one `key = value` per line, unknown keys ignored, missing
+// keys keep their defaults.
+#include "host/settings.h"
+
+#ifdef ED_AURORA
+#include "gxruntime/aurora_backend.h"
+#endif
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+Settings g_settings = {
+    .skip_intros = false,
+    .aspect = 0,
+    .render_scale = 0,
+    .fullscreen = false,
+    .fps_counter = true,
+    .music_volume = 100,
+    .effects_volume = 100,
+    .audio_buffer_ms = 40,
+    .disc = "",
+};
+
+static const char* settings_path(void) {
+    const char* path = getenv("ED_SETTINGS");
+    return path != NULL && path[0] != '\0' ? path : "settings.ini";
+}
+
+static int clamp_int(int value, int lo, int hi) {
+    return value < lo ? lo : value > hi ? hi : value;
+}
+
+static char* trim(char* s) {
+    while (*s == ' ' || *s == '\t')
+        s++;
+    char* end = s + strlen(s);
+    while (end > s && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\n' ||
+                       end[-1] == '\r'))
+        *--end = '\0';
+    return s;
+}
+
+void settings_load(void) {
+    FILE* f = fopen(settings_path(), "r");
+    if (f == NULL)
+        return;
+    char line[1200];
+    while (fgets(line, sizeof line, f) != NULL) {
+        char* eq = strchr(line, '=');
+        if (line[0] == '#' || eq == NULL)
+            continue;
+        *eq = '\0';
+        const char* key = trim(line);
+        const char* value = trim(eq + 1);
+        const int n = atoi(value);
+        if (strcmp(key, "skip_intros") == 0)
+            g_settings.skip_intros = n != 0;
+        else if (strcmp(key, "aspect") == 0)
+            g_settings.aspect = clamp_int(n, 0, 3);
+        else if (strcmp(key, "render_scale") == 0)
+            g_settings.render_scale = clamp_int(n, 0, 4);
+        else if (strcmp(key, "fullscreen") == 0)
+            g_settings.fullscreen = n != 0;
+        else if (strcmp(key, "fps_counter") == 0)
+            g_settings.fps_counter = n != 0;
+        else if (strcmp(key, "music_volume") == 0)
+            g_settings.music_volume = clamp_int(n, 0, 100);
+        else if (strcmp(key, "effects_volume") == 0)
+            g_settings.effects_volume = clamp_int(n, 0, 100);
+        else if (strcmp(key, "audio_buffer_ms") == 0)
+            g_settings.audio_buffer_ms = clamp_int(n, 20, 500);
+        else if (strcmp(key, "disc") == 0)
+            snprintf(g_settings.disc, sizeof g_settings.disc, "%s", value);
+    }
+    fclose(f);
+}
+
+void settings_save(void) {
+    FILE* f = fopen(settings_path(), "w");
+    if (f == NULL) {
+        fprintf(stderr, "[settings] cannot write %s\n", settings_path());
+        return;
+    }
+    fprintf(f, "# Eternal Darkness settings (written by the launcher)\n");
+    fprintf(f, "skip_intros = %d\n", g_settings.skip_intros ? 1 : 0);
+    fprintf(f, "aspect = %d\n", g_settings.aspect);
+    fprintf(f, "render_scale = %d\n", g_settings.render_scale);
+    fprintf(f, "fullscreen = %d\n", g_settings.fullscreen ? 1 : 0);
+    fprintf(f, "fps_counter = %d\n", g_settings.fps_counter ? 1 : 0);
+    fprintf(f, "music_volume = %d\n", g_settings.music_volume);
+    fprintf(f, "effects_volume = %d\n", g_settings.effects_volume);
+    fprintf(f, "audio_buffer_ms = %d\n", g_settings.audio_buffer_ms);
+    fprintf(f, "disc = %s\n", g_settings.disc);
+    fclose(f);
+}
+
+void settings_apply(void) {
+#ifdef ED_AURORA
+    dol_aurora_set_aspect_mode(g_settings.aspect);
+    dol_aurora_set_render_scale(g_settings.render_scale);
+    dol_aurora_set_fullscreen(g_settings.fullscreen);
+    dol_aurora_set_audio_buffer_ms(g_settings.audio_buffer_ms);
+#endif
+}

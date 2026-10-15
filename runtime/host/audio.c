@@ -1,3 +1,4 @@
+#include "host/settings.h"
 #include "host/audio.h"
 #include "host/dtk.h"
 #include "game_data.h"
@@ -178,6 +179,11 @@ void audio_poll(CPUState* cpu) {
         if (right_magnitude > peak)
             peak = right_magnitude;
     }
+    // Player volume for the game's own mix (effects, voices, sequenced music).
+    if (g_settings.effects_volume < 100) {
+        for (u32 i = 0; i < 16u; i++)
+            output[i] = (s16)((s32)output[i] * g_settings.effects_volume / 100);
+    }
     // Disc music: mix the stream into this AID chunk and run the AI sample
     // counter at the stream rate while the stream is playing.
     if (g_ai_stream_control & AICR_PSTAT) {
@@ -187,8 +193,9 @@ void audio_poll(CPUState* cpu) {
         u32 samples;
         if (dtk_active()) {
             samples = dtk_mix(output, 8u, aid_rate ? aid_rate : 32000u,
-                              stream_rate, g_ai_volume & 0xFFu,
-                              (g_ai_volume >> 8) & 0xFFu);
+                              stream_rate,
+                              (g_ai_volume & 0xFFu) * (u32)g_settings.music_volume / 100u,
+                              ((g_ai_volume >> 8) & 0xFFu) * (u32)g_settings.music_volume / 100u);
         } else {
             g_ai_counter_fraction +=
                 (u32)(((u64)stream_rate << 16) * 8u / (aid_rate ? aid_rate : 32000u));

@@ -773,6 +773,43 @@ index b09ef4d..c293c6d 100644
 +    }
 +  }
 +}
+diff --git a/graphics/aurora/lib/gfx/efb_readback.cpp b/graphics/aurora/lib/gfx/efb_readback.cpp
+index 7af8fca..4c14e34 100644
+--- a/graphics/aurora/lib/gfx/efb_readback.cpp
++++ b/graphics/aurora/lib/gfx/efb_readback.cpp
+@@ -88,6 +88,12 @@ void after_submit() noexcept {
+   if (!cont && !g_requested.load(std::memory_order_acquire)) {
+     return;
+   }
++  // MapAsync runs outside g_mutex: with AllowSpontaneous, Dawn may complete
++  // the map (and call complete_map, which takes g_mutex) inside MapAsync
++  // itself. Vulkan on the Steam Deck does, and holding the lock here
++  // deadlocked the render thread and then the game thread in peek().
++  wgpu::Buffer mapBuffer;
++  uint64_t mapSize = 0;
+   {
+     std::lock_guard lock{g_mutex};
+     if (g_inFlight) {
+@@ -158,12 +164,14 @@ void after_submit() noexcept {
+     };
+     const auto buffer = encoder.Finish(&CommandBufferDescriptor);
+     webgpu::g_queue.Submit(1, &buffer);
+-    g_buffer.MapAsync(wgpu::MapMode::Read, 0, byteSize,
+-                      wgpu::CallbackMode::AllowSpontaneous,
+-                      [](wgpu::MapAsyncStatus status, wgpu::StringView message) {
+-                        complete_map(status, message);
+-                      });
++    mapBuffer = g_buffer;
++    mapSize = byteSize;
+   }
++  mapBuffer.MapAsync(wgpu::MapMode::Read, 0, mapSize,
++                     wgpu::CallbackMode::AllowSpontaneous,
++                     [](wgpu::MapAsyncStatus status, wgpu::StringView message) {
++                       complete_map(status, message);
++                     });
+   if (!cont)
+     g_requested.store(false, std::memory_order_release);
+   else
 diff --git a/graphics/aurora/lib/gfx/gxcore_draw.cpp b/graphics/aurora/lib/gfx/gxcore_draw.cpp
 index 71136b9..c6d4c8d 100644
 --- a/graphics/aurora/lib/gfx/gxcore_draw.cpp

@@ -100,8 +100,6 @@ void settings_load(void) {
             g_settings.music_volume = clamp_int(n, 0, 100);
         else if (strcmp(key, "effects_volume") == 0)
             g_settings.effects_volume = clamp_int(n, 0, 100);
-        else if (strcmp(key, "audio_buffer_ms") == 0)
-            g_settings.audio_buffer_ms = clamp_int(n, 20, 500);
         else if (strcmp(key, "controls_layout") == 0)
             g_settings.controls_layout = clamp_int(n, 0, 2);
         else if (parse_toggle(key, "sprint_toggle_", g_settings.sprint_toggle, n) ||
@@ -140,7 +138,6 @@ void settings_save(void) {
     fprintf(f, "fps_counter = %d\n", g_settings.fps_counter ? 1 : 0);
     fprintf(f, "music_volume = %d\n", g_settings.music_volume);
     fprintf(f, "effects_volume = %d\n", g_settings.effects_volume);
-    fprintf(f, "audio_buffer_ms = %d\n", g_settings.audio_buffer_ms);
     fprintf(f, "controls_layout = %d\n", g_settings.controls_layout);
     for (int i = 0; i < 3; i++) {
         fprintf(f, "sprint_toggle_%s = %d\n", kLayoutKeys[i], g_settings.sprint_toggle[i] ? 1 : 0);

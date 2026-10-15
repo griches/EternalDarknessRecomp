@@ -496,7 +496,6 @@ void build_options() {
         "Window (" + size_label(0) + ")", "720p (" + size_label(1) + ")",
         "1080p (" + size_label(2) + ")", "1440p (" + size_label(3) + ")",
         "4K (" + size_label(4) + ")"};
-    static const int kBuffers[] = {40, 60, 80, 100, 150, 200};
 
     Row full{"Fullscreen", on_off(g_settings.fullscreen)};
     full.section = "I \u00b7 Display";
@@ -540,18 +539,6 @@ void build_options() {
         g_settings.effects_volume = std::clamp(g_settings.effects_volume + dir * 10, 0, 100);
     };
     g_rows.push_back(effects);
-
-    Row buffer{"Audio buffer", std::to_string(g_settings.audio_buffer_ms) + " ms"};
-    buffer.note = "Raise it if the sound stutters; lower is more responsive.";
-    buffer.change = [](int dir) {
-        int i = 0;
-        while (i < 5 && kBuffers[i] < g_settings.audio_buffer_ms)
-            i++;
-        i = std::clamp(i + dir, 0, 5);
-        g_settings.audio_buffer_ms = kBuffers[i];
-        changed();
-    };
-    g_rows.push_back(buffer);
 
     Row layout = layout_row();
     layout.section = "III \u00b7 Controls";

@@ -18,7 +18,8 @@ typedef struct {
     bool fps_counter;     // frames per second in the window title
     int music_volume;     // disc-streamed music, 0-100
     int effects_volume;   // the game's own mix (effects, voices), 0-100
-    int audio_buffer_ms;  // audio queued ahead of the output
+    int audio_buffer_ms;  // audio queued ahead of the output: 60 ms, not a
+                          // setting (the renderer adds reserve if it runs dry)
     int controls_layout;  // 0 original, 1 modern, 2 custom
     // Hold or toggle, per controls layout (original, modern, custom).
     bool sprint_toggle[3];  // press to start/stop sprinting (stops when you stop)

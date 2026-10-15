@@ -282,8 +282,34 @@ void custom_from(int layout) {
     g_settings.stick_deadzone[kCustom] = g_settings.stick_deadzone[layout];
 }
 
+// The device used last, keyboard or controller, so the game's prompts show
+// that one's buttons (a controller left plugged in does not hide the keys).
+bool g_keyboard_last = false;
+
+void note_last_device(SDL_Gamepad* pad) {
+    int count = 0;
+    const bool* keys = SDL_GetKeyboardState(&count);
+    bool keyboard = false;
+    for (int k = 1; keys != nullptr && k < count && !keyboard; k++)
+        keyboard = keys[k];
+    bool controller = false;
+    if (pad != nullptr) {
+        for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT && !controller; b++)
+            controller = SDL_GetGamepadButton(pad, static_cast<SDL_GamepadButton>(b));
+        for (int a = 0; a < SDL_GAMEPAD_AXIS_COUNT && !controller; a++) {
+            const int v = SDL_GetGamepadAxis(pad, static_cast<SDL_GamepadAxis>(a));
+            controller = std::abs(v) > g_settings.stick_deadzone[g_layout] * 32767 / 100 + 4000;
+        }
+    }
+    if (controller)
+        g_keyboard_last = false;
+    else if (keyboard)
+        g_keyboard_last = true;
+}
+
 bool read_pad(DolPadState* state) {
     SDL_Gamepad* pad = gamepad();
+    note_last_device(pad);
     DolPadState s{};
     // The main stick first: toggled sprint ends when you stop moving.
     int x = stick(pad, SDL_GAMEPAD_AXIS_LEFTX, false);
@@ -435,7 +461,7 @@ std::string key_glyph(int action) {
 }
 
 std::string glyph_set() {
-    if (gamepad() == nullptr)
+    if (gamepad() == nullptr || g_keyboard_last)
         return "kb";
     return brand() == kPlayStation ? "ps" : brand() == kNintendo ? "switch" : "xbox";
 }

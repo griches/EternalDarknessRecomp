@@ -2,7 +2,8 @@
 // files, the hash being XXH64 of the texture's base level (the renderer
 // computes it for each texture it decodes and asks here). The folder is
 // indexed by name at start-up; a texture's PNG is decoded on a loader thread
-// the first time it is drawn, the original showing until it is ready.
+// the first time it is drawn (with its mip chain), the original showing until
+// it is ready.
 //
 // The pack lives in textures/ beside res/ (any layout of subfolders), or
 // ED_TEXTURE_PACK=<folder>. Options > Game > HD textures turns it off.
@@ -13,6 +14,7 @@
 #include "host/frontend.h"
 #include "host/settings.h"
 
+#include <algorithm>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -43,9 +45,44 @@ struct KeyHash {
 };
 
 struct Loaded {
-    std::vector<uint8_t> rgba;
-    uint32_t width = 0, height = 0;
+    std::vector<uint8_t> rgba;  // every mip level, largest first
+    uint32_t width = 0, height = 0, mips = 1;
 };
+
+// Append the mip chain down to 1x1: each level the 2x2 average of the last,
+// colour weighted by alpha so cut-out edges do not darken.
+void build_mips(Loaded& img) {
+    uint32_t w = img.width, h = img.height;
+    size_t at = 0;
+    while (w > 1 || h > 1) {
+        const uint32_t nw = std::max(w / 2, 1u), nh = std::max(h / 2, 1u);
+        const size_t next = img.rgba.size();
+        img.rgba.resize(next + static_cast<size_t>(nw) * nh * 4);
+        const uint8_t* src = img.rgba.data() + at;
+        uint8_t* dst = img.rgba.data() + next;
+        for (uint32_t y = 0; y < nh; y++)
+            for (uint32_t x = 0; x < nw; x++) {
+                uint32_t sum[3] = {0, 0, 0}, alpha = 0;
+                for (uint32_t dy = 0; dy < 2; dy++)
+                    for (uint32_t dx = 0; dx < 2; dx++) {
+                        const uint32_t sx = std::min(x * 2 + dx, w - 1);
+                        const uint32_t sy = std::min(y * 2 + dy, h - 1);
+                        const uint8_t* p = src + (static_cast<size_t>(sy) * w + sx) * 4;
+                        for (int c = 0; c < 3; c++)
+                            sum[c] += p[c] * p[3];
+                        alpha += p[3];
+                    }
+                uint8_t* o = dst + (static_cast<size_t>(y) * nw + x) * 4;
+                for (int c = 0; c < 3; c++)
+                    o[c] = static_cast<uint8_t>(alpha != 0 ? (sum[c] + alpha / 2) / alpha : 0);
+                o[3] = static_cast<uint8_t>((alpha + 2) / 4);
+            }
+        at = next;
+        w = nw;
+        h = nh;
+        img.mips++;
+    }
+}
 
 std::string g_dir;
 std::unordered_map<Key, std::string, KeyHash> g_files;  // read-only after init
@@ -93,6 +130,12 @@ void loader() {
         }
         Loaded img;
         const bool ok = load_png_rgba(g_files.at(key), &img.rgba, &img.width, &img.height);
+        static const bool mips = [] {
+            const char* env = std::getenv("ED_TEXPACK_MIPS");
+            return env == nullptr || std::strcmp(env, "0") != 0;
+        }();
+        if (ok && mips)
+            build_mips(img);
         std::lock_guard<std::mutex> lock(g_mutex);
         g_queued.erase(key);
         if (ok)
@@ -106,7 +149,7 @@ void loader() {
 }
 
 int lookup(uint32_t format, uint32_t width, uint32_t height, uint64_t hash, uint8_t** out_rgba,
-           uint32_t* out_width, uint32_t* out_height) {
+           uint32_t* out_width, uint32_t* out_height, uint32_t* out_mips) {
     const Key key{format, width, height, hash};
     if (g_files.find(key) == g_files.end())
         return 0;
@@ -119,6 +162,7 @@ int lookup(uint32_t format, uint32_t width, uint32_t height, uint64_t hash, uint
         std::memcpy(*out_rgba, img.rgba.data(), img.rgba.size());
         *out_width = img.width;
         *out_height = img.height;
+        *out_mips = img.mips;
         g_ready.erase(it);  // the renderer keeps it now
         return 1;
     }

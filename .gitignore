@@ -1,0 +1,7 @@
+# Your disc image and everything translated from it stay on your machine.
+dump/
+generated/
+build*/
+.deps/
+*.dolcard
+__pycache__/

@@ -1,0 +1,43 @@
+# Eternal Darkness: Sanity's Requiem (static recompilation)
+
+A native build of the GameCube game made from **your own disc**: the game's
+PowerPC code is translated to C by [DolRecomp](https://github.com/ExpansionPak/DolRecomp)
+and runs on [GXRuntime](https://github.com/aharonahdoot/GXRuntime) with the
+Aurora renderer. The Mac build comes first; a PS5 build is planned.
+
+No game data is in this repository. `generated/` (code translated from your
+disc) and `dump/` (your disc image) stay on your machine.
+
+Status: boots, plays the Edgar Allan Poe opening with its streamed music and
+moves on to the intro movie, which is still black and slow. Supported discs:
+Europe `GEDP01` (tested) and USA `GEDE01`.
+
+## Build (Mac)
+
+```sh
+tools/setup-deps.sh                       # pinned DolRecomp + GXRuntime, plus our GXRuntime patch
+python3 tools/generate.py /path/to/disc.iso   # ISO or CISO; writes generated/
+cmake -S . -B build-mac -G Ninja && ninja -C build-mac EternalDarkness
+cp /path/to/disc.iso dump/GEDP01.iso      # or GEDE01.iso for the USA disc
+./play.sh
+```
+
+Keyboard: arrows = d-pad, J = A, K = B, U = X, I = Y, Q = Z, E/R = L/R,
+Enter = Start. Controllers work through SDL.
+
+## Layout
+
+- `runtime/host/`: the game's host layer (SDK intercepts, interrupts, disc,
+  audio and disc-music streaming), derived from
+  [StrikersRecomp](https://github.com/aharonahdoot/StrikersRecomp)'s host.
+- `tools/`: disc reading and code generation (`generate.py`), the symbol map
+  carried from the USA decomp to the PAL disc (`symbols.py`), per-build
+  constants read from the game's code (`gamedata.py`), and debugging helpers.
+- `config/GEDE01/symbols.txt`: function names from the
+  [unending-occlusion](https://github.com/PattyTrish/unending-occlusion) decomp (CC0).
+- `patches/gxruntime/`: fixes to GXRuntime this game needs.
+
+## Licence
+
+GPL-3.0-or-later (see `LICENSE`), as the GXRuntime and StrikersRecomp code it
+builds on.

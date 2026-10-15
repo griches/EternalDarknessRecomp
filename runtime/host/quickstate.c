@@ -29,8 +29,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <time.h>
+
+#include "host/compat.h"
 
 #define QS_MAGIC "EDQSTATE"
 #define QS_VERSION 1u
@@ -157,9 +158,11 @@ void quickstate_request_load(const char* path) {
 
 void quickstate_init(void) {
     // Leave SIGUSR1 to the --snapshot-out harness when it claimed it.
+#ifdef SIGUSR1
     void (*previous)(int) = signal(SIGUSR1, on_save_signal);
     if (previous != SIG_DFL && previous != SIG_ERR)
         signal(SIGUSR1, previous);
+#endif
     const char* path = getenv("ED_QUICKSTATE");
     snprintf(g_path, sizeof g_path, "%s",
              path != NULL && path[0] != '\0' ? path : QS_DEFAULT_PATH);

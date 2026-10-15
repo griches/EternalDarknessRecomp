@@ -1,5 +1,6 @@
 // Faithful VI-retrace external interrupt. See interrupt.h.
 #include "host/interrupt.h"
+#include "host/compat.h"
 #include "host/sdk_map.h"
 #include "host/audio.h"
 #include "host/mmio.h"

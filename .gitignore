@@ -8,3 +8,4 @@ __pycache__/
 # Player settings and save slots (written by the launcher).
 settings.ini
 saves/
+logs/

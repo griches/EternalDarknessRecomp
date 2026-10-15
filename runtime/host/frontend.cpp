@@ -18,14 +18,18 @@
 #include <SDL3/SDL_scancode.h>
 #include <SDL3/SDL_timer.h>
 
-#include <dirent.h>
-#include <unistd.h>
+#include "host/compat.h"
+
+#ifdef _WIN32
+#include <process.h>
+#endif
 
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <filesystem>
 #include <functional>
 #include <string>
 #include <sys/stat.h>
@@ -204,18 +208,18 @@ std::vector<Disc> scan_discs(const char* default_iso) {
     if (default_iso != nullptr && default_iso[0] != '\0')
         add(default_iso);
     for (const char* dir : {"dump", "."}) {
-        DIR* d = opendir(dir);
-        if (d == nullptr)
+        std::error_code ec;
+        std::filesystem::directory_iterator it(dir, ec);
+        if (ec)
             continue;
         std::vector<std::string> names;
-        while (dirent* e = readdir(d)) {
-            std::string name = e->d_name;
+        for (const auto& e : it) {
+            std::string name = e.path().filename().string();
             std::string lower = name;
             std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
             if (lower.size() > 4 && (lower.ends_with(".iso") || lower.ends_with(".gcm")))
                 names.push_back(name);
         }
-        closedir(d);
         std::sort(names.begin(), names.end());
         for (const std::string& name : names)
             add(std::string(dir) == "." ? name : std::string(dir) + "/" + name);
@@ -664,7 +668,11 @@ void build_in_game() {
         settings_save();
         unsetenv("ED_QUICKLOAD");
         unsetenv("ED_SKIP_INTRO");
+#ifdef _WIN32
+        _execv(g_argv[0], g_argv);
+#else
         execv(g_argv[0], g_argv);
+#endif
         std::fprintf(stderr, "[frontend] restart failed\n");
     };
     g_rows.push_back(launcher);
@@ -832,14 +840,14 @@ std::string res_dir() {
     };
     if (const char* env = std::getenv("ED_RES_DIR"); env != nullptr && has_menu(env))
         return env;
-    char cwd[1024];
-    if (getcwd(cwd, sizeof cwd) != nullptr && has_menu(std::string(cwd) + "/res"))
-        return std::string(cwd) + "/res";
+    std::error_code ec;
+    const std::string cwd = std::filesystem::current_path(ec).string();
+    if (!ec && has_menu(cwd + "/res"))
+        return cwd + "/res";
     if (g_argv != nullptr && g_argv[0] != nullptr) {
-        char exe[1024];
-        if (realpath(g_argv[0], exe) != nullptr) {
-            std::string dir(exe);
-            dir = dir.substr(0, dir.find_last_of('/'));
+        const std::filesystem::path exe = std::filesystem::absolute(g_argv[0], ec);
+        if (!ec) {
+            const std::string dir = exe.parent_path().string();
             for (const std::string& candidate : {dir + "/res", dir + "/../res"})
                 if (has_menu(candidate))
                     return candidate;

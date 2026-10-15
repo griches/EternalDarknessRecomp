@@ -44,6 +44,7 @@ add_executable(EternalDarkness
     runtime/host/quickstate.c
     runtime/host/settings.c
     runtime/host/main.c
+    runtime/host/compat.c
     "${ED_GENERATED_DIR}/generated.c"
     ${ED_CHUNKS}
 )

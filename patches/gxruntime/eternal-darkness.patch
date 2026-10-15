@@ -1358,6 +1358,29 @@ index 0a23a3f..8f5a217 100644
  // U8 dst-alpha: pipelines created with use_dst_alpha while DualSourceBlending
  // was unavailable (single-source SrcAlpha fallback). Zero when feature present.
  unsigned long long dst_alpha_fallback_count() noexcept;
+diff --git a/graphics/aurora/lib/gfx/plane_capture.cpp b/graphics/aurora/lib/gfx/plane_capture.cpp
+index f51a682..11a455a 100644
+--- a/graphics/aurora/lib/gfx/plane_capture.cpp
++++ b/graphics/aurora/lib/gfx/plane_capture.cpp
+@@ -10,6 +10,7 @@
+ #include <cstdio>
+ #include <cstring>
+ #include <deque>
++#include <filesystem>
+ #include <fstream>
+ #include <mutex>
+ #include <sys/stat.h>
+@@ -538,8 +539,8 @@ bool write_planes(const char* run_dir, const std::vector<PlaneSet>& sets,
+     return false;
+   }
+   const std::string planes_dir = std::string(run_dir) + "/planes";
+-  ::mkdir(run_dir, 0755);
+-  ::mkdir(planes_dir.c_str(), 0755);
++  std::error_code ec;
++  std::filesystem::create_directories(planes_dir, ec);
+ 
+   std::string json = "[\n";
+   bool first = true;
 diff --git a/graphics/aurora/lib/gfx/xfb_present.hpp b/graphics/aurora/lib/gfx/xfb_present.hpp
 index b205cfa..ee13954 100644
 --- a/graphics/aurora/lib/gfx/xfb_present.hpp
@@ -2820,6 +2843,53 @@ index 2f13110..d041156 100644
      clear_matching_reservation(cpu, addr);
      *host = value;
  }
+diff --git a/src/dvd.c b/src/dvd.c
+index a817073..4ab8926 100644
+--- a/src/dvd.c
++++ b/src/dvd.c
+@@ -7,6 +7,15 @@
+ #include <stdlib.h>
+ #include <string.h>
+ 
++// 64-bit file offsets (fseeko/off_t are POSIX).
++#ifdef _WIN32
++#define fseeko _fseeki64
++typedef long long dvd_off_t;
++#else
++#include <sys/types.h>
++typedef off_t dvd_off_t;
++#endif
++
+ // GameCube disc header fields (big-endian, in the first sector).
+ #define DISC_MAGIC_OFFSET 0x1Cu
+ #define DISC_MAGIC        0xC2339F3Du
+@@ -81,7 +90,7 @@ static bool load_from(const char* path) {
+         fclose(f);
+         return false;
+     }
+-    if (fseeko(f, (off_t)fst_off, SEEK_SET) != 0 ||
++    if (fseeko(f, (dvd_off_t)fst_off, SEEK_SET) != 0 ||
+         fread(fst, 1, fst_size, f) != fst_size) {
+         free(fst);
+         fclose(f);
+@@ -221,7 +230,7 @@ void dvd_read_to_guest(CPUState* cpu, u32 guest_addr, u32 disc_off, u32 length)
+ 
+     if (dst) {
+         size_t got = 0;
+-        if (fseeko(g_iso, (off_t)disc_off, SEEK_SET) == 0)
++        if (fseeko(g_iso, (dvd_off_t)disc_off, SEEK_SET) == 0)
+             got = fread(dst, 1, length, g_iso);
+         if (got < length)
+             memset(dst + got, 0, length - got);  // zero-fill past image end
+@@ -232,7 +241,7 @@ void dvd_read_to_guest(CPUState* cpu, u32 guest_addr, u32 disc_off, u32 length)
+     // external region (VM window, etc.) is honored. Not expected in practice.
+     for (u32 k = 0; k < length; k++) {
+         u8 b = 0;
+-        if (fseeko(g_iso, (off_t)(disc_off + k), SEEK_SET) == 0)
++        if (fseeko(g_iso, (dvd_off_t)(disc_off + k), SEEK_SET) == 0)
+             (void)(fread(&b, 1, 1, g_iso) == 1);
+         mem_write8(cpu, guest_addr + k, b);
+     }
 diff --git a/src/gap_report.c b/src/gap_report.c
 index f4e48e8..507cfb5 100644
 --- a/src/gap_report.c

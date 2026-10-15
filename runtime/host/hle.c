@@ -21,6 +21,7 @@
 #include "host/interrupt.h"
 #include "host/mmio.h"
 #include "host/sdk_map.h"
+#include "host/compat.h"
 #include "host/settings.h"
 #ifdef ED_AURORA
 #include "host/frontend.h"

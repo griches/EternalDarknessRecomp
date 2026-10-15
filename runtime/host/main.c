@@ -26,6 +26,7 @@
 #include "host/hle.h"
 #include "host/interrupt.h"
 #include "host/quickstate.h"
+#include "host/compat.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -279,9 +280,11 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
+#ifdef SIGUSR1
     if (snapshot_out != NULL)
         signal(SIGUSR1, request_snapshot);
     signal(SIGUSR2, request_pcdump);  // always available for hang diagnosis
+#endif
 
 #ifdef ED_AURORA
     const AuroraBackendConfig backend_config = {

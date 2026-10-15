@@ -1,5 +1,5 @@
 diff --git a/backends/aurora/aurora_backend.cpp b/backends/aurora/aurora_backend.cpp
-index d94f811..e5f0242 100644
+index d94f811..79e4caf 100644
 --- a/backends/aurora/aurora_backend.cpp
 +++ b/backends/aurora/aurora_backend.cpp
 @@ -19,9 +19,20 @@
@@ -1957,11 +1957,11 @@ index d94f811..e5f0242 100644
 +    g_core_sink.set_storage(gxq::reserve_draw, gxq::reserved_state, nullptr);
 +    g_core_sink.set_copy_observer(gxq::defer_copy, nullptr);
 +    gxq::g_active = true;
-+    // Plan workers: about half the hardware threads, less the game, decode
-+    // and main threads' cores (SMT siblings of busy threads plan slowly and
-+    // slow those threads down): 2 on a 4-core/8-thread Steam Deck, 4 on the
-+    // Mac and the Windows PC, where more gained nothing.
-+    int workers = std::clamp(SDL_GetNumLogicalCPUCores() / 2 - 2, 1, 4);
++    // Plan workers: about half the hardware threads, less one (SMT siblings
++    // of busy threads plan slowly and slow those threads down): 3 on a
++    // 4-core/8-thread Steam Deck (60.0 fps against 59.0 with 2), 4 on the Mac
++    // and the Windows PC, where more gained nothing.
++    int workers = std::clamp(SDL_GetNumLogicalCPUCores() / 2 - 1, 1, 4);
 +    if (const char* env = std::getenv("DOL_GX_PLAN_WORKERS"))
 +        workers = std::clamp(std::atoi(env), 0, gxq::kMaxPlanWorkers);
 +    gxq::g_workers_stop = false;

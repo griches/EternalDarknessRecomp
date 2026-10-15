@@ -25,9 +25,11 @@ cp /path/to/disc.iso dump/GEDP01.iso      # or GEDE01.iso for the USA disc
 Keyboard: arrows = d-pad, J = A, K = B, U = X, I = Y, Q = Z, E/R = L/R,
 Enter = Start. Controllers work through SDL.
 
-`./play.sh` opens the launcher: pick the disc (images in `dump/` or the
-project folder; this build runs the disc it was generated from), Play, or
-Options. In the game, Esc or the controller's Back/Select button pauses into a
+`./play.sh` opens the launcher. The first time, pick the disc (images in
+`dump/` or the project folder; this build runs the disc it was generated from);
+after that it lives in Options and the menu leads with Play. Play offers
+Continue (the newest save slot), New game, or any used slot, so a save loads
+without going through the game first. In the game, Esc or the controller's Back/Select button pauses into a
 menu with four save slots (`saves/`), the same options, and a way back to the
 launcher. Menus work with the keyboard (arrows, Enter, Esc), a controller
 (d-pad or stick, A, B) or the mouse.

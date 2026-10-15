@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <functional>
 #include <string>
 #include <sys/stat.h>
@@ -234,7 +235,7 @@ std::string region_name(const std::string& id) {
 
 // --- Menu model -------------------------------------------------------------
 
-enum class Screen { Launcher, Options, Controls, Mapping, InGame };
+enum class Screen { Launcher, Play, Options, Controls, Mapping, InGame };
 
 struct Row {
     std::string label;
@@ -258,6 +259,8 @@ bool g_play = false;       // launcher result
 std::vector<Disc> g_discs;
 int g_disc = 0;
 int g_slot = 1;
+bool g_disc_on_main = true;  // first run, or the chosen disc is missing
+int g_load_slot = 0;         // launcher: boot into this save slot (0: none)
 int g_argc = 0;
 char** g_argv = nullptr;
 InputState g_input;
@@ -298,35 +301,85 @@ void changed() {
     settings_apply();
 }
 
-void build_launcher() {
+Row disc_row() {
     Row disc{"Disc"};
     if (g_discs.empty()) {
         disc.value = "None found";
         disc.enabled = false;
         disc.note = "Put your disc image (.iso) in the dump folder.";
-    } else {
-        const Disc& d = g_discs[g_disc];
-        disc.value = d.name + " (" + region_name(d.id) + ")";
-        if (g_discs.size() > 1)
-            disc.value = "< " + disc.value + " >";
-        disc.note = d.path + "  |  " + d.id;
-        if (d.id != ED_GAME_ID)
-            disc.note = d.id + ": this build runs " ED_GAME_ID " only.";
-        disc.change = [](int dir) {
-            if (g_discs.size() > 1)
-                cycle(g_disc, static_cast<int>(g_discs.size()), dir);
-        };
+        return disc;
     }
-    g_rows.push_back(disc);
+    const Disc& d = g_discs[g_disc];
+    disc.value = d.name + " (" + region_name(d.id) + ")";
+    if (g_discs.size() > 1)
+        disc.value = "< " + disc.value + " >";
+    disc.note = d.path + "  |  " + d.id;
+    if (d.id != ED_GAME_ID)
+        disc.note = d.id + ": this build runs " ED_GAME_ID " only.";
+    disc.change = [](int dir) {
+        if (g_discs.size() > 1)
+            cycle(g_disc, static_cast<int>(g_discs.size()), dir);
+        if (disc_playable()) {
+            snprintf(g_settings.disc, sizeof g_settings.disc, "%s",
+                     g_discs[g_disc].path.c_str());
+            settings_save();
+        }
+    };
+    return disc;
+}
+
+// "Today 16:55" or "15 Oct 16:55", for a save slot's file time.
+std::string slot_time(int slot) {
+    struct stat st;
+    if (stat(slot_path(slot).c_str(), &st) != 0)
+        return "";
+    char text[64];
+    const time_t now = time(nullptr);
+    struct tm when, today;
+    localtime_r(&st.st_mtime, &when);
+    localtime_r(&now, &today);
+    if (when.tm_year == today.tm_year && when.tm_yday == today.tm_yday)
+        strftime(text, sizeof text, "Today %H:%M", &when);
+    else
+        strftime(text, sizeof text, "%d %b %H:%M", &when);
+    return text;
+}
+
+int newest_slot() {
+    int best = 0;
+    time_t best_time = 0;
+    for (int slot = 1; slot <= 4; slot++) {
+        struct stat st;
+        if (stat(slot_path(slot).c_str(), &st) == 0 && st.st_mtime >= best_time) {
+            best = slot;
+            best_time = st.st_mtime;
+        }
+    }
+    return best;
+}
+
+void start_game(int slot) {
+    snprintf(g_settings.disc, sizeof g_settings.disc, "%s", g_discs[g_disc].path.c_str());
+    settings_save();
+    g_load_slot = slot;
+    g_play = true;
+    g_close = true;
+}
+
+void build_launcher() {
+    if (g_disc_on_main)
+        g_rows.push_back(disc_row());
 
     Row play{"Play"};
     play.enabled = disc_playable();
+    play.note = newest_slot() != 0 ? "Continue from a save slot or start a new game." : "";
     play.activate = [] {
-        snprintf(g_settings.disc, sizeof g_settings.disc, "%s",
-                 g_discs[g_disc].path.c_str());
-        settings_save();
-        g_play = true;
-        g_close = true;
+        if (newest_slot() != 0) {
+            g_screen = Screen::Play;
+            g_selected = 0;
+        } else {
+            start_game(0);
+        }
     };
     g_rows.push_back(play);
 
@@ -344,6 +397,35 @@ void build_launcher() {
         g_close = true;
     };
     g_rows.push_back(quit);
+}
+
+void build_play() {
+    const int newest = newest_slot();
+    Row cont{"Continue", "Slot " + std::to_string(newest) + " \u00b7 " + slot_time(newest)};
+    cont.note = "Back where you saved last.";
+    cont.activate = [newest] { start_game(newest); };
+    g_rows.push_back(cont);
+
+    Row fresh{"New game"};
+    fresh.note = "Start from the title screen (your memory card saves are there).";
+    fresh.activate = [] { start_game(0); };
+    g_rows.push_back(fresh);
+
+    for (int slot = 1; slot <= 4; slot++) {
+        if (!slot_used(slot))
+            continue;
+        Row r{"Slot " + std::to_string(slot), slot_time(slot)};
+        r.note = "Load this save.";
+        r.activate = [slot] { start_game(slot); };
+        g_rows.push_back(r);
+    }
+
+    Row back{"Back"};
+    back.activate = [] {
+        g_screen = Screen::Launcher;
+        g_selected = 0;
+    };
+    g_rows.push_back(back);
 }
 
 void build_options() {
@@ -373,6 +455,9 @@ void build_options() {
         "2x (" + size_label(2) + ")", "3x (" + size_label(3) + ")",
         "4x (" + size_label(4) + ")"};
     static const int kBuffers[] = {40, 60, 80, 100, 150, 200};
+
+    if (g_options_return == Screen::Launcher && !g_disc_on_main)
+        g_rows.push_back(disc_row());
 
     Row skip{"Skip intros", on_off(g_settings.skip_intros)};
     skip.note = "Skip the logo movies and the opening quote (next start).";
@@ -483,10 +568,12 @@ void build_controls() {
     g_rows.push_back(hold_toggle("Target", &g_settings.target_toggle[controls::layout()],
                                  "Toggle: press to lock on, press again to release."));
 
-    Row deadzone{"Stick deadzone", std::to_string(g_settings.stick_deadzone) + "%"};
+    Row deadzone{"Stick deadzone",
+                 std::to_string(g_settings.stick_deadzone[controls::layout()]) + "%"};
     deadzone.note = "Raise it if a worn stick drifts; lower is more sensitive.";
     deadzone.change = [](int dir) {
-        g_settings.stick_deadzone = std::clamp(g_settings.stick_deadzone + dir * 5, 5, 25);
+        int& dz = g_settings.stick_deadzone[controls::layout()];
+        dz = std::clamp(dz + dir * 5, 5, 25);
         settings_save();
     };
     g_rows.push_back(deadzone);
@@ -595,6 +682,7 @@ void render() {
     if (g_doc == nullptr)
         return;
     const char* heading = g_screen == Screen::Launcher   ? "Main Menu"
+                          : g_screen == Screen::Play     ? "Play"
                           : g_screen == Screen::Options  ? "Options"
                           : g_screen == Screen::Controls ? "Controls"
                           : g_screen == Screen::Mapping  ? "Button Mapping"
@@ -638,6 +726,7 @@ void build_rows() {
     g_rows.clear();
     switch (g_screen) {
     case Screen::Launcher: build_launcher(); break;
+    case Screen::Play: build_play(); break;
     case Screen::Options: build_options(); break;
     case Screen::Controls: build_controls(); break;
     case Screen::Mapping: build_mapping(); break;
@@ -671,6 +760,10 @@ void activate_selected() {
 
 void go_back() {
     switch (g_screen) {
+    case Screen::Play:
+        g_screen = Screen::Launcher;
+        g_selected = 0;
+        break;
     case Screen::Controls:
         g_screen = Screen::Options;
         g_selected = 0;
@@ -881,20 +974,36 @@ extern "C" bool frontend_run_launcher(const char* default_iso, char* iso_out,
         return true;
     }
     g_discs = scan_discs(g_settings.disc[0] != '\0' ? g_settings.disc : default_iso);
-    // Start on the first disc this build can run.
-    for (size_t i = 0; i < g_discs.size(); i++)
+    // Start on the chosen disc, else the first one this build can run.
+    g_disc = 0;
+    bool found = false;
+    for (size_t i = 0; i < g_discs.size() && !found; i++)
+        if (g_discs[i].path == g_settings.disc && g_discs[i].id == ED_GAME_ID) {
+            g_disc = static_cast<int>(i);
+            found = true;
+        }
+    for (size_t i = 0; i < g_discs.size() && !found; i++)
         if (g_discs[i].id == ED_GAME_ID) {
             g_disc = static_cast<int>(i);
-            break;
+            found = true;
         }
+    // Once a playable disc has been chosen, Play leads the main menu and the
+    // disc choice lives in Options.
+    g_disc_on_main = !(g_settings.disc[0] != '\0' && disc_playable() &&
+                       g_discs[g_disc].path == g_settings.disc);
     g_screen = Screen::Launcher;
-    g_selected = disc_playable() ? 1 : 0;
+    g_selected = g_disc_on_main && disc_playable() ? 1 : 0;
     g_play = false;
+    g_load_slot = 0;
     if (!run_menu() || !g_play)
         return false;
     snprintf(iso_out, iso_cap, "%s", g_discs[g_disc].path.c_str());
-    if (g_settings.skip_intros)
+    if (g_load_slot != 0) {
+        // Boot straight into the save (the quick-state load at boot).
+        setenv("ED_QUICKLOAD", slot_path(g_load_slot).c_str(), 1);
+    } else if (g_settings.skip_intros) {
         setenv("ED_SKIP_INTRO", "1", 1);
+    }
     return true;
 }
 

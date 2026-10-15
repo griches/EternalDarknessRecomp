@@ -22,7 +22,7 @@ typedef struct {
     bool sprint_toggle[3];  // press to start/stop sprinting (stops when you stop)
     bool creep_toggle[3];
     bool target_toggle[3];
-    int stick_deadzone;   // percent of the stick's travel ignored, 5-25
+    int stick_deadzone[3];  // percent of the stick's travel ignored, per layout
     bool vibration;
     char controls_custom[512];  // custom bindings (controls.cpp format)
     char disc[1024];      // last disc image chosen in the launcher

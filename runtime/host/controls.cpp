@@ -145,7 +145,7 @@ int stick(SDL_Gamepad* pad, SDL_GamepadAxis axis, bool invert) {
     int v = SDL_GetGamepadAxis(pad, axis);
     if (invert)
         v = -v - 1;
-    if (std::abs(v) < g_settings.stick_deadzone * 32767 / 100)
+    if (std::abs(v) < g_settings.stick_deadzone[g_layout] * 32767 / 100)
         return 0;
     return std::clamp(v / 256, -127, 127);
 }
@@ -279,6 +279,7 @@ void custom_from(int layout) {
     g_settings.sprint_toggle[kCustom] = g_settings.sprint_toggle[layout];
     g_settings.creep_toggle[kCustom] = g_settings.creep_toggle[layout];
     g_settings.target_toggle[kCustom] = g_settings.target_toggle[layout];
+    g_settings.stick_deadzone[kCustom] = g_settings.stick_deadzone[layout];
 }
 
 bool read_pad(DolPadState* state) {

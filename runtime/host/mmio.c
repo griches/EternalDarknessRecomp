@@ -530,12 +530,19 @@ static bool mi_write_cb(void* user, CPUState* cpu, u32 ea, u8 size,
 
 static bool efb_read_cb(void* user, CPUState* cpu, u32 ea, u8 size,
                         u64* value) {
-    (void)cpu;
     DolEfbAccess* efb = (DolEfbAccess*)user;
     if (!dol_efb_access_mmio_contains(ea))
         return false;
     if (value != NULL)
         *value = dol_efb_access_mmio_read(efb, ea, size);
+    // ED_EFB_PEEK_LOG=1: log CPU reads of the EFB (GXPeekARGB/GXPeekZ).
+    static int peek_log = -1;
+    if (peek_log < 0)
+        peek_log = getenv("ED_EFB_PEEK_LOG") != NULL;
+    if (peek_log && cpu != NULL)
+        fprintf(stderr, "[efb-peek] ea=0x%08X size=%u -> 0x%08llX pc=0x%08X lr=0x%08X\n",
+                ea, (unsigned)size, value != NULL ? (unsigned long long)*value : 0ull,
+                cpu->pc, cpu->lr);
     return true;
 }
 

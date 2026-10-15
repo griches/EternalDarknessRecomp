@@ -48,6 +48,12 @@ static bool g_hle_log = false;
 static bool g_dvd_log = false;  // ED_DVD_LOG: file opens only
 static u32 g_trace_fn[16];
 static u32 g_trace_fn_count;
+// ED_CALL_PROFILE=name: count calls of one function by caller (lr) and print
+// the counts once per VIFlush, so per-frame differences show without the
+// slowdown of logging every call.
+static u32 g_call_prof_fn;
+static u32 g_call_prof_vi;
+static struct { u32 lr, n; } g_call_prof[64];
 static bool g_audio_log = false;
 static bool g_graphics_log = false;
 static bool g_movie_log = false;
@@ -632,6 +638,18 @@ static u32 lc_transaction_count(u32 bytes) {
 }
 
 static void hle_LCStoreBlocks(CPUState* cpu) {
+    const u32 dest = hle_arg_u32(cpu, 0);
+    const u32 src = hle_arg_u32(cpu, 1);
+    const u32 blocks = hle_arg_u32(cpu, 2) ? hle_arg_u32(cpu, 2) : 128u;
+    mmio_guest_copy(cpu, dest, src, blocks * 32u);
+}
+
+// LCLoadBlocks(lcDest, ramSrc, blocks): RAM -> locked cache. The recompiled
+// routine only writes DMA_U/DMA_L, which start no transfer here, so without
+// this the cache kept stale bytes and LCStoreBlocks copied them out. The game
+// moves its per-frame character display lists between buffers this way; the
+// stale copies were zero or an old list, so characters vanished on some frames.
+static void hle_LCLoadBlocks(CPUState* cpu) {
     const u32 dest = hle_arg_u32(cpu, 0);
     const u32 src = hle_arg_u32(cpu, 1);
     const u32 blocks = hle_arg_u32(cpu, 2) ? hle_arg_u32(cpu, 2) : 128u;
@@ -3596,6 +3614,7 @@ static const HleAddrEntry kAddrHandlers[] = {
     // Locked-cache DMA helpers. THP video decode writes into the 0xE0000000
     // scratch area and uses these to move rows into MEM1 texture planes.
     { 0u, hle_LCStoreBlocks,             "LCStoreBlocks" },
+    { 0u, hle_LCLoadBlocks,              "LCLoadBlocks" },
     { 0u, hle_LCStoreData,               "LCStoreData" },
     { 0u, hle_noop,                      "LCQueueWait" },
 #ifdef ED_AURORA
@@ -4308,11 +4327,89 @@ static bool hle_dispatch(CPUState* cpu, u32 address) {
     if (g_trace_fn_count != 0u) {
         for (u32 i = 0; i < g_trace_fn_count; i++)
             if (g_trace_fn[i] == address)
+            {
+                char name[16];
+                const char* sym = sdk_symbol_name(address);
+                if (sym == NULL) {
+                    snprintf(name, sizeof name, "0x%08X", address);
+                    sym = name;
+                }
                 fprintf(stderr, "[fn] %s lr=0x%08X r3=0x%08X r4=0x%08X r5=0x%08X r6=0x%08X "
-                        "f1=%g f2=%g f3=%g msr.fp=%u\n",
-                        sdk_symbol_name(address), cpu->lr, cpu->gpr[3],
+                        "f1=%g f2=%g f3=%g msr.fp=%u",
+                        sym, cpu->lr, cpu->gpr[3],
                         cpu->gpr[4], cpu->gpr[5], cpu->gpr[6], cpu->fpr[1],
                         cpu->fpr[2], cpu->fpr[3], (cpu->msr >> 13) & 1u);
+                // ED_TRACE_R3=off,off..: also print the words at r3+off (hex
+                // and as float), for reading fields of the object passed in r3.
+                const char* offs = getenv("ED_TRACE_R3");
+                for (const char* o = offs; o != NULL && *o != '\0';) {
+                    char* end;
+                    u32 off = (u32)strtoul(o, &end, 0);
+                    u32 ea = cpu->gpr[3] + off;
+                    if (ea >= 0x80000000u && ea < 0x81800000u) {
+                        u32 w = mem_read32(cpu, ea);
+                        float f;
+                        memcpy(&f, &w, 4);
+                        fprintf(stderr, " [%u]=0x%08X(%g)", off, w, f);
+                    }
+                    o = *end == ',' ? end + 1 : end;
+                    if (end == o && *end != ',') break;
+                }
+                fputc('\n', stderr);
+            }
+    }
+    // ED_DL_CHECK=1: at each GXCallDisplayList, summarise the list's bytes
+    // (non-zero count, draw-opcode count, FNV hash, first bytes).
+    {
+        static int dl_check = -1;
+        static u32 call_dl;
+        if (dl_check < 0) {
+            dl_check = getenv("ED_DL_CHECK") != NULL;
+            call_dl = sdk_symbol_address("GXCallDisplayList");
+        }
+        if (dl_check && address == call_dl) {
+            const u32 base = cpu->gpr[3], size = cpu->gpr[4];
+            u32 nonzero = 0, draws = 0;
+            u64 h = 1469598103934665603ull;
+            u8 head[12] = {0};
+            for (u32 i = 0; i < size && i < 0x100000u; i++) {
+                const u8 b = mem_read8(cpu, base + i);
+                if (i < sizeof head) head[i] = b;
+                nonzero += b != 0u;
+                h = (h ^ b) * 1099511628211ull;
+            }
+            // Walk the command stream from the start while it parses simply.
+            for (u32 i = 0; i < size;) {
+                const u8 c = mem_read8(cpu, base + i);
+                if (c == 0x00u) { i++; continue; }
+                if (c == 0x08u) { i += 6; continue; }
+                if (c == 0x10u) { u32 n = (mem_read16(cpu, base + i + 1) & 0xFu) + 1u; i += 5 + 4 * n; continue; }
+                if (c == 0x61u) { i += 5; continue; }
+                if ((c & 0xF8u) >= 0x20u && (c & 0xF8u) <= 0x38u) { i += 5; continue; }
+                if ((c & 0xC0u) == 0x80u) { draws++; break; }
+                break;
+            }
+            fprintf(stderr, "[dl] lr=0x%08X addr=0x%08X size=0x%X nonzero=%u first_draw=%u fnv=%016llx head=%02X%02X%02X%02X%02X%02X%02X%02X\n",
+                    cpu->lr, base, size, nonzero, draws, (unsigned long long)h,
+                    head[0], head[1], head[2], head[3], head[4], head[5], head[6], head[7]);
+        }
+    }
+    if (g_call_prof_fn != 0u) {
+        if (address == g_call_prof_fn) {
+            for (u32 i = 0; i < 64u; i++)
+                if (g_call_prof[i].lr == cpu->lr || g_call_prof[i].n == 0u) {
+                    g_call_prof[i].lr = cpu->lr;
+                    g_call_prof[i].n++;
+                    break;
+                }
+        } else if (address == g_call_prof_vi) {
+            static u32 frame;
+            fprintf(stderr, "[callprof] %u:", frame++);
+            for (u32 i = 0; i < 64u && g_call_prof[i].n != 0u; i++)
+                fprintf(stderr, " %08X=%u", g_call_prof[i].lr, g_call_prof[i].n);
+            fputc('\n', stderr);
+            memset(g_call_prof, 0, sizeof g_call_prof);
+        }
     }
     HleDispatchEntry* entry = hle_dispatch_entry(address);
     if (entry == NULL)
@@ -4412,7 +4509,12 @@ void hle_install(CPUState* cpu) {
              n = strtok(NULL, ","))
             if (sdk_symbol_address(n) != 0u)
                 g_trace_fn[g_trace_fn_count++] = sdk_symbol_address(n);
+            else if (n[0] == '0' && n[1] == 'x')  // raw guest address
+                g_trace_fn[g_trace_fn_count++] = (u32)strtoul(n, NULL, 16);
     }
+    g_call_prof_fn = getenv("ED_CALL_PROFILE") != NULL
+                         ? sdk_symbol_address(getenv("ED_CALL_PROFILE")) : 0u;
+    g_call_prof_vi = sdk_symbol_address("VIFlush");
     g_audio_log = getenv("ED_AUDIO_LOG") != NULL;
     g_graphics_log = getenv("ED_GFX_LOG") != NULL;
     g_movie_log = getenv("ED_MOVIE_LOG") != NULL;

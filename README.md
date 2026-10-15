@@ -37,7 +37,8 @@ widescreen setting, 4:3, 16:9 or stretch), widescreen HUD, resolution (each
 choice shows its size), fullscreen, on-screen FPS counter, music and
 sound-effect volumes, audio buffer, and Controls: Original (GameCube
 positions), Modern (attack RT/A, action B, aim LT, sprint and creep on the stick clicks
-as toggles, reload X/Square, quickcast Y/Triangle) or
+as toggles, LB/RB as the GameCube L/R for paging the game's menus, reload
+X/Square, quickcast Y/Triangle) or
 Custom (select an action, then press a button, trigger or key), Sprint, Creep
 and Target as hold or toggle, stick deadzone and vibration. Bindings show
 as Xbox, PlayStation or Switch button icons for the connected controller.

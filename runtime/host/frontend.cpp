@@ -453,7 +453,7 @@ void build_controls() {
     Row layout{"Layout", "< " + std::string(controls::layout_name(controls::layout())) + " >"};
     static const char* const kLayoutNotes[] = {
         "The GameCube's button positions.",
-        "Attack RT/A, action B, aim LT, sprint L3, creep R3.",
+        "Attack RT/A, action B, aim LT, sprint L3, creep R3; LB/RB page menus.",
         "Your own buttons: change them in Button mapping."};
     layout.note = kLayoutNotes[controls::layout()];
     layout.change = [](int dir) {

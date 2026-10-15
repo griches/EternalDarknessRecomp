@@ -76,10 +76,11 @@ const int kOriginalPad[kActionCount][2] = {
 
 // Modern: attack and confirm on RT and A, action and cancel on B, aim on LT,
 // sprint and creep on the stick clicks (toggles by default), reload X,
-// quickcast Y.
+// quickcast Y. The GameCube L and R also sit on LB and RB, which page the
+// game's own menus both ways (in play LB sprints, RB targets, while held).
 const int kModernPad[kActionCount][2] = {
     {kRT, kSouth}, {kEast, kNone}, {kR3, kNone},    {kNorth, kNone},
-    {kWest, kNone}, {kL3, kNone},  {kLT, kNone},    {kStart, kNone},
+    {kWest, kNone}, {kL3, kLB},    {kLT, kRB},      {kStart, kNone},
     {kDUp, kNone},  {kDDown, kNone}, {kDLeft, kNone}, {kDRight, kNone},
 };
 
@@ -298,11 +299,14 @@ bool read_pad(DolPadState* state) {
     if (g_toggled[kSprint] && g_still_since != 0 && now - g_still_since > 300)
         g_toggled[kSprint] = false;
     for (int a = 0; a < kActionCount; a++) {
-        int v = 0;
-        for (int n : g_bindings[a].pad)
-            v = std::max(v, native_value(pad, n));
+        // In toggle mode only the first button and the key toggle; a second
+        // button (Modern's bumpers) is a plain hold, so it pages menus once.
+        int v = native_value(pad, g_bindings[a].pad[0]);
+        const int held = native_value(pad, g_bindings[a].pad[1]);
         if (key_down(g_bindings[a].key))
             v = 255;
+        if (!toggle_mode(a))
+            v = std::max(v, held);
         if (toggle_mode(a)) {
             const bool down = v >= 128;
             if (down && !g_was_down[a]) {
@@ -314,7 +318,7 @@ bool read_pad(DolPadState* state) {
                     g_toggled[kSprint] = false;
             }
             g_was_down[a] = down;
-            v = g_toggled[a] ? 255 : 0;
+            v = std::max(g_toggled[a] ? 255 : 0, held);
         } else {
             g_toggled[a] = false;
         }

@@ -15,6 +15,7 @@
 #include <RmlUi/Core.h>
 #include <RmlUi_Platform_SDL.h>
 #include <SDL3/SDL_keyboard.h>
+#include <SDL3/SDL_mouse.h>
 #include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_scancode.h>
 #include <SDL3/SDL_timer.h>
@@ -966,6 +967,29 @@ bool ensure_ui() {
     return true;
 }
 
+// The mouse pointer hides after two seconds without moving or clicking, in the
+// game and the menus, and shows again as soon as the mouse moves.
+void update_cursor() {
+    static float last_x = -1.f, last_y = -1.f;
+    static Uint64 moved_at = 0;
+    static bool shown = true;
+    float x = 0.f, y = 0.f;
+    const SDL_MouseButtonFlags buttons = SDL_GetMouseState(&x, &y);
+    const Uint64 now = SDL_GetTicks();
+    if (x != last_x || y != last_y || buttons != 0) {
+        last_x = x;
+        last_y = y;
+        moved_at = now;
+        if (!shown) {
+            SDL_ShowCursor();
+            shown = true;
+        }
+    } else if (shown && now - moved_at > 2000) {
+        SDL_HideCursor();
+        shown = false;
+    }
+}
+
 // Run the current screen until g_close; false when the window was closed.
 bool run_menu() {
     g_close = false;
@@ -976,6 +1000,7 @@ bool run_menu() {
     g_input.poll(pressed);
     bool open = true;
     while (!g_close) {
+        update_cursor();
         if (controls::capturing()) {
             const bool done = controls::poll_capture();
             if (done || !controls::capturing()) {
@@ -1142,6 +1167,7 @@ void update_fps_counter() {
 
 extern "C" void frontend_frame(void) {
     update_fps_counter();
+    update_cursor();
     static bool menu_was_held = false;
     bool held[kButtonCount];
     read_buttons(held);

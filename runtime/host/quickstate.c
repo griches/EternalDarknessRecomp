@@ -202,6 +202,23 @@ void quickstate_poll(unsigned long long blocks) {
         g_save_signal = 0;
         request(QS_SAVE, g_path);
     }
+    // The same without signals (Windows): creating the file saves/save-now
+    // (ED_SAVE_TRIGGER) quick-saves once and deletes it. Checked a few times a
+    // second.
+    static double next_trigger_check;
+    const double now = now_ms();
+    if (now >= next_trigger_check) {
+        next_trigger_check = now + 250.0;
+        const char* trigger = getenv("ED_SAVE_TRIGGER");
+        if (trigger == NULL || trigger[0] == '\0')
+            trigger = "saves/save-now";
+        FILE* f = fopen(trigger, "rb");
+        if (f != NULL) {
+            fclose(f);
+            remove(trigger);
+            quickstate_request_save(g_path);
+        }
+    }
     if (g_save_at_armed && blocks >= g_save_at) {
         g_save_at_armed = false;
         request(QS_SAVE, g_path);

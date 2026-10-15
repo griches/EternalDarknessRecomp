@@ -72,11 +72,14 @@ body.spread .page {
 	display: none;
 }
 
+/* The emblem sits midway between the page's ruled frame (its line ends 14dp
+   down, the emblem starts at the 30dp padding: 16dp) and the divider's line
+   (7dp margin + half the 18dp divider: 16dp). */
 body.branded #emblem {
 	display: block;
 	width: 220dp;
 	height: 220dp;
-	margin: 0 auto 2dp auto;
+	margin: 0 auto 7dp auto;
 }
 
 body.branded #emblem-divider {

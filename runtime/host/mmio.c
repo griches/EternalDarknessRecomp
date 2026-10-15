@@ -127,11 +127,63 @@ static bool g_pi_fifo_configured;
 static u8 g_wg_line[32];
 static u32 g_wg_fill;
 
+// ED_FIFO_PROFILE=1 (debug): bytes written into buffer FIFO targets (display
+// lists), by the storing instruction, printed when a large fill ends.
+#define FIFO_PROFILE_SLOTS 512u
+static struct { u32 pc, lr; u64 bytes; } g_fifo_profile[FIFO_PROFILE_SLOTS];
+static int g_fifo_profile_on = -1;
+
+static void fifo_profile_add(const CPUState* cpu, u32 bytes) {
+    if (g_fifo_profile_on < 0)
+        g_fifo_profile_on = getenv("ED_FIFO_PROFILE") != NULL;
+    if (!g_fifo_profile_on)
+        return;
+    u32 slot = (cpu->pc * 2654435761u) % FIFO_PROFILE_SLOTS;
+    for (u32 n = 0; n < FIFO_PROFILE_SLOTS; n++, slot = (slot + 1u) % FIFO_PROFILE_SLOTS) {
+        if (g_fifo_profile[slot].bytes == 0u) {
+            g_fifo_profile[slot].pc = cpu->pc;
+            g_fifo_profile[slot].lr = cpu->lr;
+        }
+        if (g_fifo_profile[slot].pc == cpu->pc) {
+            g_fifo_profile[slot].bytes += bytes;
+            return;
+        }
+    }
+}
+
+static void fifo_profile_dump(u32 base, u32 size) {
+    if (g_fifo_profile_on <= 0)
+        return;
+    fprintf(stderr, "[fifo-profile] buffer 0x%08X size 0x%X:\n", base, size);
+    for (int k = 0; k < 16; k++) {
+        u32 best = FIFO_PROFILE_SLOTS;
+        for (u32 i = 0; i < FIFO_PROFILE_SLOTS; i++)
+            if (g_fifo_profile[i].bytes != 0u &&
+                (best == FIFO_PROFILE_SLOTS ||
+                 g_fifo_profile[i].bytes > g_fifo_profile[best].bytes))
+                best = i;
+        if (best == FIFO_PROFILE_SLOTS)
+            break;
+        fprintf(stderr, "  pc=0x%08X lr=0x%08X bytes=%llu\n", g_fifo_profile[best].pc,
+                g_fifo_profile[best].lr,
+                (unsigned long long)g_fifo_profile[best].bytes);
+        g_fifo_profile[best].bytes = 0;
+    }
+    memset(g_fifo_profile, 0, sizeof g_fifo_profile);
+}
+
 static void wg_burst_to_ram(CPUState* cpu) {
     for (u32 i = 0; i < 32u; i++)
         mem_write8(cpu, GC_RAM_BASE | (g_pi_fifo_wptr + i), g_wg_line[i]);
     g_pi_fifo_wptr += 32u;
     if (g_pi_fifo_end != 0u && g_pi_fifo_wptr >= g_pi_fifo_end) {
+        static int wrap_log = -1;  // ED_PI_LOG=1: a buffer target wrapped
+        if (wrap_log < 0)
+            wrap_log = getenv("ED_PI_LOG") != NULL;
+        if (wrap_log)
+            fprintf(stderr, "[pi] buffer FIFO wrapped: base=0x%08X end=0x%08X "
+                            "pc=0x%08X lr=0x%08X\n",
+                    g_pi_fifo_base, g_pi_fifo_end, cpu->pc, cpu->lr);
         g_pi_fifo_wptr = g_pi_fifo_base;
         g_pi_fifo_wrapped = true;
     }
@@ -141,6 +193,20 @@ static void wg_burst_to_ram(CPUState* cpu) {
 static bool cpu_fifo_feeds_gpu(void) {
     return !g_pi_fifo_configured || g_cp.fifo_base == 0u ||
            g_pi_fifo_base == (g_cp.fifo_base & PI_FIFO_ADDRESS_MASK);
+}
+
+// PPCMtwpar (GXResetWriteGatherPipe, GXRedirectWriteGatherPipe) sets the
+// gather pipe's address, which also empties it: pending bytes are dropped. The
+// game reads the display-list write pointer as GXFlush then a reset, so the
+// flush pads to a 32-byte line and the zeros left in the pipe are discarded;
+// keeping them grew every room display list by 32 bytes per lookup until it
+// overflowed its buffer after the prologue.
+void mmio_write_gather_reset(void) {
+    g_wg_fill = 0;
+}
+
+bool mmio_cpu_fifo_feeds_gpu(void) {
+    return cpu_fifo_feeds_gpu();
 }
 
 bool mmio_pi_fifo_contains(u32 ea) {
@@ -163,12 +229,40 @@ void mmio_pi_fifo_write(u32 ea, u64 value) {
     static int pi_log = -1;  // ED_PI_LOG=1: log gather-pipe redirects
     if (pi_log < 0)
         pi_log = getenv("ED_PI_LOG") != NULL;
+    if (pi_log < 0)
+        pi_log = 0;
     if (pi_log && (ea & ~3u) == 0xCC003014u && g_pi_fifo_base == 0u)
         fprintf(stderr, "[pi] gather pipe redirected to 0x%08X\n", v);
+    {
+        // ED_PI_LOG=2: every FIFO register write, with the old pointers.
+        static int all = -1;
+        if (all < 0) {
+            const char* env = getenv("ED_PI_LOG");
+            all = env != NULL && atoi(env) >= 2;
+        }
+        if (all)
+            fprintf(stderr,
+                    "[pi] %s=0x%08X (base=0x%08X end=0x%08X wptr=0x%08X)\n",
+                    (ea & ~3u) == 0xCC00300Cu   ? "base"
+                    : (ea & ~3u) == 0xCC003010u ? "end"
+                                                : "wptr",
+                    v, g_pi_fifo_base, g_pi_fifo_end, g_pi_fifo_wptr);
+    }
     mmio_fifo_dump_note(ea == 0xCC00300Cu   ? "pi-fifo-base"
                         : ea == 0xCC003010u ? "pi-fifo-end"
                                             : "pi-fifo-wptr",
                         v, g_cp.fifo_base);
+    if ((ea & ~3u) == 0xCC00300Cu && pi_log && !cpu_fifo_feeds_gpu() &&
+        g_pi_fifo_base != 0u && g_pi_fifo_wptr - g_pi_fifo_base >= 0x10000u)
+        fprintf(stderr, "[pi] large buffer fill: base=0x%08X size=0x%X wrapped=%d\n",
+                g_pi_fifo_base, g_pi_fifo_wptr - g_pi_fifo_base,
+                g_pi_fifo_wrapped ? 1 : 0);
+    if ((ea & ~3u) == 0xCC00300Cu && !cpu_fifo_feeds_gpu() && g_pi_fifo_base != 0u) {
+        if (g_pi_fifo_wptr - g_pi_fifo_base >= 0x10000u || g_pi_fifo_wrapped)
+            fifo_profile_dump(g_pi_fifo_base, g_pi_fifo_wptr - g_pi_fifo_base);
+        else if (g_fifo_profile_on > 0)
+            memset(g_fifo_profile, 0, sizeof g_fifo_profile);
+    }
     switch (ea & ~3u) {
     case 0xCC00300Cu: g_pi_fifo_base = v & PI_FIFO_ADDRESS_MASK; break;
     case 0xCC003010u: g_pi_fifo_end = v & PI_FIFO_ADDRESS_MASK; break;
@@ -240,6 +334,7 @@ static bool gx_fifo_write_cb(void* user, CPUState* cpu, u32 ea, u8 size,
     (void)ea;
     mmio_fifo_dump_write(cpu, size, value);
     if (!cpu_fifo_feeds_gpu()) {
+        fifo_profile_add(cpu, size);
         for (u8 i = 0; i < size; i++) {
             g_wg_line[g_wg_fill++] = (u8)(value >> ((size - 1u - i) * 8u));
             if (g_wg_fill == 32u)
@@ -403,6 +498,9 @@ static bool cp_write_cb(void* user, CPUState* cpu, u32 ea, u8 size,
     if (!dol_cp_mmio_contains(ea))
         return false;
     dol_cp_mmio_write(cp, ea, size, value);
+    interrupt_gp_breakpoint_enable(
+        (dol_cp_mmio_read(cp, DOL_CP_BASE + DOL_CP_CTRL_OFF, 2) &
+         DOL_CP_CTRL_BP_ENABLE) != 0u);
     return true;
 }
 
@@ -657,3 +755,94 @@ void mmio_attach_efb_readback(void) {
 #else
 void mmio_attach_efb_readback(void) {}
 #endif
+
+// ---------------------------------------------------------------------------
+// Quick state (host/quickstate.c)
+// ---------------------------------------------------------------------------
+// Device registers only. Host pointers in the device structs (transfer and
+// command callbacks, the PE's bbox link, the EFB software backing) belong to
+// this process: they are left out of the blob and kept on load.
+typedef struct {
+    DolExiChannel exi[DOL_EXI_CHANNELS];
+    DolDi di;
+    DolCp cp;
+    u16 pe_words[DOL_PE_REGISTER_BYTES / 2u];
+    DolMi mi;
+    DolEfbAccess efb;
+    u32 pi_fifo_base;
+    u32 pi_fifo_end;
+    u32 pi_fifo_wptr;
+    bool pi_fifo_wrapped;
+    bool pi_fifo_configured;
+    u8 wg_line[32];
+    u32 wg_fill;
+} MmioQuickState;
+
+size_t mmio_state_size(void) {
+    return sizeof(MmioQuickState);
+}
+
+void mmio_state_save(void* out) {
+    MmioQuickState s;
+    memset(&s, 0, sizeof s);
+    memcpy(s.exi, g_exi.channels, sizeof s.exi);
+    memcpy(&s.di, &g_di, sizeof s.di);
+    s.di.execute = NULL;
+    s.di.execute_user = NULL;
+    memcpy(&s.cp, &g_cp, sizeof s.cp);
+    memcpy(s.pe_words, g_pe.words, sizeof s.pe_words);
+    memcpy(&s.mi, &g_mi, sizeof s.mi);
+    memcpy(&s.efb, &g_efb, sizeof s.efb);
+    s.efb.color = NULL;
+    s.efb.depth = NULL;
+    s.efb.width = 0;
+    s.efb.height = 0;
+    s.efb.backing_owned = false;
+    s.pi_fifo_base = g_pi_fifo_base;
+    s.pi_fifo_end = g_pi_fifo_end;
+    s.pi_fifo_wptr = g_pi_fifo_wptr;
+    s.pi_fifo_wrapped = g_pi_fifo_wrapped;
+    s.pi_fifo_configured = g_pi_fifo_configured;
+    memcpy(s.wg_line, g_wg_line, sizeof s.wg_line);
+    s.wg_fill = g_wg_fill;
+    memcpy(out, &s, sizeof s);
+}
+
+void mmio_state_load(const void* in) {
+    MmioQuickState s;
+    memcpy(&s, in, sizeof s);
+    memcpy(g_exi.channels, s.exi, sizeof s.exi);
+    const DolDi live_di = g_di;
+    g_di = s.di;
+    g_di.execute = live_di.execute;
+    g_di.execute_user = live_di.execute_user;
+    g_cp = s.cp;
+    memcpy(g_pe.words, s.pe_words, sizeof s.pe_words);
+    g_mi = s.mi;
+    const DolEfbAccess live_efb = g_efb;
+    g_efb = s.efb;
+    g_efb.color = live_efb.color;
+    g_efb.depth = live_efb.depth;
+    g_efb.width = live_efb.width;
+    g_efb.height = live_efb.height;
+    g_efb.backing_owned = live_efb.backing_owned;
+    g_pi_fifo_base = s.pi_fifo_base;
+    g_pi_fifo_end = s.pi_fifo_end;
+    g_pi_fifo_wptr = s.pi_fifo_wptr;
+    g_pi_fifo_wrapped = s.pi_fifo_wrapped;
+    g_pi_fifo_configured = s.pi_fifo_configured;
+    memcpy(g_wg_line, s.wg_line, sizeof g_wg_line);
+    g_wg_fill = s.wg_fill < sizeof g_wg_line ? s.wg_fill : 0u;
+}
+
+u8* mmio_locked_cache(u32* size) {
+    *size = g_guest_memory.locked_cache != NULL
+                ? g_guest_memory.config.locked_cache_size
+                : 0u;
+    return g_guest_memory.locked_cache;
+}
+
+u8* mmio_vm_memory(u32* size) {
+    *size = g_guest_memory.vm != NULL ? g_guest_memory.config.vm_size : 0u;
+    return g_guest_memory.vm;
+}

@@ -54,5 +54,16 @@ void interrupt_defer_pe_finish(void);
 // when it reaches a GXSetDrawSync token. Called from the GXSetDrawSync hook: the
 // host GPU has no queue to drain, so the token is reached at once.
 void interrupt_commit_pe_token(u16 token);
+// GP breakpoint: draw-sync tokens queued while it is armed are held until
+// GXEnableBreakPt moves it on (moved) or CP_CTRL switches it off (enable).
+void interrupt_gp_breakpoint_moved(void);
+void interrupt_gp_breakpoint_enable(bool enabled);
+
+// Quick state: the PI/VI/SI/PE interrupt models and the retrace clock, as a
+// fixed-size blob. Loading keeps this process's pacing and restarts the wall
+// clock from now.
+size_t interrupt_state_size(void);
+void interrupt_state_save(void* out);
+void interrupt_state_load(const void* in);
 
 #endif // ED_HOST_INTERRUPT_H

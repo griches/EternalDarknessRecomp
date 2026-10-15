@@ -1,24 +1,45 @@
 diff --git a/backends/aurora/aurora_backend.cpp b/backends/aurora/aurora_backend.cpp
-index d94f811..d12c4ac 100644
+index d94f811..55d524f 100644
 --- a/backends/aurora/aurora_backend.cpp
 +++ b/backends/aurora/aurora_backend.cpp
-@@ -19,6 +19,7 @@
+@@ -19,7 +19,9 @@
  #include <dolphin/pad.h>
  #include <dolphin/vi.h>
  #include <SDL3/SDL_audio.h>
 +#include <SDL3/SDL_events.h>
  #include <SDL3/SDL_init.h>
++#include <SDL3/SDL_keyboard.h>
  #include <SDL3/SDL_scancode.h>
  #include <SDL3/SDL_timer.h>
-@@ -59,6 +60,7 @@ bool peek(const std::uint8_t** rgba, std::uint32_t* width,
  
+@@ -33,6 +35,7 @@
+ #include <array>
+ #include <cstddef>
+ #include <cstdint>
++#include <optional>
+ #include <span>
+ #include <string>
+ #include <unordered_map>
+@@ -57,8 +60,18 @@ bool peek(const std::uint8_t** rgba, std::uint32_t* width,
+           std::uint32_t* height) noexcept;
+ } // namespace aurora::gfx::efb_readback
+ 
++// Fork-internal VI state (lib/dolphin/vi), carried by save states: the public
++// VI API sets the render mode and black flag but cannot read them back.
++namespace aurora::vi {
++extern std::optional<GXRenderModeObj> g_renderMode;
++void configure(const GXRenderModeObj* rm) noexcept;
++bool xfb_black() noexcept;
++void set_xfb_black(bool black) noexcept;
++} // namespace aurora::vi
++
  namespace {
  bool g_initialized = false;
 +Uint64 g_last_present_ms = 0;  // SDL_GetTicks at the last present
  bool g_frame_open = false;
  bool g_should_quit = false;
  bool g_graphics_log = false;
-@@ -1114,6 +1116,12 @@ void dol_aurora_flush_gap_report(void) {
+@@ -1114,6 +1127,12 @@ void dol_aurora_flush_gap_report(void) {
      flush_gxcore_gap_counters();
  }
  
@@ -31,7 +52,7 @@ index d94f811..d12c4ac 100644
  void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user) {
      g_efb_frame_fill = fn;
      g_efb_frame_fill_user = user;
-@@ -1432,6 +1440,7 @@ void aurora_backend_present(void) {
+@@ -1432,6 +1451,7 @@ void aurora_backend_present(void) {
      const unsigned long long present_fifo = g_fifo_bytes;
      g_fifo_bytes = 0;
      poll_events();
@@ -39,6 +60,189 @@ index d94f811..d12c4ac 100644
      if (!g_should_quit) {
          g_frame_open = aurora_begin_frame();
  #if GXRUNTIME_HAS_AURORA_RECOMP
+@@ -1848,6 +1868,7 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+ 
+     int queued = SDL_GetAudioStreamQueued(g_audio_stream);
+     unsigned waited_ms = 0;
++    bool stalled = false;
+     while (queued > max_queued_bytes && waited_ms < 20u) {
+         g_audio_throttle_count++;
+         if (g_audio_queue_log &&
+@@ -1860,8 +1881,17 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+                          max_queued_bytes);
+         SDL_Delay(1);
+         waited_ms++;
++        const int before = queued;
+         queued = SDL_GetAudioStreamQueued(g_audio_stream);
++        // The output device is not draining (switching to new headphones,
++        // say): drop this chunk rather than stall the game for every push.
++        if (queued >= before) {
++            stalled = true;
++            break;
++        }
+     }
++    if (stalled || queued > max_queued_bytes * 2)
++        return;
+ 
+     const bool low_queue =
+         queued >= 0 && queued < bytes_per_second / 100;
+@@ -1886,6 +1916,156 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+     }
+ }
+ 
++bool dol_aurora_key_down(int sdl_scancode) {
++    if (!g_initialized || sdl_scancode <= 0)
++        return false;
++    int count = 0;
++    const bool* keys = SDL_GetKeyboardState(&count);
++    return keys != nullptr && sdl_scancode < count && keys[sdl_scancode];
++}
++
++bool dol_aurora_gx_idle(void) {
++#if GXRUNTIME_HAS_AURORA_RECOMP
++    // A frontend that has failed ignores the FIFO, so its leftover bytes would
++    // never drain; it no longer cares where the guest is.
++    return !g_shadow_frontend_enabled || g_shadow_frontend_failed ||
++           g_shadow_frontend.pending_fifo_size() == 0u;
++#else
++    return true;
++#endif
++}
++
++// The guest's VI choices, in plain fields so a state file does not depend on
++// GXRenderModeObj's layout. The host's configure_vi passes only these mode
++// fields, so they are the whole render mode.
++struct AuroraQuickState {
++    std::uint32_t has_render_mode;
++    std::uint32_t tv_mode;
++    std::uint16_t fb_width;
++    std::uint16_t efb_height;
++    std::uint16_t xfb_height;
++    std::uint16_t vi_width;
++    std::uint16_t vi_height;
++    std::uint16_t xfb_black;
++    std::uint32_t current_xfb;
++    std::uint32_t next_xfb;
++};
++
++size_t dol_aurora_state_size(void) {
++    return sizeof(AuroraQuickState);
++}
++
++void dol_aurora_state_save(void* out) {
++    AuroraQuickState s{};
++    if (aurora::vi::g_renderMode) {
++        const GXRenderModeObj& mode = *aurora::vi::g_renderMode;
++        s.has_render_mode = 1u;
++        s.tv_mode = static_cast<std::uint32_t>(mode.viTVmode);
++        s.fb_width = mode.fbWidth;
++        s.efb_height = mode.efbHeight;
++        s.xfb_height = mode.xfbHeight;
++        s.vi_width = mode.viWidth;
++        s.vi_height = mode.viHeight;
++    }
++    s.xfb_black = aurora::vi::xfb_black() ? 1u : 0u;
++    s.current_xfb = static_cast<std::uint32_t>(
++        reinterpret_cast<uintptr_t>(VIGetCurrentFrameBuffer()));
++    s.next_xfb = static_cast<std::uint32_t>(
++        reinterpret_cast<uintptr_t>(VIGetNextFrameBuffer()));
++    std::memcpy(out, &s, sizeof s);
++}
++
++void dol_aurora_state_load(const void* in) {
++    if (!g_initialized || in == nullptr)
++        return;
++    AuroraQuickState s;
++    std::memcpy(&s, in, sizeof s);
++    if (s.has_render_mode != 0u) {
++        GXRenderModeObj mode{};
++        mode.viTVmode = static_cast<VITVMode>(s.tv_mode);
++        mode.fbWidth = s.fb_width;
++        mode.efbHeight = s.efb_height;
++        mode.xfbHeight = s.xfb_height;
++        mode.viWidth = s.vi_width;
++        mode.viHeight = s.vi_height;
++        aurora::vi::configure(&mode);
++    } else {
++        aurora::vi::configure(nullptr);
++    }
++    // VIFlush promotes the next buffer to current; replay that to set both.
++    VISetNextFrameBuffer(reinterpret_cast<void*>(
++        static_cast<uintptr_t>(s.current_xfb)));
++    VIFlush();
++    VISetNextFrameBuffer(reinterpret_cast<void*>(
++        static_cast<uintptr_t>(s.next_xfb)));
++    aurora::vi::set_xfb_black(s.xfb_black != 0u);
++}
++
++size_t dol_aurora_gx_state_save(void* out, size_t capacity) {
++#if GXRUNTIME_HAS_AURORA_RECOMP
++    if (!g_initialized || !g_shadow_frontend_enabled || g_shadow_frontend_failed)
++        return 0;
++    const std::vector<std::uint8_t> preamble = g_shadow_frontend.state_preamble();
++    if (out != nullptr && capacity >= preamble.size())
++        std::memcpy(out, preamble.data(), preamble.size());
++    return preamble.size();
++#else
++    (void)out;
++    (void)capacity;
++    return 0;
++#endif
++}
++
++bool dol_aurora_gx_state_load(const void* in, size_t size) {
++#if GXRUNTIME_HAS_AURORA_RECOMP
++    // Textures in the replay resolve through the guest resolver; without it
++    // the replay would fail and leave the decoder off.
++    if (!g_initialized || !g_shadow_frontend_enabled || in == nullptr ||
++        size == 0u || g_guest_address_resolver == nullptr)
++        return false;
++    // Start the decoder over (this also clears a failed frontend): its
++    // registers and any half-planned draw belong to the abandoned timeline.
++    // The sink must restart with it, since packet numbering does.
++    aurora_backend_set_guest_address_resolver(g_guest_address_resolver,
++                                              g_guest_address_resolver_user);
++    if (g_gx_core_enabled)
++        g_core_sink.reset();
++    const std::span<const std::uint8_t> bytes(
++        static_cast<const std::uint8_t*>(in), size);
++    const bool ok =
++        g_gx_core_enabled
++            ? g_shadow_frontend.replay_fifo(bytes, &g_core_sink)
++            : g_shadow_frontend.replay_fifo(bytes, &g_shadow_packet_sink);
++    if (!ok) {
++        g_shadow_frontend_failed = true;
++        std::fprintf(stderr,
++                     "[gx-core] saved GX state rejected: %s (opcode=0x%02X)\n",
++                     g_shadow_frontend.last_error() != nullptr
++                         ? g_shadow_frontend.last_error()
++                         : "none",
++                     static_cast<unsigned>(g_shadow_frontend.last_error_opcode()));
++    }
++    return ok;
++#else
++    (void)in;
++    (void)size;
++    return false;
++#endif
++}
++
++void dol_aurora_state_loaded(void) {
++    if (!g_initialized)
++        return;
++#if GXRUNTIME_HAS_AURORA_RECOMP
++    // EFB-copy and RAM-XFB textures are keyed by guest address alone; after a
++    // load those addresses hold other things.
++    if (g_gx_core_enabled)
++        aurora::gfx::gxcore::reset_texture_cache();
++#endif
++    if (g_audio_stream != nullptr)
++        SDL_ClearAudioStream(g_audio_stream);
++}
++
+ } // extern "C"
+ 
+ namespace {
 diff --git a/graphics/aurora/lib/aurora.cpp b/graphics/aurora/lib/aurora.cpp
 index b09ef4d..9a5e545 100644
 --- a/graphics/aurora/lib/aurora.cpp
@@ -77,6 +281,289 @@ index b09ef4d..9a5e545 100644
    const uint32_t contentW =
        xfbTex && *xfbTex ? (*xfbTex)->size.width : efbSource.size.width;
    const uint32_t contentH =
+diff --git a/graphics/frontend/include/gxruntime/aurora_recomp/retail_gx_frontend.hpp b/graphics/frontend/include/gxruntime/aurora_recomp/retail_gx_frontend.hpp
+index 1ef8382..85c5668 100644
+--- a/graphics/frontend/include/gxruntime/aurora_recomp/retail_gx_frontend.hpp
++++ b/graphics/frontend/include/gxruntime/aurora_recomp/retail_gx_frontend.hpp
+@@ -116,6 +116,13 @@ public:
+   bool replay_fifo(std::span<const std::uint8_t> bytes,
+                    AuroraRenderSink* sink = nullptr);
+ 
++  // Save states: FIFO commands (CP/XF/BP loads) that rebuild the GX register
++  // state this frontend has seen, for a freshly reset frontend and the sink
++  // behind it (feed them with replay_fifo). Registers whose write triggers
++  // work (EFB copy, draw done, tokens, TMEM preload) are left out; TMEM TLUT
++  // loads are repeated, reading the palettes from guest memory again.
++  std::vector<std::uint8_t> state_preamble() const;
++
+   const DolGxRecompState& state() const { return state_; }
+   DolGxRecompState& state() { return state_; }
+ 
+@@ -177,6 +184,11 @@ private:
+   std::uint32_t last_error_b_ = 0;
+   std::uint32_t last_error_c_ = 0;
+   std::uint32_t last_error_d_ = 0;
++  // TEV color and konst registers share BP 0xE0-0xE7 (bit 23 picks which),
++  // so bp_regs keeps only the last of the pair; state_preamble needs both.
++  // [0] tev color, [1] konst, indexed by reg - 0xE0.
++  std::uint32_t tev_reg_words_[2][8]{};
++  bool tev_reg_seen_[2][8]{};
+   // Frame-relative fifo offset (GPNF §1).
+   std::size_t frame_fifo_bytes_ = 0;
+   std::size_t last_command_offset_ = 0;
+diff --git a/graphics/frontend/src/retail_gx_frontend.cpp b/graphics/frontend/src/retail_gx_frontend.cpp
+index 06fff92..4151d2d 100644
+--- a/graphics/frontend/src/retail_gx_frontend.cpp
++++ b/graphics/frontend/src/retail_gx_frontend.cpp
+@@ -324,6 +324,8 @@ void RetailGxFrontend::reset(const DolGuestAddressResolver* resolver) {
+   last_error_b_ = 0u;
+   last_error_c_ = 0u;
+   last_error_d_ = 0u;
++  std::memset(tev_reg_words_, 0, sizeof tev_reg_words_);
++  std::memset(tev_reg_seen_, 0, sizeof tev_reg_seen_);
+ }
+ 
+ bool RetailGxFrontend::set_vertex_layout(std::uint8_t vtx_fmt,
+@@ -754,6 +756,11 @@ bool RetailGxFrontend::handle_bp(std::uint32_t raw) {
+   const std::uint32_t value = raw & 0x00FFFFFFu;
+   if (!dol_gx_recomp_note_bp_reg(&state_, reg, value))
+     return false;
++  if (reg >= 0xE0u && reg <= 0xE7u) {
++    const std::uint32_t konst = (value >> 23u) & 1u;
++    tev_reg_words_[konst][reg - 0xE0u] = value;
++    tev_reg_seen_[konst][reg - 0xE0u] = true;
++  }
+ 
+   std::uint8_t slot = 0;
+   if (map_image0_reg(reg, &slot) || map_image3_reg(reg, &slot))
+@@ -1021,6 +1028,195 @@ void RetailGxFrontend::drain_emitted_packets(std::uint32_t emitted_count) {
+   emitted_trace_count_ = 0u;
+ }
+ 
++namespace {
++
++void put_be32(std::vector<std::uint8_t>& out, std::uint32_t value) {
++  out.push_back(static_cast<std::uint8_t>(value >> 24u));
++  out.push_back(static_cast<std::uint8_t>(value >> 16u));
++  out.push_back(static_cast<std::uint8_t>(value >> 8u));
++  out.push_back(static_cast<std::uint8_t>(value));
++}
++
++void emit_cp(std::vector<std::uint8_t>& out, std::uint8_t reg,
++             std::uint32_t value) {
++  out.push_back(DOL_GX_CMD_LOAD_CP_REG);
++  out.push_back(reg);
++  put_be32(out, value);
++}
++
++void emit_bp(std::vector<std::uint8_t>& out, std::uint8_t reg,
++             std::uint32_t value) {
++  out.push_back(DOL_GX_CMD_LOAD_BP_REG);
++  put_be32(out, (static_cast<std::uint32_t>(reg) << 24u) | (value & 0x00FFFFFFu));
++}
++
++struct XfWord {
++  std::uint16_t address;
++  std::uint32_t value;
++};
++
++std::uint32_t f32_bits(float value) {
++  std::uint32_t bits = 0;
++  std::memcpy(&bits, &value, sizeof bits);
++  return bits;
++}
++
++// Contiguous words become one XF load each, at most 16 words long (the parser
++// keeps the count in a byte).
++void emit_xf(std::vector<std::uint8_t>& out, const std::vector<XfWord>& words) {
++  std::size_t i = 0;
++  while (i < words.size()) {
++    std::size_t n = 1;
++    while (i + n < words.size() && n < 16u &&
++           words[i + n].address == words[i].address + n)
++      ++n;
++    out.push_back(DOL_GX_CMD_LOAD_XF_REG);
++    put_be32(out, (static_cast<std::uint32_t>(n - 1u) << 16u) |
++                      words[i].address);
++    for (std::size_t k = 0; k < n; ++k)
++      put_be32(out, words[i + k].value);
++    i += n;
++  }
++}
++
++// BP writes that do work rather than set state (Dolphin's FifoPlayer skips
++// the same): draw done, tokens, EFB copy, bbox and perf clears, TMEM preload,
++// TLUT load (repeated separately), texture invalidate, and the BP mask.
++bool bp_is_trigger(std::uint32_t reg) {
++  switch (reg) {
++  case 0x45u: case 0x47u: case 0x48u: case 0x52u: case 0x55u: case 0x56u:
++  case 0x57u: case 0x63u: case 0x65u: case 0x66u: case 0x67u: case 0xFEu:
++    return true;
++  default:
++    return false;
++  }
++}
++
++} // namespace
++
++std::vector<std::uint8_t> RetailGxFrontend::state_preamble() const {
++  const DolGxRecompState& s = state_;
++  std::vector<std::uint8_t> out;
++  out.reserve(16384u);
++
++  // CP: arrays, vertex formats and descriptor (each rederives the layouts).
++  for (std::uint32_t a = 0; a < DOL_GX_RECOMP_CP_ARRAY_COUNT; ++a) {
++    if (s.arrays[a].base_valid)
++      emit_cp(out, static_cast<std::uint8_t>(DOL_GX_CP_REG_ARRAYBASE + a),
++              s.arrays[a].physical_base);
++    if (s.arrays[a].stride_valid)
++      emit_cp(out, static_cast<std::uint8_t>(DOL_GX_CP_REG_ARRAYSTRIDE + a),
++              s.arrays[a].stride);
++  }
++  for (std::uint32_t f = 0; f < DOL_GX_RECOMP_VERTEX_FORMATS; ++f) {
++    if (s.vat_group0_valid[f])
++      emit_cp(out, static_cast<std::uint8_t>(DOL_GX_CP_REG_VAT_GRP0 + f),
++              s.vat_group0[f]);
++    if (s.vat_group1_valid[f])
++      emit_cp(out, static_cast<std::uint8_t>(DOL_GX_CP_REG_VAT_GRP1 + f),
++              s.vat_group1[f]);
++    if (s.vat_group2_valid[f])
++      emit_cp(out, static_cast<std::uint8_t>(DOL_GX_CP_REG_VAT_GRP2 + f),
++              s.vat_group2[f]);
++  }
++  if (s.vcd_lo_valid)
++    emit_cp(out, DOL_GX_CP_REG_VCD_LO, s.vcd_lo);
++  if (s.vcd_hi_valid)
++    emit_cp(out, DOL_GX_CP_REG_VCD_HI, s.vcd_hi);
++  emit_cp(out, DOL_GX_CP_REG_MATRIX_INDEX_A, s.matrix_index_a);
++
++  // XF: every word the frontend captured, in address order.
++  std::vector<XfWord> xf;
++  for (std::uint32_t m = 0; m < DOL_GX_RECOMP_POSITION_MATRIX_COUNT; ++m)
++    for (std::uint32_t w = 0; w < DOL_GX_RECOMP_POSITION_MATRIX_WORDS; ++w)
++      if (s.position_matrix_word_mask[m] & (1u << w))
++        xf.push_back({static_cast<std::uint16_t>(
++                          m * DOL_GX_RECOMP_POSITION_MATRIX_WORDS + w),
++                      f32_bits(s.position_matrices[m][w])});
++  for (std::uint32_t m = 0; m < DOL_GX_RECOMP_TEX_MATRIX_COUNT; ++m)
++    for (std::uint32_t w = 0; w < DOL_GX_RECOMP_TEX_MATRIX_WORDS; ++w)
++      if (s.tex_matrix_word_mask[m] & (1u << w))
++        xf.push_back({static_cast<std::uint16_t>(
++                          DOL_GX_XF_TEX_MATRIX_BASE +
++                          m * DOL_GX_RECOMP_TEX_MATRIX_WORDS + w),
++                      f32_bits(s.tex_matrices[m][w])});
++  for (std::uint32_t m = 0; m < DOL_GX_RECOMP_NORMAL_MATRIX_COUNT; ++m)
++    for (std::uint32_t w = 0; w < DOL_GX_RECOMP_NORMAL_MATRIX_WORDS; ++w) {
++      const std::uint32_t address = DOL_GX_XF_NORMAL_MATRIX_BASE +
++                                    m * DOL_GX_RECOMP_NORMAL_MATRIX_WORDS + w;
++      if ((s.normal_matrix_word_mask[m] & (1u << w)) &&
++          address < DOL_GX_XF_NORMAL_MATRIX_END)
++        xf.push_back({static_cast<std::uint16_t>(address),
++                      f32_bits(s.normal_matrices[m][w])});
++    }
++  for (std::uint32_t r = 0; r < DOL_GX_RECOMP_POST_MATRIX_ROWS; ++r)
++    for (std::uint32_t w = 0; w < DOL_GX_RECOMP_POST_MATRIX_WORDS; ++w)
++      if (s.post_matrix_word_mask[r] & (1u << w))
++        xf.push_back({static_cast<std::uint16_t>(
++                          DOL_GX_XF_POST_MATRIX_BASE +
++                          r * DOL_GX_RECOMP_POST_MATRIX_WORDS + w),
++                      f32_bits(s.post_matrices[r][w])});
++  for (std::uint32_t l = 0; l < DOL_GX_RECOMP_LIGHT_COUNT; ++l)
++    for (std::uint32_t w = 0; w < DOL_GX_RECOMP_LIGHT_WORDS; ++w)
++      if (s.light_word_mask[l] & (1u << w))
++        xf.push_back({static_cast<std::uint16_t>(
++                          DOL_GX_XF_LIGHT_BASE + l * DOL_GX_RECOMP_LIGHT_WORDS + w),
++                      s.light_words[l][w]});
++  for (std::uint32_t i = 0; i < DOL_GX_RECOMP_CHAN_REG_COUNT; ++i)
++    if (s.chan_reg_mask & (1u << i))
++      xf.push_back({static_cast<std::uint16_t>(DOL_GX_XF_CHAN_REG_BASE + i),
++                    s.chan_regs[i]});
++  if (s.dualtex_valid)
++    xf.push_back({DOL_GX_XF_DUALTEX, s.dualtex_info});
++  for (std::uint32_t i = 0; i < DOL_GX_RECOMP_XF_REG_COUNT; ++i)
++    if (s.xf_reg_mask & (1ull << i))
++      xf.push_back({static_cast<std::uint16_t>(DOL_GX_XF_REG_WINDOW_BASE + i),
++                    s.xf_regs[i]});
++  emit_xf(out, xf);
++
++  // BP, in register order, except that each texmap's TLUT register goes
++  // before the texture registers: a texture picks up its palette when its
++  // image registers are written, from the TLUT loads (0x64) and TLUT register.
++  auto is_texmap_tlut = [](std::uint32_t reg) {
++    return (reg >= DOL_GX_BP_REG_TX_SETTLUT && reg < DOL_GX_BP_REG_TX_SETTLUT + 4u) ||
++           (reg >= DOL_GX_BP_REG_TX_SETTLUT_4 &&
++            reg < DOL_GX_BP_REG_TX_SETTLUT_4 + 4u);
++  };
++  for (std::uint32_t reg = 0; reg < 256u; ++reg) {
++    if (reg == 0x80u) {
++      for (std::uint32_t t = 0x80u; t < 0xC0u; ++t)
++        if (is_texmap_tlut(t) && s.bp_valid[t])
++          emit_bp(out, static_cast<std::uint8_t>(t), s.bp_regs[t]);
++    }
++    if (is_texmap_tlut(reg))
++      continue;
++    if (reg == DOL_GX_BP_REG_LOAD_TLUT0) {
++      for (std::uint32_t off = 0; off < DOL_GX_RECOMP_TMEM_TLUT_SLOTS; ++off) {
++        const DolGxRecompTlut& t = s.tmem_tluts[off];
++        if (!t.valid || t.entries < 16u)
++          continue;
++        emit_bp(out, DOL_GX_BP_REG_LOAD_TLUT0, t.physical_base >> 5u);
++        emit_bp(out, DOL_GX_BP_REG_LOAD_TLUT1,
++                off | ((static_cast<std::uint32_t>(t.entries) / 16u) << 10u));
++      }
++      if (s.bp_valid[reg])
++        emit_bp(out, static_cast<std::uint8_t>(reg), s.bp_regs[reg]);
++      continue;
++    }
++    if (!s.bp_valid[reg] || bp_is_trigger(reg))
++      continue;
++    if (reg >= 0xE0u && reg <= 0xE7u) {
++      // The pair's other half first, so the last write wins as it did.
++      const std::uint32_t last = (s.bp_regs[reg] >> 23u) & 1u;
++      if (tev_reg_seen_[last ^ 1u][reg - 0xE0u])
++        emit_bp(out, static_cast<std::uint8_t>(reg),
++                tev_reg_words_[last ^ 1u][reg - 0xE0u]);
++    }
++    emit_bp(out, static_cast<std::uint8_t>(reg), s.bp_regs[reg]);
++  }
++  return out;
++}
++
+ } // namespace gxruntime::aurora_recomp
+ 
+ extern "C" {
+diff --git a/graphics/gxcore/include/gxruntime/gxcore/gxcore.hpp b/graphics/gxcore/include/gxruntime/gxcore/gxcore.hpp
+index 4d14391..71dbfb2 100644
+--- a/graphics/gxcore/include/gxruntime/gxcore/gxcore.hpp
++++ b/graphics/gxcore/include/gxruntime/gxcore/gxcore.hpp
+@@ -129,6 +129,10 @@ public:
+       const gxruntime::aurora_recomp::RenderPacket& packet) override;
+   // Frame boundary: plan the final pending draw of the frame.
+   void flush_frame();
++  // Forget all register state and any pending draw (a save-state load); keeps
++  // the observers, resolver and counters. The frontend feeding this sink must
++  // be reset too: packet sequence numbers restart.
++  void reset();
+ 
+   const GapCounters& counters() const { return counters_; }
+   GapCounters& counters() { return counters_; }
+diff --git a/graphics/gxcore/src/gxcore.cpp b/graphics/gxcore/src/gxcore.cpp
+index 2fb6944..7fefce3 100644
+--- a/graphics/gxcore/src/gxcore.cpp
++++ b/graphics/gxcore/src/gxcore.cpp
+@@ -112,4 +112,12 @@ bool GxCoreSink::submit_packet(const ar::RenderPacket& packet) {
+ 
+ void GxCoreSink::flush_frame() { consumer_.flush_assembly(); }
+ 
++void GxCoreSink::reset() {
++  consumer_.reset();
++  live_state_.reset();
++  pending_state_.reset();
++  cached_attrs_ = {};
++  cached_zslope_ = {};
++}
++
+ } // namespace gxruntime::gxcore
 diff --git a/graphics/gxcore/src/plan.cpp b/graphics/gxcore/src/plan.cpp
 index c3d1557..e28b1d5 100644
 --- a/graphics/gxcore/src/plan.cpp
@@ -155,11 +642,31 @@ index bbefbee..8297108 100644
    emit(out, "    o.pos = clip;\n");
    // Vertex colors (Dolphin VertexShaderGen WriteVertexBody). First select each
    // channel's vertex color with the GX presence rules: channel 0 prefers
+diff --git a/include/gxruntime/aram.h b/include/gxruntime/aram.h
+index 9c2f7bb..6dd6411 100644
+--- a/include/gxruntime/aram.h
++++ b/include/gxruntime/aram.h
+@@ -31,4 +31,7 @@ void aram_write(u32 ea, u64 value, u8 size);
+ void aram_dma_to_aram(const u8* ram, u32 ram_addr, u32 aram_addr, u32 length);
+ void aram_dma_to_ram(u8* ram, u32 ram_addr, u32 aram_addr, u32 length);
+ 
++// The whole ARAM_SIZE-byte buffer, for save states (NULL before aram_init).
++u8* aram_memory(void);
++
+ #endif
 diff --git a/include/gxruntime/aurora_backend.h b/include/gxruntime/aurora_backend.h
-index 6ef4cf4..29d315d 100644
+index 6ef4cf4..8ed36d4 100644
 --- a/include/gxruntime/aurora_backend.h
 +++ b/include/gxruntime/aurora_backend.h
-@@ -26,6 +26,11 @@ bool dol_aurora_initialize(int argc, char** argv,
+@@ -5,6 +5,7 @@
+ #include "gxruntime/platform.h"
+ 
+ #include <stdbool.h>
++#include <stddef.h>
+ #include <stdint.h>
+ 
+ #ifdef __cplusplus
+@@ -26,6 +27,11 @@ bool dol_aurora_initialize(int argc, char** argv,
                             const AuroraBackendConfig* config);
  void dol_aurora_shutdown(void);
  
@@ -171,6 +678,39 @@ index 6ef4cf4..29d315d 100644
  // Optional: after each present, push latest present-source RGBA8 into software
  // EFB (e.g. Strikers mmio_efb + dol_efb_access_fill_color_rgba8). Enables
  // continuous framebuffer readback while registered. NULL clears.
+@@ -40,6 +46,32 @@ void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user);
+ // from shutdown (second call only bumps if counters grew).
+ void dol_aurora_flush_gap_report(void);
+ 
++// Save-state support (the game's quick save/load).
++// Whether a key is held now, by SDL scancode (USB HID usage: '1' = 30,
++// '2' = 31). Reads the keyboard state the event pump keeps; false when the
++// window does not have focus.
++bool dol_aurora_key_down(int sdl_scancode);
++// True when the GX FIFO decoder holds no partial command, so the guest is
++// between GX commands too: the only point where a state can be taken or
++// replaced without the decoder misreading the bytes that follow.
++bool dol_aurora_gx_idle(void);
++// The presentation state the guest set through VI calls (render mode, XFB
++// addresses, black), as a fixed-size blob.
++size_t dol_aurora_state_size(void);
++void dol_aurora_state_save(void* out);
++void dol_aurora_state_load(const void* in);
++// The GPU's register state, as the GX FIFO commands that rebuild it (CP, XF
++// and BP loads; see RetailGxFrontend::state_preamble). Save returns the size
++// and copies when `capacity` allows (call with NULL first); 0 when the
++// decoder has nothing to give. Load restarts the decoder and replays them.
++// The game sets much of this once (copy setup, vertex formats, fog), so
++// without it a loaded game draws from whatever the decoder last saw.
++size_t dol_aurora_gx_state_save(void* out, size_t capacity);
++bool dol_aurora_gx_state_load(const void* in, size_t size);
++// After a load: drop caches keyed by guest addresses (EFB-copy and XFB
++// textures) and audio queued from the abandoned timeline.
++void dol_aurora_state_loaded(void);
++
+ #ifdef __cplusplus
+ }
+ #endif
 diff --git a/include/gxruntime/ax_host.h b/include/gxruntime/ax_host.h
 index 3731914..694a939 100644
 --- a/include/gxruntime/ax_host.h
@@ -186,6 +726,32 @@ index 3731914..694a939 100644
  void dol_ax_host_reset_stats(DolAxHost* ax);
  const DolAxHostStats* dol_ax_host_stats(const DolAxHost* ax);
  
+diff --git a/include/gxruntime/memory_card.h b/include/gxruntime/memory_card.h
+index 6aae990..3ec26bf 100644
+--- a/include/gxruntime/memory_card.h
++++ b/include/gxruntime/memory_card.h
+@@ -104,6 +104,9 @@ DolCardResult dol_card_set_status(DolMemoryCard* card, s32 file_no,
+ u64 dol_card_serial(const DolMemoryCard* card);
+ s32 dol_card_last_result(const DolMemoryCard* card);
+ u32 dol_card_transferred_bytes(const DolMemoryCard* card);
++// Whether the guest has the card mounted (dol_card_mount/unmount). Save states
++// carry it, since the guest's own CARD state assumes it.
++bool dol_card_mounted(const DolMemoryCard* card);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/src/aram.c b/src/aram.c
+index 264500b..e65e613 100644
+--- a/src/aram.c
++++ b/src/aram.c
+@@ -65,3 +65,7 @@ void aram_dma_to_ram(u8* ram, u32 ram_addr, u32 aram_addr, u32 length) {
+     for (u32 i = 0; i < length; i++)
+         ram[r + i] = g_aram[(off + i) & (ARAM_SIZE - 1u)];
+ }
++
++u8* aram_memory(void) {
++    return g_aram;
++}
 diff --git a/src/ax_host.c b/src/ax_host.c
 index 2c0e5ff..424acdb 100644
 --- a/src/ax_host.c
@@ -285,3 +851,168 @@ index 2c0e5ff..424acdb 100644
  void dol_ax_host_set_log(DolAxHost* ax, bool enabled) {
      if (ax != NULL)
          ax->log = enabled;
+diff --git a/src/core/cpu.c b/src/core/cpu.c
+index 2f13110..d041156 100644
+--- a/src/core/cpu.c
++++ b/src/core/cpu.c
+@@ -180,6 +180,37 @@ u64 mem_read64(CPUState* cpu, u32 addr) {
+     return read_be64(host);
+ }
+ 
++// ED_STORE_WATCH=addr[:len] (debug): report guest stores into the range with
++// the storing instruction, to find what overwrites guest memory.
++static int g_store_watch = -1;
++static u32 g_store_watch_lo, g_store_watch_len;
++static unsigned g_store_watch_hits;
++
++static void store_watch(CPUState* cpu, u32 addr, u32 size, u64 value) {
++    if (g_store_watch < 0) {
++        const char* env = getenv("ED_STORE_WATCH");
++        g_store_watch = env != NULL && env[0] != '\0';
++        char* end = NULL;
++        g_store_watch_lo = g_store_watch ? (u32)strtoul(env, &end, 0) : 0u;
++        g_store_watch_len = g_store_watch && end != NULL && *end == ':'
++                                ? (u32)strtoul(end + 1, NULL, 0)
++                                : 4u;
++    }
++    if (!g_store_watch)
++        return;
++    const u32 a = addr | 0x80000000u, lo = g_store_watch_lo | 0x80000000u;
++    if (a + size <= lo || a >= lo + g_store_watch_len || g_store_watch_hits >= 32u)
++        return;
++    g_store_watch_hits++;
++    fprintf(stderr,
++            "[store-watch] pc=0x%08X lr=0x%08X addr=0x%08X size=%u value=0x%llX "
++            "r1=0x%08X r26=0x%08X r27=0x%08X r28=0x%08X r29=0x%08X r30=0x%08X "
++            "r31=0x%08X\n",
++            cpu->pc, cpu->lr, addr, size, (unsigned long long)value, cpu->gpr[1],
++            cpu->gpr[26], cpu->gpr[27], cpu->gpr[28], cpu->gpr[29], cpu->gpr[30],
++            cpu->gpr[31]);
++}
++
+ void mem_write64(CPUState* cpu, u32 addr, u64 value) {
+     u32 avail;
+     u8* host = resolve_addr(cpu, addr, &avail);
+@@ -191,6 +222,8 @@ void mem_write64(CPUState* cpu, u32 addr, u64 value) {
+         fprintf(stderr, "warn: write64 to unmapped 0x%08X\n", addr);
+         return;
+     }
++    if (g_store_watch != 0)
++        store_watch(cpu, addr, 8u, value);
+     clear_matching_reservation(cpu, addr);
+     write_be64(host, value);
+ }
+@@ -218,6 +251,8 @@ void mem_write32(CPUState* cpu, u32 addr, u32 value) {
+         fprintf(stderr, "warn: write32 to unmapped 0x%08X\n", addr);
+         return;
+     }
++    if (g_store_watch != 0)
++        store_watch(cpu, addr, 4u, value);
+     clear_matching_reservation(cpu, addr);
+     write_be32(host, value);
+ }
+@@ -245,6 +280,8 @@ void mem_write16(CPUState* cpu, u32 addr, u16 value) {
+         fprintf(stderr, "warn: write16 to unmapped 0x%08X\n", addr);
+         return;
+     }
++    if (g_store_watch != 0)
++        store_watch(cpu, addr, 2u, value);
+     clear_matching_reservation(cpu, addr);
+     write_be16(host, value);
+ }
+@@ -272,6 +309,8 @@ void mem_write8(CPUState* cpu, u32 addr, u8 value) {
+         fprintf(stderr, "warn: write8 to unmapped 0x%08X\n", addr);
+         return;
+     }
++    if (g_store_watch != 0)
++        store_watch(cpu, addr, 1u, value);
+     clear_matching_reservation(cpu, addr);
+     *host = value;
+ }
+diff --git a/src/gap_report.c b/src/gap_report.c
+index f4e48e8..507cfb5 100644
+--- a/src/gap_report.c
++++ b/src/gap_report.c
+@@ -25,6 +25,22 @@ static GapEntry g_entries[GAP_MAX_ENTRIES];
+ static size_t g_count = 0;
+ static uint64_t g_overflow = 0;
+ 
++// Hash index over g_entries: a game can hit one unhandled path every frame or
++// every access, and a linear strncmp scan of a full table made each hit cost
++// thousands of compares. Open addressing; slots hold entry index + 1.
++#define GAP_HASH_SLOTS 4096u
++static uint16_t g_hash[GAP_HASH_SLOTS];
++
++static uint32_t hash_str(uint32_t h, const char* s) {
++    for (size_t i = 0; i < GAP_STR && s[i] != '\0'; i++)
++        h = (h ^ (uint8_t)s[i]) * 16777619u;
++    return h * 16777619u;
++}
++
++static uint32_t hash_tuple(const char* lane, const char* kind, const char* key) {
++    return hash_str(hash_str(hash_str(2166136261u, lane), kind), key);
++}
++
+ static void copy_str(char* dst, size_t cap, const char* src) {
+     if (src == NULL) {
+         dst[0] = '\0';
+@@ -80,14 +96,16 @@ GapReportClass gap_report_classify(const char* lane, const char* kind,
+ void gap_report_reset(void) {
+     g_count = 0;
+     g_overflow = 0;
++    memset(g_hash, 0, sizeof g_hash);
+ }
+ 
+ void gap_report_add(const char* lane, const char* kind, const char* key,
+                     uint32_t first_pc, const char* notes, uint64_t occurrences) {
+     if (lane == NULL || kind == NULL || key == NULL || occurrences == 0u)
+         return;
+-    for (size_t i = 0; i < g_count; ++i) {
+-        GapEntry* e = &g_entries[i];
++    uint32_t slot = hash_tuple(lane, kind, key) & (GAP_HASH_SLOTS - 1u);
++    for (; g_hash[slot] != 0u; slot = (slot + 1u) & (GAP_HASH_SLOTS - 1u)) {
++        GapEntry* e = &g_entries[g_hash[slot] - 1u];
+         if (strncmp(e->lane, lane, GAP_STR) == 0 &&
+             strncmp(e->kind, kind, GAP_STR) == 0 &&
+             strncmp(e->key, key, GAP_STR) == 0) {
+@@ -99,6 +117,16 @@ void gap_report_add(const char* lane, const char* kind, const char* key,
+         g_overflow += 1u;
+         return;
+     }
++    {
++        // ED_GAP_LOG=1: print each distinct gap the first time it happens.
++        static int log = -1;
++        if (log < 0)
++            log = getenv("ED_GAP_LOG") != NULL;
++        if (log)
++            fprintf(stderr, "[gap] %s %s %s pc=0x%08X %s\n", lane, kind, key,
++                    first_pc, notes != NULL ? notes : "");
++    }
++    g_hash[slot] = (uint16_t)(g_count + 1u);
+     GapEntry* e = &g_entries[g_count++];
+     copy_str(e->lane, GAP_STR, lane);
+     copy_str(e->kind, GAP_STR, kind);
+diff --git a/src/memory_card.c b/src/memory_card.c
+index d6d25ab..b632f98 100644
+--- a/src/memory_card.c
++++ b/src/memory_card.c
+@@ -671,3 +671,7 @@ s32 dol_card_last_result(const DolMemoryCard* card) {
+ u32 dol_card_transferred_bytes(const DolMemoryCard* card) {
+     return card != NULL ? card->transferred_bytes : 0;
+ }
++
++bool dol_card_mounted(const DolMemoryCard* card) {
++    return card != NULL && card->mounted;
++}
+diff --git a/src/mmio_bus.c b/src/mmio_bus.c
+index 9a0cb9f..00f4e97 100644
+--- a/src/mmio_bus.c
++++ b/src/mmio_bus.c
+@@ -4,6 +4,7 @@
+ #include "gxruntime/gap_report.h"
+ 
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <string.h>
+ 
+ // Classify a guest MMIO effective address into its GameCube hardware block, for

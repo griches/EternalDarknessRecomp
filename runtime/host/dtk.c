@@ -179,3 +179,57 @@ u32 dtk_mix(s16* out, u32 frames, u32 out_rate, u32 stream_rate,
     }
     return consumed;
 }
+
+// ---------------------------------------------------------------------------
+// Quick state (host/quickstate.c)
+// ---------------------------------------------------------------------------
+// The streams and decoder position. The block buffer is only a read cache of
+// the image, so a load invalidates it instead.
+typedef struct {
+    DtkStream current;
+    DtkStream next;
+    u32 position;
+    bool stop_at_end;
+    s32 hist_l1, hist_l2, hist_r1, hist_r2;
+    s16 pcm[BLOCK_SAMPLES * 2u];
+    u32 pcm_pos;
+    u32 phase;
+} DtkQuickState;
+
+size_t dtk_state_size(void) {
+    return sizeof(DtkQuickState);
+}
+
+void dtk_state_save(void* out) {
+    DtkQuickState s;
+    memset(&s, 0, sizeof s);
+    s.current = g_current;
+    s.next = g_next;
+    s.position = g_position;
+    s.stop_at_end = g_stop_at_end;
+    s.hist_l1 = g_hist_l1;
+    s.hist_l2 = g_hist_l2;
+    s.hist_r1 = g_hist_r1;
+    s.hist_r2 = g_hist_r2;
+    memcpy(s.pcm, g_pcm, sizeof s.pcm);
+    s.pcm_pos = g_pcm_pos;
+    s.phase = g_phase;
+    memcpy(out, &s, sizeof s);
+}
+
+void dtk_state_load(const void* in) {
+    DtkQuickState s;
+    memcpy(&s, in, sizeof s);
+    g_current = s.current;
+    g_next = s.next;
+    g_position = s.position;
+    g_stop_at_end = s.stop_at_end;
+    g_hist_l1 = s.hist_l1;
+    g_hist_l2 = s.hist_l2;
+    g_hist_r1 = s.hist_r1;
+    g_hist_r2 = s.hist_r2;
+    memcpy(g_pcm, s.pcm, sizeof g_pcm);
+    g_pcm_pos = s.pcm_pos <= BLOCK_SAMPLES ? s.pcm_pos : BLOCK_SAMPLES;
+    g_phase = s.phase;
+    g_blocks_start = 0xFFFFFFFFu;
+}

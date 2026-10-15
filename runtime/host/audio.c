@@ -295,3 +295,57 @@ void audio_skip_dsp_init(CPUState* cpu) {
     mem_write32(cpu, MUSYX_DSP_DONE, 1);
     mem_write32(cpu, ED_MUSYX_DSP_INIT_DONE, 1);
 }
+
+// ---------------------------------------------------------------------------
+// Quick state (host/quickstate.c)
+// ---------------------------------------------------------------------------
+// The AI/DSP device and the AI stream registers. The AX mixer keeps nothing
+// between command lists (voice state lives in the guest's parameter blocks),
+// so it is not saved. The DMA pacing (blocks or wall clock) is this process's.
+typedef struct {
+    DolAudioDma dma;
+    u32 ai_stream_control;
+    u32 ai_volume;
+    u32 ai_sample_counter;
+    u32 ai_interrupt_timing;
+    u32 ai_counter_fraction;
+    bool waiting_for_command_list;
+} AudioQuickState;
+
+size_t audio_state_size(void) {
+    return sizeof(AudioQuickState);
+}
+
+void audio_state_save(void* out) {
+    AudioQuickState s;
+    memset(&s, 0, sizeof s);
+    memcpy(&s.dma, &g_audio_dma, sizeof s.dma);
+    s.ai_stream_control = g_ai_stream_control;
+    s.ai_volume = g_ai_volume;
+    s.ai_sample_counter = g_ai_sample_counter;
+    s.ai_interrupt_timing = g_ai_interrupt_timing;
+    s.ai_counter_fraction = g_ai_counter_fraction;
+    s.waiting_for_command_list = g_waiting_for_command_list;
+    memcpy(out, &s, sizeof s);
+}
+
+void audio_state_load(const void* in) {
+    AudioQuickState s;
+    memcpy(&s, in, sizeof s);
+    const DolAudioDma live = g_audio_dma;
+    g_audio_dma = s.dma;
+    g_audio_dma.work_units_per_second = live.work_units_per_second;
+    g_audio_dma.work_units_per_frame = live.work_units_per_frame;
+    g_audio_dma.refresh_hz = live.refresh_hz;
+    // Recomputes the per-chunk work for this process's pacing.
+    dol_audio_dma_set_sample_rate(&g_audio_dma, s.dma.sample_rate);
+    if (g_audio_dma.work_counter >= g_audio_dma.work_units_per_chunk)
+        g_audio_dma.work_counter = 0;
+    dol_platform_audio_set_sample_rate(g_audio_dma.sample_rate);
+    g_ai_stream_control = s.ai_stream_control;
+    g_ai_volume = s.ai_volume;
+    g_ai_sample_counter = s.ai_sample_counter;
+    g_ai_interrupt_timing = s.ai_interrupt_timing;
+    g_ai_counter_fraction = s.ai_counter_fraction;
+    g_waiting_for_command_list = s.waiting_for_command_list;
+}

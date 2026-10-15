@@ -86,6 +86,8 @@ static unsigned g_movie_texobj_log_count = 0;
 // Synchronous host operations with a guest completion callback can instead
 // tail-call that callback and let its normal `blr` return to the same caller.
 static bool g_hle_tail_call = false;
+// Set by an intercept that declines the call: the recompiled function runs.
+static bool g_hle_passthrough = false;
 
 static char* input_script_trim(char* text) {
     while (*text == ' ' || *text == '\t' || *text == '\n' || *text == '\r')
@@ -172,22 +174,30 @@ static void parse_input_script(const char* text) {
 }
 
 // ED_SKIP_INTRO=1 (testing): tap A every 16 frames to skip the intro movies,
-// and stop once the opening movie (fmv0001) is over, leaving the pad to the
-// player for the language and memory-card prompts. The game opens a non-movie
-// file (/UMemcardText.bin) as soon as fmv0001 ends.
+// and stop once they are over, leaving the pad to the player for the language
+// and memory-card prompts and the title. Two ways the intro ends: fmv0001 plays
+// and a non-movie file opens after it, or A on the Poe quote skips the movies
+// and the title loads /UBookInv.tpl after the second /UMemcardText.bin open
+// (boot opens both once before that).
 static bool g_skip_intro;
 static bool g_skip_intro_done;
 static bool g_skip_intro_armed;
+static unsigned g_skip_intro_memcard_text;
 
-static void skip_intro_note_open(const char* path) {
+static void skip_intro_note_open(const CPUState* cpu, const char* path) {
     if (!g_skip_intro || g_skip_intro_done)
         return;
+    if (strstr(path, "/UMemcardText.bin"))
+        g_skip_intro_memcard_text++;
     if (strstr(path, "/fmv/fmv0001."))
         g_skip_intro_armed = true;
-    else if (g_skip_intro_armed && !strstr(path, "/fmv/")) {
+    else if ((g_skip_intro_armed && !strstr(path, "/fmv/")) ||
+             (g_skip_intro_memcard_text >= 2u &&
+              strstr(path, "/UBookInv.tpl"))) {
         g_skip_intro_done = true;
-        fprintf(stderr, "[input] opening movie over (%s); skip-intro off\n",
-                path);
+        fprintf(stderr,
+                "[input] opening movie over (%s) at frame %llu; skip-intro off\n",
+                path, (unsigned long long)(cpu->timebase / 675000ull));
     }
 }
 
@@ -662,6 +672,31 @@ static void hle_salInitDsp(CPUState* cpu) {
 // synthetic CPU-window base made every stream allocation fail. GXRuntime's ARAM
 // accepts plain offsets.
 #define ARAM_USER_BASE 0x4000u
+// ED_WATCH=addr[:len] (debug): report every host transfer into guest RAM that
+// overlaps the range (disc reads, ARAM to RAM), with the caller.
+static void watch_host_write(CPUState* cpu, const char* what, u32 dest,
+                             u32 length) {
+    static int armed = -1;
+    static u32 watch, watch_len;
+    if (armed < 0) {
+        const char* env = getenv("ED_WATCH");
+        armed = env != NULL && env[0] != '\0';
+        char* end = NULL;
+        watch = armed ? (u32)strtoul(env, &end, 0) | 0x80000000u : 0u;
+        watch_len = armed && end != NULL && *end == ':'
+                        ? (u32)strtoul(end + 1, NULL, 0)
+                        : 1u;
+    }
+    if (!armed)
+        return;
+    const u32 d = dest | 0x80000000u;
+    if (d < watch + watch_len && watch < d + length)
+        fprintf(stderr, "[watch] %s writes 0x%08X..0x%08X (len 0x%X) lr=0x%08X "
+                        "pc=0x%08X frame=%llu\n",
+                what, dest, dest + length, length, cpu->lr, cpu->pc,
+                (unsigned long long)(cpu->timebase / 675000ull));
+}
+
 // ED_ARAM_LOG=1: every host ARAM transfer, to find who owns an ARAM range.
 static void aram_log(CPUState* cpu, const char* path, u32 type, u32 mainmem,
                      u32 aram, u32 length) {
@@ -691,6 +726,7 @@ static void hle_ARStartDMA(CPUState* cpu) {
     if (type == 0)
         aram_dma_to_aram(cpu->ram, mainmem, aram, length);
     else
+        watch_host_write(cpu, "ARStartDMA", mainmem, length);
         aram_dma_to_ram(cpu->ram, mainmem, aram, length);
 }
 
@@ -739,6 +775,7 @@ static void hle_ARQPostRequest(CPUState* cpu) {
         aram_dma_to_aram(cpu->ram, source, destination, length);
     } else {
         aram_log(cpu, "ARQPostRequest", 1, destination, source, length);
+        watch_host_write(cpu, "ARQPostRequest", destination, length);
         aram_dma_to_ram(cpu->ram, destination, source, length);
     }
     if (callback) {
@@ -865,8 +902,9 @@ static void hle_DVDOpen(CPUState* cpu) {
         return;
     }
     if (g_dvd_log)
-        fprintf(stderr, "[dvd] open '%s'\n", path);
-    skip_intro_note_open(path);
+        fprintf(stderr, "[dvd] open '%s' (frame %llu)\n", path,
+                (unsigned long long)(cpu->timebase / 675000ull));
+    skip_intro_note_open(cpu, path);
     hle_DVDFastOpen(cpu);
 }
 
@@ -897,6 +935,7 @@ static void hle_DVDReadAsyncPrio(CPUState* cpu) {
     if (g_hle_log)
         fprintf(stderr, "[dvd] read addr=0x%08X len=%u disc=0x%08X cb=0x%08X\n",
                 addr, length, start + offset, callback);
+    watch_host_write(cpu, "DVDReadAsyncPrio", addr, length);
     dvd_read_to_guest(cpu, addr, start + offset, length);
     mem_write32(cpu, fi + DVD_FI_CALLBACK, callback);
     dvd_complete(cpu, fi, callback, (s32)length, length);
@@ -913,6 +952,7 @@ static void hle_DVDReadPrio(CPUState* cpu) {
         fprintf(stderr, "[dvd] readprio addr=0x%08X len=%u disc=0x%08X lr=0x%08X\n",
                 addr, length, mem_read32(cpu, fi + DVD_FI_STARTADDR) + offset,
                 cpu->lr);
+    watch_host_write(cpu, "DVDReadPrio", addr, length);
     dvd_read_to_guest(cpu, addr, mem_read32(cpu, fi + DVD_FI_STARTADDR) + offset, length);
     dvd_complete(cpu, fi, 0, 0, length);
     hle_set_u32(cpu, length);
@@ -926,6 +966,7 @@ static void hle_DVDReadAbsAsyncPrio(CPUState* cpu) {
     if (g_hle_log)
         fprintf(stderr, "[dvd] readabs addr=0x%08X len=%u disc=0x%08X cb=0x%08X\n",
                 addr, length, hle_arg_u32(cpu, 3), hle_arg_u32(cpu, 4));
+    watch_host_write(cpu, "DVDReadAbsAsyncPrio", addr, length);
     dvd_read_to_guest(cpu, addr, hle_arg_u32(cpu, 3), length);
     dvd_complete(cpu, block, hle_arg_u32(cpu, 4), (s32)length, length);
     hle_set_u32(cpu, 1);
@@ -1834,7 +1875,20 @@ static void hle_PSMTXConcat(CPUState* cpu) {
 
 // GXSetArray(GXAttr attr, void* base, u8 stride). Replace the hardware CP-base
 // write with Aurora's extended command carrying a real host pointer.
+// While the game records a display list (the CPU FIFO points at its buffer,
+// not the GPU), the ED_GX_HLE shortcuts below step aside so the real SDK
+// functions write their real commands into the list: the shortcuts feed the
+// renderer directly and would leave the recorded list short of its commands.
+static bool gx_recording_display_list(void) {
+    if (mmio_cpu_fifo_feeds_gpu())
+        return false;
+    g_hle_passthrough = true;
+    return true;
+}
+
 static void hle_GXSetArray(CPUState* cpu) {
+    if (gx_recording_display_list())
+        return;
     u32 attr = hle_arg_u32(cpu, 0);
     u32 address = hle_arg_u32(cpu, 1);
     u8 stride = (u8)hle_arg_u32(cpu, 2);
@@ -1929,6 +1983,8 @@ static void continue_GXCallDisplayList(CPUState* cpu) {
 }
 
 static void hle_GXCallDisplayList(CPUState* cpu) {
+    if (gx_recording_display_list())
+        return;
     if (g_display_list_call.active) {
         fprintf(stderr, "[gx] nested GXCallDisplayList host continuation\n");
         return;
@@ -1975,6 +2031,8 @@ static void continue_GXBegin(CPUState* cpu) {
 }
 
 static void hle_GXBegin(CPUState* cpu) {
+    if (gx_recording_display_list())
+        return;
     if (g_gx_begin.active) {
         fprintf(stderr, "[gx] nested GXBegin host continuation\n");
         cpu->pc = cpu->lr;
@@ -3632,6 +3690,18 @@ static void notify_GXSetDrawSync(CPUState* cpu) {
     interrupt_commit_pe_token((u16)hle_arg_u32(cpu, 0));
 }
 
+static void notify_PPCMtwpar(CPUState* cpu) {
+    (void)cpu;
+    mmio_write_gather_reset();
+}
+
+// The breakpoint moves to the current write pointer: the GPU can now run up to
+// there, through the tokens held behind the old breakpoint (interrupt.c).
+static void notify_GXEnableBreakPt(CPUState* cpu) {
+    (void)cpu;
+    interrupt_gp_breakpoint_moved();
+}
+
 static void notify_OSSleepThread(CPUState* cpu) {
     if (hle_arg_u32(cpu, 0) == GX_FINISH_QUEUE)
         interrupt_commit_pe_finish();
@@ -4055,6 +4125,8 @@ static const HleAddrEntry kNotify[] = {
     { 0u, notify_OSSleepThread,  "OSSleepThread" },
     { 0u, notify_GXSetDrawSync,  "GXSetDrawSync" },
     { 0u, notify_GXSetDrawDone,  "GXSetDrawDone" },
+    { 0u, notify_GXEnableBreakPt, "GXEnableBreakPt" },
+    { 0u, notify_PPCMtwpar,       "PPCMtwpar" },
     { 0u, notify_DSPSendMailToDSP, "DSPSendMailToDSP" },
     // B2.1: full certificate-demanded MusyX API surface (notify-only counters).
     { 0u, notify_audio_api, "sndInit" },
@@ -4261,10 +4333,13 @@ static bool hle_dispatch(CPUState* cpu, u32 address) {
                     name != NULL ? name : "(unnamed)", address);
         }
         g_hle_tail_call = false;
+        g_hle_passthrough = false;
         entry->intercept(cpu);
-        if (!g_hle_tail_call)
-            hle_return(cpu);
-        return true;
+        if (!g_hle_passthrough) {
+            if (!g_hle_tail_call)
+                hle_return(cpu);
+            return true;
+        }
     }
 
     // Observe-only hooks: drive host state, then fall through so the recompiled
@@ -4328,6 +4403,7 @@ void hle_install(CPUState* cpu) {
     g_skip_intro = getenv("ED_SKIP_INTRO") != NULL;
     g_skip_intro_done = false;
     g_skip_intro_armed = false;
+    g_skip_intro_memcard_text = 0;
     g_trace_fn_count = 0;
     if (getenv("ED_TRACE_FN") != NULL) {
         char names[512];
@@ -4407,3 +4483,117 @@ void hle_install(CPUState* cpu) {
 #endif
     cpu->host_call = hle_dispatch;
 }
+
+// ---------------------------------------------------------------------------
+// Quick state (host/quickstate.c)
+// ---------------------------------------------------------------------------
+// The host halves of guest operations in flight: queued and running completion
+// callbacks (with the context a running one returns to), the DVD current
+// directory, skip-intro progress, and whether the card is mounted. The card's
+// contents are not part of a state: loading one never rewrites saves.
+typedef struct {
+    HlePendingCallback callback_queue[HLE_CALLBACK_QUEUE_CAPACITY];
+    u32 callback_read;
+    u32 callback_count;
+    bool callback_active;
+    HleSavedContext callback_context;
+    u32 irq_stage;
+    u32 irq_context;
+    HlePendingCallback irq_pending;
+    char dvd_cwd[sizeof g_dvd_cwd];
+    bool skip_intro_done;
+    bool skip_intro_armed;
+    bool card_mounted;
+} HleQuickState;
+
+size_t hle_state_size(void) {
+    return sizeof(HleQuickState);
+}
+
+void hle_state_save(void* out) {
+    HleQuickState s;
+    memset(&s, 0, sizeof s);
+    memcpy(s.callback_queue, g_callback_queue, sizeof s.callback_queue);
+    s.callback_read = g_callback_read;
+    s.callback_count = g_callback_count;
+    s.callback_active = g_callback_active;
+    memcpy(&s.callback_context, &g_callback_context, sizeof s.callback_context);
+    s.irq_stage = g_irq_callback.stage;
+    s.irq_context = g_irq_callback.context;
+    s.irq_pending = g_irq_callback.pending;
+    snprintf(s.dvd_cwd, sizeof s.dvd_cwd, "%s", g_dvd_cwd);
+    s.skip_intro_done = g_skip_intro_done;
+    s.skip_intro_armed = g_skip_intro_armed;
+    s.card_mounted = dol_card_mounted(g_memory_card);
+    memcpy(out, &s, sizeof s);
+}
+
+void hle_state_load(const void* in) {
+    HleQuickState s;
+    memcpy(&s, in, sizeof s);
+    memcpy(g_callback_queue, s.callback_queue, sizeof g_callback_queue);
+    g_callback_read = s.callback_read % HLE_CALLBACK_QUEUE_CAPACITY;
+    g_callback_count = s.callback_count <= HLE_CALLBACK_QUEUE_CAPACITY
+                           ? s.callback_count
+                           : 0u;
+    g_callback_active = s.callback_active;
+    memcpy(&g_callback_context, &s.callback_context, sizeof g_callback_context);
+    g_irq_callback.stage = s.irq_stage;
+    g_irq_callback.context = s.irq_context;
+    g_irq_callback.pending = s.irq_pending;
+    s.dvd_cwd[sizeof s.dvd_cwd - 1u] = '\0';
+    snprintf(g_dvd_cwd, sizeof g_dvd_cwd, "%s",
+             s.dvd_cwd[0] == '/' ? s.dvd_cwd : "/");
+    g_skip_intro_done = s.skip_intro_done;
+    g_skip_intro_armed = s.skip_intro_armed;
+    // The guest's CARD library remembers mounting; match the host card to it.
+    if (g_memory_card != NULL && dol_card_mounted(g_memory_card) != s.card_mounted) {
+        if (s.card_mounted)
+            dol_card_mount(g_memory_card);
+        else
+            dol_card_unmount(g_memory_card);
+    }
+}
+
+// The multi-stage GX shortcuts (ED_GX_HLE=1) exist only in the windowed build,
+// so their stage state is a section of its own. NULL: the state has none.
+#ifdef ED_AURORA
+typedef struct {
+    HleDisplayListCall display_list_call;
+    HleGxBegin gx_begin;
+} HleGxQuickState;
+
+size_t hle_gx_state_size(void) {
+    return sizeof(HleGxQuickState);
+}
+
+void hle_gx_state_save(void* out) {
+    HleGxQuickState s;
+    memset(&s, 0, sizeof s);
+    memcpy(&s.display_list_call, &g_display_list_call, sizeof s.display_list_call);
+    memcpy(&s.gx_begin, &g_gx_begin, sizeof s.gx_begin);
+    memcpy(out, &s, sizeof s);
+}
+
+void hle_gx_state_load(const void* in) {
+    HleGxQuickState s;
+    if (in != NULL)
+        memcpy(&s, in, sizeof s);
+    else
+        memset(&s, 0, sizeof s);
+    g_display_list_call = s.display_list_call;
+    g_gx_begin = s.gx_begin;
+}
+#else
+size_t hle_gx_state_size(void) {
+    return 0;
+}
+
+void hle_gx_state_save(void* out) {
+    (void)out;
+}
+
+void hle_gx_state_load(const void* in) {
+    (void)in;
+}
+#endif

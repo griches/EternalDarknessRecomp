@@ -179,6 +179,8 @@ void interrupt_init(void) {
 #ifdef ED_AURORA
     wall_clock = true;
 #endif
+    if (getenv("ED_WALL_CLOCK") != NULL)
+        wall_clock = true;  // headless at real speed, to compare timing
     const char* env = getenv("ED_FRAME_BLOCKS");
     if (env != NULL && env[0] != '\0') {
         char* end = NULL;
@@ -237,9 +239,52 @@ void interrupt_commit_pe_finish(void) {
 #define PE_FINISH_ACK_BIT 0x0008u
 static u16 pe_ctrl_enables;
 
-void interrupt_commit_pe_token(u16 token) {
+// GP breakpoint (GXEnableBreakPt). This game keeps the GPU a frame behind: a
+// frame ends by moving the breakpoint to the FIFO write pointer and queueing
+// token 0xCACE after it, so the GPU stops short of the token and only runs that
+// frame once the next frame end moves the breakpoint on (then reaching the
+// frame's closing token 0xBEEF). Loading waits for the token to leave 0xCACE.
+// The host GPU runs commands as they arrive, so only the draw-sync tokens
+// queued behind an armed breakpoint are held back, in order, until it moves or
+// is switched off.
+#define GP_HELD_TOKENS_MAX 8u
+static bool gp_breakpoint_armed;
+static u16 gp_held_tokens[GP_HELD_TOKENS_MAX];
+static u32 gp_held_count;
+
+static void commit_pe_token_now(u16 token) {
     mmio_set_pe_token(token);
     dol_interrupts_set_source(&interrupts, DOL_PI_CAUSE_PE_TOKEN, true);
+}
+
+static void gp_release_held_tokens(void) {
+    for (u32 i = 0; i < gp_held_count; i++)
+        commit_pe_token_now(gp_held_tokens[i]);
+    gp_held_count = 0;
+}
+
+void interrupt_gp_breakpoint_moved(void) {
+    gp_release_held_tokens();
+}
+
+void interrupt_gp_breakpoint_enable(bool enabled) {
+    if (!enabled && gp_breakpoint_armed)
+        gp_release_held_tokens();
+    gp_breakpoint_armed = enabled;
+}
+
+void interrupt_commit_pe_token(u16 token) {
+    if (!gp_breakpoint_armed) {
+        commit_pe_token_now(token);
+        return;
+    }
+    if (gp_held_count == GP_HELD_TOKENS_MAX) {
+        // Only the latest tokens matter to a reader of PE_TOKEN.
+        memmove(gp_held_tokens, gp_held_tokens + 1,
+                (GP_HELD_TOKENS_MAX - 1u) * sizeof gp_held_tokens[0]);
+        gp_held_count--;
+    }
+    gp_held_tokens[gp_held_count++] = token;
 }
 
 bool interrupt_mmio_contains(u32 ea) {
@@ -401,4 +446,68 @@ void interrupt_poll(CPUState* cpu) {
                 dol_interrupts_pi_cause(&interrupts),
                 dol_interrupts_pi_mask(&interrupts), cpu->pc);
     deliver_external(cpu);
+}
+
+// ---------------------------------------------------------------------------
+// Quick state (host/quickstate.c)
+// ---------------------------------------------------------------------------
+// How guest time is paced (blocks or the wall clock, and the retrace period
+// that goes with it) belongs to this process, not to the saved machine, so a
+// state taken by the headless build loads in the windowed one and back.
+typedef struct {
+    DolInterrupts interrupts;
+    DolSiDevice si;
+    DolViClock vi_clock;
+    u32 poll_accum;
+    u32 pe_finish_countdown;
+    u16 pe_ctrl_enables;
+    bool gp_breakpoint_armed;
+    u32 gp_held_count;
+    u16 gp_held_tokens[GP_HELD_TOKENS_MAX];
+} InterruptQuickState;
+
+size_t interrupt_state_size(void) {
+    return sizeof(InterruptQuickState);
+}
+
+void interrupt_state_save(void* out) {
+    InterruptQuickState s;
+    memset(&s, 0, sizeof s);
+    memcpy(&s.interrupts, &interrupts, sizeof interrupts);
+    memcpy(&s.si, &si, sizeof si);
+    memcpy(&s.vi_clock, &vi_clock, sizeof vi_clock);
+    s.poll_accum = interrupt_poll_accum;
+    s.pe_finish_countdown = pe_finish_countdown;
+    s.pe_ctrl_enables = pe_ctrl_enables;
+    s.gp_breakpoint_armed = gp_breakpoint_armed;
+    s.gp_held_count = gp_held_count;
+    memcpy(s.gp_held_tokens, gp_held_tokens, sizeof gp_held_tokens);
+    memcpy(out, &s, sizeof s);
+}
+
+void interrupt_state_load(const void* in) {
+    InterruptQuickState s;
+    memcpy(&s, in, sizeof s);
+    const u64 units_per_retrace = dol_vi_clock_work_units_per_retrace(&vi_clock);
+    interrupts = s.interrupts;
+    si = s.si;
+    vi_clock = s.vi_clock;
+    // Saved under the other pacing: keep this process's period. Reconfiguring
+    // restarts the retrace countdown, which only moves the next retrace.
+    if (dol_vi_clock_work_units_per_retrace(&vi_clock) != units_per_retrace)
+        dol_vi_clock_configure(&vi_clock, units_per_retrace, (u32)VI_REFRESH_HZ,
+                               GC_TIMEBASE_HZ);
+    interrupt_poll_accum = s.poll_accum;
+    pe_finish_countdown = s.pe_finish_countdown;
+    pe_ctrl_enables = s.pe_ctrl_enables;
+    gp_breakpoint_armed = s.gp_breakpoint_armed;
+    gp_held_count = s.gp_held_count <= GP_HELD_TOKENS_MAX ? s.gp_held_count
+                                                          : GP_HELD_TOKENS_MAX;
+    memcpy(gp_held_tokens, s.gp_held_tokens, sizeof gp_held_tokens);
+    // Restart the wall clock from now, or the first poll would try to catch
+    // up on the real time that passed before the load.
+    wall_last_ns = wall_ns();
+    wall_vi_rem = 0;
+    wall_audio_rem = 0;
+    speed_mark = 0.0;
 }

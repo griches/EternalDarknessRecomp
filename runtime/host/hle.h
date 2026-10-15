@@ -27,4 +27,15 @@ void hle_card_close(void);
 // recursively running it inside the intercepted CARD call.
 bool hle_poll_callback(CPUState* cpu);
 
+// Quick state: callback queue and in-flight callback, DVD current directory,
+// skip-intro progress and card mount, as a fixed-size blob. The hle_gx_* pair
+// covers the windowed build's GX shortcut stages (size 0 headless);
+// hle_gx_state_load(NULL) clears them for a state that has none.
+size_t hle_state_size(void);
+void hle_state_save(void* out);
+void hle_state_load(const void* in);
+size_t hle_gx_state_size(void);
+void hle_gx_state_save(void* out);
+void hle_gx_state_load(const void* in);
+
 #endif /* ED_HLE_H */

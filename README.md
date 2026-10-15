@@ -25,6 +25,10 @@ cp /path/to/disc.iso dump/GEDP01.iso      # or GEDE01.iso for the USA disc
 Keyboard: arrows = d-pad, J = A, K = B, U = X, I = Y, Q = Z, E/R = L/R,
 Enter = Start. Controllers work through SDL.
 
+Quick save: 2 saves the whole machine to `build/runs/quick.state` and 1 loads
+it back, in the same session or after a restart (`ED_QUICKSTATE=path` picks
+another file). Memory-card saves are never touched by a load.
+
 ## Layout
 
 - `runtime/host/`: the game's host layer (SDK intercepts, interrupts, disc,

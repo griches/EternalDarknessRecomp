@@ -41,4 +41,9 @@ void audio_dsp_mail(CPUState* cpu, u32 mail);
 // rest of MusyX.
 void audio_skip_dsp_init(CPUState* cpu);
 
+// Quick state: the AI/DSP device and AI stream registers as a fixed-size blob.
+size_t audio_state_size(void);
+void audio_state_save(void* out);
+void audio_state_load(const void* in);
+
 #endif // ED_HOST_AUDIO_H

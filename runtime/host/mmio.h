@@ -19,6 +19,11 @@ void mmio_set_logging(bool enabled);
 // Latch a draw-sync token in the PE token register, as the GPU does on
 // reaching a GXSetDrawSync token.
 void mmio_set_pe_token(u16 token);
+// False while the CPU FIFO points somewhere other than the GPU's FIFO: the game
+// is recording a display list or using the gather pipe as a fast copy.
+bool mmio_cpu_fifo_feeds_gpu(void);
+// The write-gather pipe was re-pointed (PPCMtwpar): drop its pending bytes.
+void mmio_write_gather_reset(void);
 
 // The Processor Interface CPU-FIFO registers (0xCC00300C-0xCC003017), owned
 // here because the gather pipe writes through them (see mmio.c).
@@ -48,5 +53,14 @@ struct DolEfbAccess* mmio_efb(void);
 
 // Wire continuous present-source readback → software EFB (Aurora builds only).
 void mmio_attach_efb_readback(void);
+
+// Quick state: the device registers modelled here (EXI, DI, CP, PE, MI, EFB
+// access, PI CPU FIFO, gather pipe) as a fixed-size blob, and the guest memory
+// regions this module owns besides MEM1 (saved verbatim by quickstate.c).
+size_t mmio_state_size(void);
+void mmio_state_save(void* out);
+void mmio_state_load(const void* in);
+u8* mmio_locked_cache(u32* size);
+u8* mmio_vm_memory(u32* size);
 
 #endif /* MELEERECOMP_MMIO_H */

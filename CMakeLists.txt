@@ -39,6 +39,7 @@ add_executable(EternalDarkness
     runtime/host/interrupt.c
     runtime/host/hle.c
     runtime/host/sdk_map.c
+    runtime/host/quickstate.c
     runtime/host/main.c
     "${ED_GENERATED_DIR}/generated.c"
     ${ED_CHUNKS}

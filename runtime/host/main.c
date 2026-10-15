@@ -21,6 +21,7 @@
 #include "host/mmio.h"
 #include "host/hle.h"
 #include "host/interrupt.h"
+#include "host/quickstate.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -351,6 +352,7 @@ int main(int argc, char** argv) {
     // points. Starting a game checks the save's game and maker code against it.
     if (dvd_image_ready())
         dvd_read_to_guest(&cpu, 0x80000000u, 0, 0x20u);
+    quickstate_init();  // after every device it saves is set up
     cpu.instruction_fallback = instruction_fallback;
     // FP instructions check MSR[FP]; the run loop below answers the resulting
     // FP-unavailable exceptions with the OS's lazy FPU switch (interrupt.c).
@@ -503,6 +505,13 @@ int main(int argc, char** argv) {
             if (getenv("ED_PCDUMP_MEM") != NULL)
                 dump_mem1(getenv("ED_PCDUMP_MEM"), &cpu);
         }
+
+        // Quick save / load (keys 2 / 1): at a block boundary like the
+        // snapshot above, but only once the GX FIFO is between commands.
+        if ((blocks & 0xFFFu) == 0u)
+            quickstate_poll(blocks);
+        if (g_quickstate_pending && quickstate_service(&cpu))
+            continue;  // loaded: pc and the devices changed under us
 
         // Deliver a due VI-retrace interrupt before dispatching the next block,
         // so the redirected pc (the OS interrupt dispatcher) runs here.

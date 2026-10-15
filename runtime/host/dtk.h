@@ -21,4 +21,9 @@ u32 dtk_play_address(void);
 u32 dtk_mix(s16* out, u32 frames, u32 out_rate, u32 stream_rate,
             u32 volume_left, u32 volume_right);
 
+// Quick state: stream positions and decoder state as a fixed-size blob.
+size_t dtk_state_size(void);
+void dtk_state_save(void* out);
+void dtk_state_load(const void* in);
+
 #endif // ED_HOST_DTK_H

@@ -21,6 +21,11 @@ Settings g_settings = {
     .effects_volume = 100,
     .audio_buffer_ms = 40,
     .controls_layout = 0,
+    .sprint_toggle = false,
+    .creep_toggle = false,
+    .target_toggle = false,
+    .stick_deadzone = 20,
+    .vibration = true,
     .controls_custom = "",
     .disc = "",
 };
@@ -77,6 +82,16 @@ void settings_load(void) {
             g_settings.audio_buffer_ms = clamp_int(n, 20, 500);
         else if (strcmp(key, "controls_layout") == 0)
             g_settings.controls_layout = clamp_int(n, 0, 2);
+        else if (strcmp(key, "sprint_toggle") == 0)
+            g_settings.sprint_toggle = n != 0;
+        else if (strcmp(key, "creep_toggle") == 0)
+            g_settings.creep_toggle = n != 0;
+        else if (strcmp(key, "target_toggle") == 0)
+            g_settings.target_toggle = n != 0;
+        else if (strcmp(key, "stick_deadzone") == 0)
+            g_settings.stick_deadzone = clamp_int(n, 5, 25);
+        else if (strcmp(key, "vibration") == 0)
+            g_settings.vibration = n != 0;
         else if (strcmp(key, "controls_custom") == 0)
             snprintf(g_settings.controls_custom, sizeof g_settings.controls_custom, "%s", value);
         else if (strcmp(key, "disc") == 0)
@@ -102,6 +117,11 @@ void settings_save(void) {
     fprintf(f, "effects_volume = %d\n", g_settings.effects_volume);
     fprintf(f, "audio_buffer_ms = %d\n", g_settings.audio_buffer_ms);
     fprintf(f, "controls_layout = %d\n", g_settings.controls_layout);
+    fprintf(f, "sprint_toggle = %d\n", g_settings.sprint_toggle ? 1 : 0);
+    fprintf(f, "creep_toggle = %d\n", g_settings.creep_toggle ? 1 : 0);
+    fprintf(f, "target_toggle = %d\n", g_settings.target_toggle ? 1 : 0);
+    fprintf(f, "stick_deadzone = %d\n", g_settings.stick_deadzone);
+    fprintf(f, "vibration = %d\n", g_settings.vibration ? 1 : 0);
     fprintf(f, "controls_custom = %s\n", g_settings.controls_custom);
     fprintf(f, "disc = %s\n", g_settings.disc);
     fclose(f);
@@ -114,5 +134,6 @@ void settings_apply(void) {
     dol_aurora_set_render_scale(g_settings.render_scale);
     dol_aurora_set_fullscreen(g_settings.fullscreen);
     dol_aurora_set_audio_buffer_ms(g_settings.audio_buffer_ms);
+    dol_aurora_set_vibration(g_settings.vibration);
 #endif
 }

@@ -1,5 +1,5 @@
 diff --git a/backends/aurora/aurora_backend.cpp b/backends/aurora/aurora_backend.cpp
-index d94f811..b807ed4 100644
+index d94f811..efe572f 100644
 --- a/backends/aurora/aurora_backend.cpp
 +++ b/backends/aurora/aurora_backend.cpp
 @@ -19,7 +19,9 @@
@@ -395,7 +395,26 @@ index d94f811..b807ed4 100644
      return motor_mask;
  }
  
-@@ -1848,6 +2088,7 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1807,7 +2047,18 @@ bool aurora_backend_pad_recalibrate(u32 mask) {
+     return PADRecalibrate(mask) != FALSE;
+ }
+ 
++static bool g_vibration = true;
++
++void dol_aurora_set_vibration(bool on) {
++    g_vibration = on;
++    if (!on)
++        for (u32 channel = 0; channel < 4; channel++)
++            PADControlMotor(channel, PAD_MOTOR_STOP);
++}
++
+ void aurora_backend_pad_control_motor(u32 channel, u32 command) {
++    if (!g_vibration && command != PAD_MOTOR_STOP && command != PAD_MOTOR_STOP_HARD)
++        return;
+     PADControlMotor(channel, command);
+ }
+ 
+@@ -1848,6 +2099,7 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
  
      int queued = SDL_GetAudioStreamQueued(g_audio_stream);
      unsigned waited_ms = 0;
@@ -403,7 +422,7 @@ index d94f811..b807ed4 100644
      while (queued > max_queued_bytes && waited_ms < 20u) {
          g_audio_throttle_count++;
          if (g_audio_queue_log &&
-@@ -1860,8 +2101,17 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1860,8 +2112,17 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
                           max_queued_bytes);
          SDL_Delay(1);
          waited_ms++;
@@ -421,7 +440,7 @@ index d94f811..b807ed4 100644
  
      const bool low_queue =
          queued >= 0 && queued < bytes_per_second / 100;
-@@ -1886,6 +2136,169 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1886,6 +2147,169 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
      }
  }
  
@@ -2302,7 +2321,7 @@ index 9c2f7bb..6dd6411 100644
 +
  #endif
 diff --git a/include/gxruntime/aurora_backend.h b/include/gxruntime/aurora_backend.h
-index 6ef4cf4..8f8ba7f 100644
+index 6ef4cf4..53dfdb2 100644
 --- a/include/gxruntime/aurora_backend.h
 +++ b/include/gxruntime/aurora_backend.h
 @@ -5,6 +5,7 @@
@@ -2325,7 +2344,7 @@ index 6ef4cf4..8f8ba7f 100644
  // Optional: after each present, push latest present-source RGBA8 into software
  // EFB (e.g. Strikers mmio_efb + dol_efb_access_fill_color_rgba8). Enables
  // continuous framebuffer readback while registered. NULL clears.
-@@ -40,6 +46,58 @@ void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user);
+@@ -40,6 +46,60 @@ void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user);
  // from shutdown (second call only bumps if counters grew).
  void dol_aurora_flush_gap_report(void);
  
@@ -2366,6 +2385,8 @@ index 6ef4cf4..8f8ba7f 100644
 +// every pad read after Aurora's own; return true to use the filled state.
 +typedef bool (*DolAuroraPadOverrideFn)(DolPadState* state);
 +void dol_aurora_set_pad0_override(DolAuroraPadOverrideFn fn);
++// Controller vibration (the game's rumble) on or off.
++void dol_aurora_set_vibration(bool on);
 +// Display aspect: 0 follows the game (4:3, or 16:9 when its 3D projects at
 +// 16:9), 1 = 4:3, 2 = 16:9, 3 = stretch to the window.
 +void dol_aurora_set_aspect_mode(int mode);

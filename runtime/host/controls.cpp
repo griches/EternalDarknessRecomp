@@ -144,7 +144,7 @@ int stick(SDL_Gamepad* pad, SDL_GamepadAxis axis, bool invert) {
     int v = SDL_GetGamepadAxis(pad, axis);
     if (invert)
         v = -v - 1;
-    if (std::abs(v) < 7000)
+    if (std::abs(v) < g_settings.stick_deadzone * 32767 / 100)
         return 0;
     return std::clamp(v / 256, -127, 127);
 }
@@ -262,15 +262,55 @@ void save() {
     settings_save();
 }
 
+// Toggle modes (sprint, creep, target): a press flips the action on or off.
+bool g_toggled[kActionCount];
+bool g_was_down[kActionCount];
+Uint64 g_still_since = 0;  // when the main stick last came to rest
+
+bool toggle_mode(int action) {
+    return (action == kSprint && g_settings.sprint_toggle) ||
+           (action == kCreep && g_settings.creep_toggle) ||
+           (action == kTarget && g_settings.target_toggle);
+}
+
 bool read_pad(DolPadState* state) {
     SDL_Gamepad* pad = gamepad();
     DolPadState s{};
+    // The main stick first: toggled sprint ends when you stop moving.
+    int x = stick(pad, SDL_GAMEPAD_AXIS_LEFTX, false);
+    int y = stick(pad, SDL_GAMEPAD_AXIS_LEFTY, true);
+    if (key_down(SDL_SCANCODE_A)) x = -127;
+    if (key_down(SDL_SCANCODE_D)) x = 127;
+    if (key_down(SDL_SCANCODE_W)) y = 127;
+    if (key_down(SDL_SCANCODE_S)) y = -127;
+    const Uint64 now = SDL_GetTicks();
+    if (x != 0 || y != 0)
+        g_still_since = 0;
+    else if (g_still_since == 0)
+        g_still_since = now;
+    if (g_toggled[kSprint] && g_still_since != 0 && now - g_still_since > 300)
+        g_toggled[kSprint] = false;
     for (int a = 0; a < kActionCount; a++) {
         int v = 0;
         for (int n : g_bindings[a].pad)
             v = std::max(v, native_value(pad, n));
         if (key_down(g_bindings[a].key))
             v = 255;
+        if (toggle_mode(a)) {
+            const bool down = v >= 128;
+            if (down && !g_was_down[a]) {
+                g_toggled[a] = !g_toggled[a];
+                // Sprinting and creeping cancel each other.
+                if (g_toggled[a] && a == kSprint)
+                    g_toggled[kCreep] = false;
+                if (g_toggled[a] && a == kCreep)
+                    g_toggled[kSprint] = false;
+            }
+            g_was_down[a] = down;
+            v = g_toggled[a] ? 255 : 0;
+        } else {
+            g_toggled[a] = false;
+        }
         if (a == kSprint || a == kTarget) {
             // Analog L/R: the trigger value; the digital click at full press.
             (a == kSprint ? s.trigger_left : s.trigger_right) = static_cast<u8>(v);
@@ -282,13 +322,7 @@ bool read_pad(DolPadState* state) {
     }
     s.analog_a = (s.button & 0x0100) ? 255 : 0;
     s.analog_b = (s.button & 0x0200) ? 255 : 0;
-    // Main stick: left stick or WASD; C-stick: right stick or TFGH.
-    int x = stick(pad, SDL_GAMEPAD_AXIS_LEFTX, false);
-    int y = stick(pad, SDL_GAMEPAD_AXIS_LEFTY, true);
-    if (key_down(SDL_SCANCODE_A)) x = -127;
-    if (key_down(SDL_SCANCODE_D)) x = 127;
-    if (key_down(SDL_SCANCODE_W)) y = 127;
-    if (key_down(SDL_SCANCODE_S)) y = -127;
+    // C-stick: right stick or TFGH.
     int cx = stick(pad, SDL_GAMEPAD_AXIS_RIGHTX, false);
     int cy = stick(pad, SDL_GAMEPAD_AXIS_RIGHTY, true);
     if (key_down(SDL_SCANCODE_F)) cx = -127;

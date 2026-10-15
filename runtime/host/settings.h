@@ -18,6 +18,11 @@ typedef struct {
     int effects_volume;   // the game's own mix (effects, voices), 0-100
     int audio_buffer_ms;  // audio queued ahead of the output
     int controls_layout;  // 0 original, 1 modern, 2 custom
+    bool sprint_toggle;   // press to start/stop sprinting (stops when you stop)
+    bool creep_toggle;
+    bool target_toggle;
+    int stick_deadzone;   // percent of the stick's travel ignored, 5-25
+    bool vibration;
     char controls_custom[512];  // custom bindings (controls.cpp format)
     char disc[1024];      // last disc image chosen in the launcher
 } Settings;

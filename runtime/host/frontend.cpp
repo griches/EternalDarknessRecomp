@@ -234,7 +234,7 @@ std::string region_name(const std::string& id) {
 
 // --- Menu model -------------------------------------------------------------
 
-enum class Screen { Launcher, Options, Controls, InGame };
+enum class Screen { Launcher, Options, Controls, Mapping, InGame };
 
 struct Row {
     std::string label;
@@ -463,6 +463,55 @@ void build_controls() {
     pad.enabled = false;
     g_rows.push_back(pad);
 
+    auto hold_toggle = [](const char* label, bool* value, const char* note) {
+        Row r{label, *value ? "Toggle" : "Hold"};
+        r.note = note;
+        r.change = [value](int) {
+            *value = !*value;
+            settings_save();
+        };
+        return r;
+    };
+    g_rows.push_back(hold_toggle("Sprint", &g_settings.sprint_toggle,
+                                 "Toggle: press to run, press again or stop moving to walk."));
+    g_rows.push_back(hold_toggle("Creep", &g_settings.creep_toggle,
+                                 "Toggle: press to creep, press again (or sprint) to stop."));
+    g_rows.push_back(hold_toggle("Target", &g_settings.target_toggle,
+                                 "Toggle: press to lock on, press again to release."));
+
+    Row deadzone{"Stick deadzone", std::to_string(g_settings.stick_deadzone) + "%"};
+    deadzone.note = "Raise it if a worn stick drifts; lower is more sensitive.";
+    deadzone.change = [](int dir) {
+        g_settings.stick_deadzone = std::clamp(g_settings.stick_deadzone + dir * 5, 5, 25);
+        settings_save();
+    };
+    g_rows.push_back(deadzone);
+
+    Row vibration{"Vibration", on_off(g_settings.vibration)};
+    vibration.change = [](int) {
+        g_settings.vibration = !g_settings.vibration;
+        changed();
+        settings_save();
+    };
+    g_rows.push_back(vibration);
+
+    Row mapping{"Button mapping"};
+    mapping.note = "See and change which button or key does what.";
+    mapping.activate = [] {
+        g_screen = Screen::Mapping;
+        g_selected = 0;
+    };
+    g_rows.push_back(mapping);
+
+    Row back{"Back"};
+    back.activate = [] {
+        g_screen = Screen::Options;
+        g_selected = 0;
+    };
+    g_rows.push_back(back);
+}
+
+void build_mapping() {
     for (int a = 0; a < controls::kActionCount; a++) {
         Row r{controls::action_name(a)};
         if (controls::capturing() && controls::capture_action() == a) {
@@ -471,7 +520,8 @@ void build_controls() {
         } else {
             r.value_rml = controls::pad_glyphs(a) + "<span class=\"sep\"></span>" +
                           controls::key_glyph(a);
-            r.note = "Select to rebind (switches to Custom). Controller | keyboard.";
+            r.note = std::string("Select to rebind (switches to Custom). Layout: ") +
+                     controls::layout_name(controls::layout()) + ".";
         }
         r.activate = [a] { controls::begin_capture(a); };
         g_rows.push_back(r);
@@ -479,7 +529,7 @@ void build_controls() {
 
     Row back{"Back"};
     back.activate = [] {
-        g_screen = Screen::Options;
+        g_screen = Screen::Controls;
         g_selected = 0;
     };
     g_rows.push_back(back);
@@ -543,6 +593,7 @@ void render() {
     const char* heading = g_screen == Screen::Launcher   ? "Main Menu"
                           : g_screen == Screen::Options  ? "Options"
                           : g_screen == Screen::Controls ? "Controls"
+                          : g_screen == Screen::Mapping  ? "Button Mapping"
                                                          : "Paused";
     g_doc->GetElementById("heading")->SetInnerRML(heading);
     std::string rml;
@@ -570,11 +621,12 @@ void render() {
             ? "Up/Down choose &#183; Left/Right change &#183; A select &#183; B resume"
             : "Up/Down choose &#183; Left/Right change &#183; A select &#183; B back");
     // The controls list is long: drop the title and tighten the rows.
-    g_doc->SetClass("compact", g_screen == Screen::Controls);
+    g_doc->SetClass("compact", g_screen == Screen::Mapping);
     // Over the game the menu dims the paused frame; the launcher is opaque.
     g_doc->SetClass("overlay", g_screen == Screen::InGame ||
                                    ((g_screen == Screen::Options ||
-                                     g_screen == Screen::Controls) &&
+                                     g_screen == Screen::Controls ||
+                                     g_screen == Screen::Mapping) &&
                                     g_options_return == Screen::InGame));
 }
 
@@ -584,6 +636,7 @@ void build_rows() {
     case Screen::Launcher: build_launcher(); break;
     case Screen::Options: build_options(); break;
     case Screen::Controls: build_controls(); break;
+    case Screen::Mapping: build_mapping(); break;
     case Screen::InGame: build_in_game(); break;
     }
     if (g_selected >= static_cast<int>(g_rows.size()))
@@ -618,6 +671,10 @@ void go_back() {
         g_screen = Screen::Options;
         g_selected = 0;
         break;
+    case Screen::Mapping:
+        g_screen = Screen::Controls;
+        g_selected = 0;
+        break;
     case Screen::Options:
         settings_save();
         g_screen = g_options_return;
@@ -644,7 +701,16 @@ public:
         if (index < 0 || index >= static_cast<int>(g_rows.size()))
             return;
         if (event.GetId() == Rml::EventId::Mousemove) {
-            if (g_selected != index) {
+            // Only a real pointer movement selects: focus changes and rebuilt
+            // rows also report the pointer, and must not steal the selection
+            // from a controller or the keyboard.
+            static int last_x = -1, last_y = -1;
+            const int mx = event.GetParameter<int>("mouse_x", 0);
+            const int my = event.GetParameter<int>("mouse_y", 0);
+            const bool moved = last_x >= 0 && (mx != last_x || my != last_y);
+            last_x = mx;
+            last_y = my;
+            if (moved && g_selected != index) {
                 g_selected = index;
                 render();
             }
@@ -771,7 +837,8 @@ bool run_menu() {
         if (g_close)
             break;
         static Uint64 refresh = 0;
-        if (g_screen == Screen::Controls && SDL_GetTicks() > refresh) {
+        if ((g_screen == Screen::Controls || g_screen == Screen::Mapping) &&
+            SDL_GetTicks() > refresh) {
             refresh = SDL_GetTicks() + 500;  // controller plugged in / out
             dirty = true;
         }

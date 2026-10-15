@@ -4553,6 +4553,46 @@ void hle_card_close(void) {
     memset(&g_callback_context, 0, sizeof g_callback_context);
 }
 
+// Block chaining (DolRecomp cpu.h): generated code stays inside its chunk across
+// loops, calls and returns unless the target is in this table. Every address
+// hle_dispatch acts on is a stop: intercepts, notify hooks, VIFlush (the frame
+// boundary), and the debug hooks (ED_TRACE_FN, ED_CALL_PROFILE, ED_DL_CHECK).
+// ED_NO_CHAIN=1, or the full ED_HLE_LOG trace, sends every branch through
+// hle_dispatch as before.
+static u8 g_chain_stop[HLE_DISPATCH_COUNT];
+const u8* dolrecomp_chain_stop;  // read by the generated code (generated.h)
+u32 dolrecomp_chain_stop_base;
+u32 dolrecomp_chain_stop_count;
+
+static void chain_stop_at(u32 address) {
+    if (address >= HLE_CODE_BASE && address < HLE_CODE_LIMIT)
+        g_chain_stop[(address - HLE_CODE_BASE) / 4u] = 1u;
+}
+
+// Fast RAM access in the generated code (generated.h): bit 0 loads, bit 1
+// stores. ED_NO_FASTMEM=1 sends every access through mem_read / mem_write;
+// ED_STORE_WATCH keeps stores there so the watch sees them.
+u8 dolrecomp_fast_ram;
+
+static void publish_codegen_options(void) {
+    dolrecomp_fast_ram = getenv("ED_NO_FASTMEM") != NULL ? 0u
+                         : getenv("ED_STORE_WATCH") != NULL ? 1u : 3u;
+    dolrecomp_chain_stop = NULL;
+    if (getenv("ED_NO_CHAIN") != NULL || g_hle_log)
+        return;
+    for (u32 i = 0; i < HLE_DISPATCH_COUNT; i++)
+        g_chain_stop[i] = g_hle_dispatch[i].intercept != NULL ||
+                          g_hle_dispatch[i].notify != NULL;
+    chain_stop_at(g_call_prof_vi);
+    chain_stop_at(g_call_prof_fn);
+    chain_stop_at(sdk_symbol_address("GXCallDisplayList"));
+    for (u32 i = 0; i < g_trace_fn_count; i++)
+        chain_stop_at(g_trace_fn[i]);
+    dolrecomp_chain_stop_base = HLE_CODE_BASE;
+    dolrecomp_chain_stop_count = HLE_DISPATCH_COUNT;
+    dolrecomp_chain_stop = g_chain_stop;
+}
+
 void hle_install(CPUState* cpu) {
     g_hle_log = getenv("ED_HLE_LOG") != NULL;
     g_dvd_log = g_hle_log || getenv("ED_DVD_LOG") != NULL;
@@ -4643,6 +4683,7 @@ void hle_install(CPUState* cpu) {
     g_movie_cadence_started = false;
 #endif
     cpu->host_call = hle_dispatch;
+    publish_codegen_options();
 }
 
 // ---------------------------------------------------------------------------

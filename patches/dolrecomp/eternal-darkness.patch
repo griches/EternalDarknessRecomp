@@ -1,5 +1,17 @@
+diff --git a/src/backend/codegen.c b/src/backend/codegen.c
+index 5279cdb..26adfdb 100644
+--- a/src/backend/codegen.c
++++ b/src/backend/codegen.c
+@@ -30,6 +30,7 @@ int emit_chunk_file(const ChunkJob* job) {
+     }
+ 
+     fprintf(chunk, "// DolRecomp output\n");
++    fprintf(chunk, "#define DOLRECOMP_CHUNK 1\n");
+     fprintf(chunk, "#include \"../%s\"\n\n", job->include_name);
+     emit_function(chunk, job->insts, job->count, job->func_addr);
+ 
 diff --git a/src/backend/emitter.c b/src/backend/emitter.c
-index 4868b4c..64ec688 100644
+index 4868b4c..6ed8386 100644
 --- a/src/backend/emitter.c
 +++ b/src/backend/emitter.c
 @@ -37,6 +37,19 @@ static void emit_set_cr1_from_fpscr(FILE* out) {
@@ -22,7 +34,135 @@ index 4868b4c..64ec688 100644
  static void emit_compare_s32(FILE* out, u8 crf, const char* lhs, const char* rhs) {
      u32 shift = cr_field_shift(crf);
  
-@@ -456,6 +469,7 @@ void emit_footer(FILE* out) {
+@@ -314,11 +327,18 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst, bool local_target
+     if (inst->lk) {
+         fprintf(out, "            ctx->lr = 0x%08Xu;\n", inst->address + 4);
+         fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
++        if (local_target)
++            fprintf(out, "            if (DOLRECOMP_CHAIN(0x%08Xu)) goto label_%08X;\n",
++                    inst->branch_target, inst->branch_target);
+         fprintf(out, "            return;\n");
+         return;
+     }
+     if (local_backward) {
++        /* A loop back-edge: stay in the chunk while the chain budget lasts, so
++         * the host's interrupt and device polling still run every so often. */
+         fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
++        fprintf(out, "            if (DOLRECOMP_CHAIN(0x%08Xu)) goto label_%08X;\n",
++                inst->branch_target, inst->branch_target);
+         fprintf(out, "            return;\n");
+     } else if (local_target) {
+         fprintf(out, "            goto label_%08X;\n", inst->branch_target);
+@@ -329,7 +349,8 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst, bool local_target
+ }
+ 
+ static void emit_dynamic_branch(FILE* out, const PPCInst* inst,
+-                                const char* target_expr) {
++                                const char* target_expr, u32 func_start,
++                                u32 func_end) {
+     fprintf(out, "    {\n");
+     fprintf(out, "        u32 target = %s;\n", target_expr);
+     emit_branch_condition(out, inst->bo, inst->bi);
+@@ -338,6 +359,9 @@ static void emit_dynamic_branch(FILE* out, const PPCInst* inst,
+         fprintf(out, "            ctx->lr = 0x%08Xu;\n", inst->address + 4);
+     }
+     fprintf(out, "            ctx->pc = target;\n");
++    /* A return or computed call that lands in this chunk re-enters its switch. */
++    fprintf(out, "            if (target - 0x%08Xu < 0x%08Xu && DOLRECOMP_CHAIN(target)) goto dolrecomp_dispatch;\n",
++            func_start, func_end - func_start);
+     fprintf(out, "            return;\n");
+     fprintf(out, "        }\n");
+     fprintf(out, "    }\n");
+@@ -383,6 +407,8 @@ static const char* emit_cpu_label(DolRecompCPU cpu) {
+     }
+ }
+ 
++static void emit_fast_ram(FILE* out);
++
+ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
+     fprintf(out,
+         "// DolRecomp output\n"
+@@ -439,10 +465,79 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
+         "    return dolrecomp_f32_to_bits((f32)value);\n"
+         "}\n"
+         "\n"
++        "/* Block chaining (cpu.h): how many branches a chunk may take before it\n"
++        " * returns to the host's dispatch loop, and whether a target may chain. */\n"
++        "extern const u8* dolrecomp_chain_stop;\n"
++        "extern u32 dolrecomp_chain_stop_base;\n"
++        "extern u32 dolrecomp_chain_stop_count;\n"
++        "\n"
++        "#ifndef DOLRECOMP_CHAIN_BUDGET\n"
++        "#define DOLRECOMP_CHAIN_BUDGET 256u\n"
++        "#endif\n"
++        "\n"
++        "static inline int dolrecomp_can_chain(u32 target) {\n"
++        "    const u32 i = (target - dolrecomp_chain_stop_base) >> 2;\n"
++        "    return dolrecomp_chain_stop != NULL && i < dolrecomp_chain_stop_count &&\n"
++        "           dolrecomp_chain_stop[i] == 0u;\n"
++        "}\n"
++        "\n"
++        "#define DOLRECOMP_CHAIN(target) \\\n"
++        "    (dolrecomp_chain != 0u && (--dolrecomp_chain, dolrecomp_can_chain(target)))\n"
++        "\n"
+         ,
+         emit_cpu_label(cpu),
+         emit_cpu_macro(cpu),
+         emit_cpu_label(cpu));
++    emit_fast_ram(out);
++}
++
++/* Fast RAM access for chunk files (DOLRECOMP_CHUNK): loads and stores to
++ * cached MEM1 (0x80000000 + ram_size) go straight to ctx->ram instead of through
++ * the runtime's mem_read / mem_write calls. Everything else (the uncached
++ * mirror, MMIO, locked cache, MEM2), and any store while a lwarx reservation is
++ * held, still takes the runtime path. The host enables it with
++ * dolrecomp_fast_ram: bit 0 loads, bit 1 stores (off while it watches stores). */
++static void emit_fast_ram(FILE* out) {
++    static const struct { unsigned bits; const char* type; const char* swap; } sizes[] = {
++        { 8u, "u8", "" },
++        { 16u, "u16", "__builtin_bswap16" },
++        { 32u, "u32", "__builtin_bswap32" },
++        { 64u, "u64", "__builtin_bswap64" },
++    };
++    unsigned i;
++    fprintf(out, "#if defined(DOLRECOMP_CHUNK) && !defined(DOLRECOMP_NO_FAST_RAM)\n");
++    fprintf(out, "extern u8 dolrecomp_fast_ram;\n\n");
++    for (i = 0; i < sizeof sizes / sizeof sizes[0]; i++) {
++        const unsigned bits = sizes[i].bits, bytes = bits / 8u;
++        const char* t = sizes[i].type;
++        const char* sw = sizes[i].swap;
++        fprintf(out, "static inline %s dolrecomp_mem_read%u(CPUState* ctx, u32 ea) {\n", t, bits);
++        fprintf(out, "    const u32 off = ea - 0x80000000u;\n");
++        fprintf(out, "    if ((dolrecomp_fast_ram & 1u) != 0u && off <= ctx->ram_size - %uu) {\n", bytes);
++        fprintf(out, "        %s v;\n", t);
++        fprintf(out, "        memcpy(&v, ctx->ram + off, %uu);\n", bytes);
++        fprintf(out, "        return %s(v);\n", sw);
++        fprintf(out, "    }\n");
++        fprintf(out, "    return (mem_read%u)(ctx, ea);\n", bits);
++        fprintf(out, "}\n\n");
++        fprintf(out, "static inline void dolrecomp_mem_write%u(CPUState* ctx, u32 ea, %s value) {\n", bits, t);
++        fprintf(out, "    const u32 off = ea - 0x80000000u;\n");
++        fprintf(out, "    if ((dolrecomp_fast_ram & 2u) != 0u && !ctx->reserve_valid &&\n");
++        fprintf(out, "        off <= ctx->ram_size - %uu) {\n", bytes);
++        fprintf(out, "        value = %s(value);\n", sw);
++        fprintf(out, "        memcpy(ctx->ram + off, &value, %uu);\n", bytes);
++        fprintf(out, "        return;\n");
++        fprintf(out, "    }\n");
++        fprintf(out, "    (mem_write%u)(ctx, ea, value);\n", bits);
++        fprintf(out, "}\n\n");
++    }
++    for (i = 0; i < sizeof sizes / sizeof sizes[0]; i++) {
++        fprintf(out, "#define mem_read%u(ctx, ea) dolrecomp_mem_read%u(ctx, ea)\n",
++                sizes[i].bits, sizes[i].bits);
++        fprintf(out, "#define mem_write%u(ctx, ea, v) dolrecomp_mem_write%u(ctx, ea, v)\n",
++                sizes[i].bits, sizes[i].bits);
++    }
++    fprintf(out, "#endif\n\n");
+ }
+ 
+ void emit_header(FILE* out) {
+@@ -456,6 +551,7 @@ void emit_footer(FILE* out) {
  static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
                                          u32 func_start, u32 func_end) {
      char disasm[64];
@@ -30,7 +170,7 @@ index 4868b4c..64ec688 100644
      ppc_disasm(disasm, sizeof(disasm), inst);
      fprintf(out, "    // %08X: %s\n", inst->address, disasm);
  
-@@ -937,23 +951,27 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+@@ -937,23 +1033,27 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
          break;
  
      case PPC_OP_FADDS:
@@ -66,7 +206,7 @@ index 4868b4c..64ec688 100644
          break;
  
      case PPC_OP_FRES:
-@@ -1047,7 +1065,8 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+@@ -1047,7 +1147,8 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
          break;
  
      case PPC_OP_FRSP:
@@ -76,7 +216,7 @@ index 4868b4c..64ec688 100644
          break;
  
      case PPC_OP_FSEL:
-@@ -1222,76 +1241,68 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+@@ -1222,76 +1323,68 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
          if (inst->rc) emit_set_cr1_from_fpscr(out);
          break;
  
@@ -187,3 +327,64 @@ index 4868b4c..64ec688 100644
          break;
  
      case PPC_OP_PS_CMPU0:
+@@ -1554,11 +1647,11 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+         break;
+ 
+     case PPC_OP_BCLR:
+-        emit_dynamic_branch(out, inst, "ctx->lr & ~3u");
++        emit_dynamic_branch(out, inst, "ctx->lr & ~3u", func_start, func_end);
+         break;
+ 
+     case PPC_OP_BCCTR:
+-        emit_dynamic_branch(out, inst, "ctx->ctr & ~3u");
++        emit_dynamic_branch(out, inst, "ctx->ctr & ~3u", func_start, func_end);
+         break;
+ 
+     case PPC_OP_TWI:
+@@ -1916,6 +2009,9 @@ void emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
+     }
+ 
+     fprintf(out, "void func_%08X(CPUState* ctx) {\n", func_addr);
++    fprintf(out, "    u32 dolrecomp_chain = DOLRECOMP_CHAIN_BUDGET;\n");
++    fprintf(out, "    (void)dolrecomp_chain;\n");
++    fprintf(out, "dolrecomp_dispatch:\n");
+     fprintf(out, "    switch (ctx->pc) {\n");
+     for (i = 0; i < count; i++) {
+         fprintf(out, "    case 0x%08Xu: goto label_%08X;\n",
+diff --git a/src/cpu/cpu.c b/src/cpu/cpu.c
+index 3702bef..5ff845c 100644
+--- a/src/cpu/cpu.c
++++ b/src/cpu/cpu.c
+@@ -321,6 +321,10 @@ bool ppc_host_call(CPUState* cpu, u32 address) {
+     return cpu->host_call ? cpu->host_call(cpu, address) : false;
+ }
+ 
++const u8* dolrecomp_chain_stop = NULL;
++u32 dolrecomp_chain_stop_base = 0;
++u32 dolrecomp_chain_stop_count = 0;
++
+ void ppc_system_call_exception(CPUState* cpu, u32 cia) {
+     ppc_take_exception(cpu, PPC_EXC_SYSTEM_CALL, PPC_VECTOR_SYSTEM_CALL, cia + 4u, 0);
+ }
+diff --git a/src/cpu/cpu.h b/src/cpu/cpu.h
+index 3d31c51..0575adf 100644
+--- a/src/cpu/cpu.h
++++ b/src/cpu/cpu.h
+@@ -129,6 +129,17 @@ void ppc_program_exception(CPUState* cpu, u32 cause, u32 cia);
+ bool ppc_fp_available(CPUState* cpu, u32 cia);
+ void ppc_fallback_instruction(CPUState* cpu, u32 raw, u32 cia);
+ bool ppc_host_call(CPUState* cpu, u32 address);
++
++/* Block chaining. Generated code may stay inside its chunk across a loop
++ * back-edge, a bl, or a blr/bctr whose target is in the same chunk, instead of
++ * returning to the host's dispatch loop each time. It only does so when the
++ * host has published a stop table: one byte per word from
++ * dolrecomp_chain_stop_base, non-zero where the host must see the call (an
++ * HLE intercept or notify hook). Targets outside the table never chain. NULL
++ * (the default) keeps every branch going through the dispatch loop. */
++extern const u8* dolrecomp_chain_stop;
++extern u32 dolrecomp_chain_stop_base;
++extern u32 dolrecomp_chain_stop_count;
+ void ppc_system_call_exception(CPUState* cpu, u32 cia);
+ void ppc_dsi_exception(CPUState* cpu, u32 ea, u32 cia, u32 dsisr);
+ void ppc_alignment_exception(CPUState* cpu, u32 ea, u32 cia);

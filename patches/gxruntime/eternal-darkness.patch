@@ -1,5 +1,5 @@
 diff --git a/backends/aurora/aurora_backend.cpp b/backends/aurora/aurora_backend.cpp
-index d94f811..55d524f 100644
+index d94f811..db80a17 100644
 --- a/backends/aurora/aurora_backend.cpp
 +++ b/backends/aurora/aurora_backend.cpp
 @@ -19,7 +19,9 @@
@@ -86,7 +86,7 @@ index d94f811..55d524f 100644
  
      const bool low_queue =
          queued >= 0 && queued < bytes_per_second / 100;
-@@ -1886,6 +1916,156 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1886,6 +1916,164 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
      }
  }
  
@@ -238,6 +238,14 @@ index d94f811..55d524f 100644
 +#endif
 +    if (g_audio_stream != nullptr)
 +        SDL_ClearAudioStream(g_audio_stream);
++    // The guest initialised its pads long before any save point, and a state
++    // loaded straight after launch never calls PADInit again: without this
++    // the keyboard mapping is never installed and port 0 reports no
++    // controller, so the game ignores every key. Idempotent once initialised.
++    (void)aurora_backend_pad_init();
++    // Rumble started in the abandoned timeline would never be stopped.
++    for (u32 channel = 0; channel < PAD_CHANMAX; ++channel)
++        PADControlMotor(channel, PAD_MOTOR_STOP);
 +}
 +
  } // extern "C"

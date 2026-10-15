@@ -1,7 +1,8 @@
 #!/bin/sh
 # Play the Mac build: ./play.sh [disc image] (default dump/<game id>.iso).
 # Keyboard: arrows = d-pad, J = A, K = B, U = X, I = Y, Q = Z, E/R = L/R,
-# Enter = Start, 2 = quick save, 1 = quick load (build/runs/quick.state).
+# Enter = Start, 2 = quick save, 1 = quick load (build/runs/quick.state);
+# kill -USR1 <pid> also quick-saves.
 # A connected controller works too. Close the window to quit.
 cd "$(dirname "$0")"
 id=$(cat generated/game_id.txt 2>/dev/null || echo GEDP01)

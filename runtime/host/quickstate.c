@@ -25,6 +25,7 @@
 #include "host/interrupt.h"
 #include "host/mmio.h"
 
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -116,6 +117,13 @@ static bool g_load_at_armed;
 static unsigned long long g_load_at;
 #ifdef ED_AURORA
 static bool g_save_key_down;
+// kill -USR1 <pid>: quick save without the keyboard (for handing the game
+// over: synthetic key presses miss when the window is not the key window).
+static volatile sig_atomic_t g_save_signal;
+static void on_save_signal(int sig) {
+    (void)sig;
+    g_save_signal = 1;
+}
 static bool g_load_key_down;
 #endif
 static unsigned long long g_blocks;  // as of the last poll, for messages
@@ -137,6 +145,10 @@ static void request(QsKind kind, const char* path) {
 }
 
 void quickstate_init(void) {
+    // Leave SIGUSR1 to the --snapshot-out harness when it claimed it.
+    void (*previous)(int) = signal(SIGUSR1, on_save_signal);
+    if (previous != SIG_DFL && previous != SIG_ERR)
+        signal(SIGUSR1, previous);
     const char* path = getenv("ED_QUICKSTATE");
     snprintf(g_path, sizeof g_path, "%s",
              path != NULL && path[0] != '\0' ? path : QS_DEFAULT_PATH);
@@ -172,6 +184,10 @@ void quickstate_poll(unsigned long long blocks) {
     g_save_key_down = save_key;
     g_load_key_down = load_key;
 #endif
+    if (g_save_signal) {
+        g_save_signal = 0;
+        request(QS_SAVE, g_path);
+    }
     if (g_save_at_armed && blocks >= g_save_at) {
         g_save_at_armed = false;
         request(QS_SAVE, g_path);

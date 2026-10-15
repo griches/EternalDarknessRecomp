@@ -1,5 +1,5 @@
 diff --git a/backends/aurora/aurora_backend.cpp b/backends/aurora/aurora_backend.cpp
-index d94f811..1d0ca67 100644
+index d94f811..b850e24 100644
 --- a/backends/aurora/aurora_backend.cpp
 +++ b/backends/aurora/aurora_backend.cpp
 @@ -19,7 +19,9 @@
@@ -44,7 +44,18 @@ index d94f811..1d0ca67 100644
  bool g_frame_open = false;
  bool g_should_quit = false;
  bool g_graphics_log = false;
-@@ -379,13 +394,39 @@ unsigned long long g_trace_present_scope_frame = 0ull;
+@@ -112,6 +127,10 @@ std::array<PendingTlutMetadata, 20> g_pending_tluts{};
+ // validating sink checked. The live Aurora path stays authoritative; this only
+ // proves the consumer survives real FIFO traffic ahead of renderer cutover.
+ gxruntime::aurora_recomp::RetailGxFrontend g_shadow_frontend;
++// DOL_GX_TIME=1: wall time spent in the GX front end (parse, plan, submit)
++// per presented frame, printed with the frame-pacing line.
++static bool g_gx_time_log = std::getenv("DOL_GX_TIME") != nullptr;
++static std::uint64_t g_gx_time_ns;
+ gxruntime::aurora_recomp::ConsumingAuroraRenderSink g_shadow_packet_sink;
+ bool g_shadow_frontend_enabled = false;
+ bool g_shadow_frontend_failed = false;
+@@ -379,13 +398,39 @@ unsigned long long g_trace_present_scope_frame = 0ull;
  bool g_trace_frame_begun = false;
  unsigned long long g_trace_frames_recorded = 0ull;
  gxruntime::aurora_recomp::trace::TraceWriter g_trace_writer;
@@ -91,7 +102,7 @@ index d94f811..1d0ca67 100644
  
  unsigned long long trace_current_frame() {
      return g_trace_present_scope_frame != 0ull ? g_trace_present_scope_frame
-@@ -435,6 +476,17 @@ bool trace_should_record() {
+@@ -435,6 +480,17 @@ bool trace_should_record() {
          g_trace_writer.frame_begin(static_cast<u32>(frame));
          g_trace_frame_begun = true;
          ++g_trace_frames_recorded;
@@ -109,7 +120,7 @@ index d94f811..1d0ca67 100644
      }
      return true;
  }
-@@ -442,18 +494,46 @@ bool trace_should_record() {
+@@ -442,18 +498,46 @@ bool trace_should_record() {
  void trace_record_mem_update(u32 address, u32 size, const void* data) {
      if (size == 0 || data == nullptr || !trace_should_record())
          return;
@@ -165,7 +176,7 @@ index d94f811..1d0ca67 100644
  }
  
  void trace_close_and_log() {
-@@ -491,6 +571,10 @@ void trace_on_present() {
+@@ -491,6 +575,10 @@ void trace_on_present() {
          trace_close_and_log();
      g_trace_present_scope_frame = 0ull;
      g_trace_frame_begun = false;
@@ -176,7 +187,7 @@ index d94f811..1d0ca67 100644
  }
  // ---------------------------------------------------------------------------
  
-@@ -937,7 +1021,7 @@ bool dol_aurora_initialize(int argc, char** argv,
+@@ -937,7 +1025,7 @@ bool dol_aurora_initialize(int argc, char** argv,
      g_trace_present_scope_frame = 0ull;
      g_trace_frame_begun = false;
      g_trace_frames_recorded = 0ull;
@@ -185,7 +196,7 @@ index d94f811..1d0ca67 100644
      const char* trace_out = std::getenv("DOL_AURORA_RECOMP_TRACE_OUT");
      if (trace_out != nullptr && trace_out[0] != '\0') {
          g_trace_path = trace_out;
-@@ -1114,6 +1198,12 @@ void dol_aurora_flush_gap_report(void) {
+@@ -1114,6 +1202,12 @@ void dol_aurora_flush_gap_report(void) {
      flush_gxcore_gap_counters();
  }
  
@@ -198,7 +209,23 @@ index d94f811..1d0ca67 100644
  void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user) {
      g_efb_frame_fill = fn;
      g_efb_frame_fill_user = user;
-@@ -1432,6 +1522,7 @@ void aurora_backend_present(void) {
+@@ -1212,6 +1306,15 @@ void aurora_backend_present(void) {
+         }
+     }
+     ++g_present_count;
++    if (g_gx_time_log) {
++        static std::uint64_t last_present_ns;
++        const std::uint64_t now = SDL_GetTicksNS();
++        std::fprintf(stderr, "[gx-time] frame=%llu gx=%.2fms frame=%.2fms\n",
++                     g_present_count, g_gx_time_ns / 1e6,
++                     last_present_ns ? (now - last_present_ns) / 1e6 : 0.0);
++        last_present_ns = now;
++        g_gx_time_ns = 0;
++    }
+     if (g_frame_pacing_log &&
+         (g_present_count <= 10 || (g_present_count % 60) == 0)) {
+         const AuroraStats* stats = aurora_get_stats();
+@@ -1432,6 +1535,7 @@ void aurora_backend_present(void) {
      const unsigned long long present_fifo = g_fifo_bytes;
      g_fifo_bytes = 0;
      poll_events();
@@ -206,7 +233,22 @@ index d94f811..1d0ca67 100644
      if (!g_should_quit) {
          g_frame_open = aurora_begin_frame();
  #if GXRUNTIME_HAS_AURORA_RECOMP
-@@ -1848,6 +1939,7 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1482,7 +1586,13 @@ void aurora_backend_gx_write(u64 value, u8 size) {
+         return;
+     g_fifo_bytes += size;
+ #if GXRUNTIME_HAS_AURORA_RECOMP
+-    shadow_frontend_write(value, size);
++    if (g_gx_time_log) {
++        const std::uint64_t t0 = SDL_GetTicksNS();
++        shadow_frontend_write(value, size);
++        g_gx_time_ns += SDL_GetTicksNS() - t0;
++    } else {
++        shadow_frontend_write(value, size);
++    }
+     // Record AFTER the shadow write so MEM_UPDATEs its resolves emitted
+     // precede this GX_WRITE in the trace (replay reads them first), and
+     // BEFORE the live-Aurora forwarding below so the pristine value is
+@@ -1848,6 +1958,7 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
  
      int queued = SDL_GetAudioStreamQueued(g_audio_stream);
      unsigned waited_ms = 0;
@@ -214,7 +256,7 @@ index d94f811..1d0ca67 100644
      while (queued > max_queued_bytes && waited_ms < 20u) {
          g_audio_throttle_count++;
          if (g_audio_queue_log &&
-@@ -1860,8 +1952,17 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1860,8 +1971,17 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
                           max_queued_bytes);
          SDL_Delay(1);
          waited_ms++;
@@ -232,7 +274,7 @@ index d94f811..1d0ca67 100644
  
      const bool low_queue =
          queued >= 0 && queued < bytes_per_second / 100;
-@@ -1886,6 +1987,169 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1886,6 +2006,169 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
      }
  }
  
@@ -446,10 +488,49 @@ index b09ef4d..efb1a26 100644
        xfbTex && *xfbTex ? (*xfbTex)->size.width : efbSource.size.width;
    const uint32_t contentH =
 diff --git a/graphics/aurora/lib/gfx/gxcore_draw.cpp b/graphics/aurora/lib/gfx/gxcore_draw.cpp
-index 71136b9..2232954 100644
+index 71136b9..15dbb7b 100644
 --- a/graphics/aurora/lib/gfx/gxcore_draw.cpp
 +++ b/graphics/aurora/lib/gfx/gxcore_draw.cpp
-@@ -242,6 +242,13 @@ TextureCacheStats g_textureCacheStats;
+@@ -19,6 +19,7 @@
+ #include <absl/container/flat_hash_map.h>
+ 
+ #include <algorithm>
++#include <array>
+ #include <cstring>
+ #include <vector>
+ 
+@@ -228,6 +229,30 @@ struct TextureKey {
+ };
+ 
+ absl::flat_hash_map<TextureKey, TextureHandle> g_textureCache;
++// Content hashes already computed since the last EFB copy, by source identity.
++// A room binds the same few textures for thousands of draws a frame, and
++// hashing every texel of each on every draw cost about an eighth of the main
++// thread in Eternal Darkness's foyer. Guest texture memory is rewritten
++// between frames (movie frames, screen changes), not between the draws of one
++// frame, so the hash is reused until the next copy (each display copy ends a
++// frame).
++struct TextureHashKey {
++  uint32_t address;
++  uint32_t size;
++  uint32_t format;
++  uint32_t tlut_address;
++  uint32_t tlut_entries;
++  bool operator==(const TextureHashKey&) const = default;
++  template <typename H>
++  friend H AbslHashValue(H h, const TextureHashKey& key) {
++    return H::combine(std::move(h), key.address, key.size, key.format,
++                      key.tlut_address, key.tlut_entries);
++  }
++};
++absl::flat_hash_map<TextureHashKey, uint64_t> g_frameTextureHashes;
++// Bumped whenever bound texture contents may have changed (EFB copies, cache
++// resets), invalidating the per-draw binding memo in submit_draw_plan.
++uint32_t g_textureEpoch = 0;
+ // address -> the key currently cached at that guest address. When new content
+ // arrives at an address (movie streaming, screen transitions), the prior entry
+ // for that address is evicted so the content-hashed cache stays bounded to one
+@@ -242,6 +267,13 @@ TextureCacheStats g_textureCacheStats;
  // (a re-copy to the same address updates in place, matching the live path).
  // E7: format-0xF display copies also land here (Virtual XFB GPU texture).
  absl::flat_hash_map<uint32_t, TextureHandle> g_efbCopyTextures;
@@ -463,7 +544,7 @@ index 71136b9..2232954 100644
  
  // E7 present-from-RAM: YUYV decoded from guest MEM1 when no GPU copy exists
  // (software/external XFB writers). Keyed by physical address; re-upload when
-@@ -281,13 +288,17 @@ unsigned long long xfb_ram_present_count() noexcept {
+@@ -281,13 +313,17 @@ unsigned long long xfb_ram_present_count() noexcept {
    return g_xfb_ram_present_count;
  }
  
@@ -483,7 +564,7 @@ index 71136b9..2232954 100644
      return &it->second;
  
    const auto dims = aurora::vi::configured_xfb_size();
-@@ -536,6 +547,10 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -536,6 +572,10 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
    default:
      break; // None here; All was skipped at plan time
    }
@@ -494,8 +575,12 @@ index 71136b9..2232954 100644
  
    const wgpu::RenderPipelineDescriptor descriptor{
        .label = "GXCore Pipeline",
-@@ -593,6 +608,8 @@ void reset_texture_cache() {
+@@ -591,8 +631,12 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
+ 
+ void reset_texture_cache() {
    g_textureCache.clear();
++  g_frameTextureHashes.clear();
++  ++g_textureEpoch;
    g_textureAddrKey.clear();
    g_efbCopyTextures.clear();
 +  g_xfbCopyTextures.clear();
@@ -503,7 +588,16 @@ index 71136b9..2232954 100644
    g_ramXfbTextures.clear();
    g_last_xfb_dest_stride = 0;
    g_last_xfb_height = 0;
-@@ -660,8 +677,9 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -612,6 +656,8 @@ const TextureCacheStats& texture_cache_stats() { return g_textureCacheStats; }
+ // color/Z afterwards. The bound draw's geometry is already in the pass (the
+ // sink flushed the pending draw before firing this).
+ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
++  g_frameTextureHashes.clear();  // a frame (or a copy into RAM) ended
++  ++g_textureEpoch;
+   // Mirror the copy-clear color/Z (BP 0x4F-0x51 at this copy) into the gx
+   // state GXSetCopyClear would have written: begin_frame's pass-0 EFB clear
+   // reads g_gxState.clearColor/clearDepth, and in gxcore mode the live gx
+@@ -660,8 +706,9 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
        dstHeight = xfb_h;
    }
  
@@ -515,7 +609,7 @@ index 71136b9..2232954 100644
        it->second->size.width != dstWidth || it->second->size.height != dstHeight) {
      TextureHandle handle;
      if (!is_xfb && gfx::tex_copy_conv::needs_conversion(fmt)) {
-@@ -670,7 +688,7 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -670,7 +717,7 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
        handle = gfx::new_render_texture(dstWidth, dstHeight, GX_TF_RGBA8,
                                         is_xfb ? "GXCore XFB" : "GXCore Copy");
      }
@@ -524,7 +618,7 @@ index 71136b9..2232954 100644
    }
    if (!it->second) {
      return;
-@@ -714,6 +732,20 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -714,6 +761,20 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
        efb_readback::set_continuous(true);
      efb_readback::request();
    }
@@ -545,6 +639,226 @@ index 71136b9..2232954 100644
    gfx::resolve_pass(it->second, srcRect, do_clear && cmd.color_update,
                      do_clear && cmd.alpha_update,
                      do_clear && cmd.depth_update,
+@@ -839,10 +900,22 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+     const uint32_t size = std::min(tsize, available);
+     // Hash the actual source texels (+ TLUT for CI) so a content change under an
+     // unchanged guest identity is a distinct cache entry — see TextureKey.
+-    uint64_t content_hash = XXH3_64bits(bytes, size);
+-    if (gxc::is_ci_format(format) && has_tlut && tlut_data != nullptr)
+-      content_hash =
+-          XXH3_64bits_withSeed(tlut_data, tlut_available, content_hash);
++    const bool hash_tlut =
++        gxc::is_ci_format(format) && has_tlut && tlut_data != nullptr;
++    const TextureHashKey hash_key{address, size, format,
++                                  hash_tlut ? tlut_address : 0u,
++                                  hash_tlut ? tlut_available : 0u};
++    uint64_t content_hash;
++    if (auto memo = g_frameTextureHashes.find(hash_key);
++        memo != g_frameTextureHashes.end()) {
++      content_hash = memo->second;
++    } else {
++      content_hash = XXH3_64bits(bytes, size);
++      if (hash_tlut)
++        content_hash =
++            XXH3_64bits_withSeed(tlut_data, tlut_available, content_hash);
++      g_frameTextureHashes.emplace(hash_key, content_hash);
++    }
+     const TextureKey key{address,     tsize,        format,      width,
+                          height,      tlut_address, tlut_format, tlut_entries,
+                          content_hash};
+@@ -892,7 +965,96 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+   };
+ 
+   BindGroupRef textureBindGroup = 0;
++  // Reuse the previous draw's texture bind group when this draw binds the same
++  // textures and samplers in the same frame (rooms bind a handful of textures
++  // across thousands of draws). Keyed on every input of the binding below.
++  struct BindMemo {
++    uint32_t frame = UINT32_MAX;
++    uint32_t epoch = 0;
++    uint32_t len = 0;
++    std::array<uint64_t, 8u * 20u + 2u> key{};
++    BindGroupRef group = 0;
++    bool complete = true;
++  };
++  static BindMemo s_bindMemo;
++  std::array<uint64_t, 8u * 20u + 2u> bindKey{};
++  uint32_t bindLen = 0;
++  auto put = [&](uint64_t w) { bindKey[bindLen++] = w; };
++  auto put_sampler = [&](const gxc::PlanSampler& sp) {
++    put(uint64_t{sp.valid} | uint64_t{sp.wrap_s} << 8 | uint64_t{sp.wrap_t} << 16 |
++        uint64_t{sp.mag_filter} << 24 | uint64_t{sp.min_filter} << 32 |
++        uint64_t{sp.mipmap_filter} << 40 | uint64_t{sp.diag_lod} << 48 |
++        uint64_t{sp.max_aniso} << 56);
++    put(uint64_t{sp.lod_clamp} | uint64_t{static_cast<uint8_t>(sp.lod_bias_raw)} << 8 |
++        uint64_t{sp.min_lod_raw} << 16 | uint64_t{sp.max_lod_raw} << 24 |
++        uint64_t{sp.host_address_u} << 32 | uint64_t{sp.host_address_v} << 40 |
++        uint64_t{sp.host_mag} << 48 | uint64_t{sp.host_min} << 56);
++    uint32_t f[3];
++    std::memcpy(&f[0], &sp.host_lod_min, 4);
++    std::memcpy(&f[1], &sp.host_lod_max, 4);
++    std::memcpy(&f[2], &sp.host_lod_bias, 4);
++    put(uint64_t{sp.host_mip} | uint64_t{sp.host_max_anisotropy} << 16 |
++        uint64_t{f[0]} << 32);
++    put(uint64_t{f[1]} | uint64_t{f[2]} << 32);
++  };
++  auto put_texture = [&](uint32_t address, uint32_t tsize, uint32_t format,
++                         uint32_t width, uint32_t height, const void* data,
++                         uint32_t available, bool has_tlut, uint32_t tlut_address,
++                         uint32_t tlut_format, uint32_t tlut_entries,
++                         const void* tlut_data, uint32_t tlut_available) {
++    put(uint64_t{address} | uint64_t{tsize} << 32);
++    put(uint64_t{format} | uint64_t{width} << 32);
++    put(uint64_t{height} | uint64_t{available} << 32);
++    put(reinterpret_cast<uintptr_t>(data));
++    put(uint64_t{has_tlut} | uint64_t{tlut_address} << 32);
++    put(uint64_t{tlut_format} | uint64_t{tlut_entries} << 32);
++    put(reinterpret_cast<uintptr_t>(tlut_data));
++    put(tlut_available);
++  };
+   if (plan.pipeline.shader.textured != 0) {
++    put(plan.texmap_mask);
++    if (plan.texmap_mask == 0u) {
++      put(plan.has_texture);
++      put_texture(plan.tex_address, plan.tex_size, plan.tex_format,
++                  plan.tex_width, plan.tex_height, plan.tex_data,
++                  plan.tex_available, plan.has_tlut, plan.tlut_address,
++                  plan.tlut_format, plan.tlut_entries, plan.tlut_data,
++                  plan.tlut_available);
++      put_sampler(plan.sampler);
++    } else {
++      for (uint32_t t = 0; t < 8u; ++t) {
++        if ((plan.texmap_mask & (1u << t)) == 0u)
++          continue;
++        const gxc::PlanTexture& pt = plan.textures[t];
++        put(pt.valid);
++        put_texture(pt.address, pt.size, pt.format, pt.width, pt.height,
++                    pt.data, pt.available, pt.has_tlut, pt.tlut_address,
++                    pt.tlut_format, pt.tlut_entries, pt.tlut_data,
++                    pt.tlut_available);
++        put_sampler(pt.sampler.valid ? pt.sampler : plan.samplers[t]);
++      }
++    }
++  }
++  const bool bindMemoHit =
++      plan.pipeline.shader.textured != 0 &&
++      s_bindMemo.frame == current_frame() && s_bindMemo.epoch == g_textureEpoch &&
++      s_bindMemo.len == bindLen &&
++      std::memcmp(s_bindMemo.key.data(), bindKey.data(),
++                  bindLen * sizeof(uint64_t)) == 0;
++  if (bindMemoHit) {
++    if (!s_bindMemo.complete)
++      return false;
++    textureBindGroup = s_bindMemo.group;
++  } else if (plan.pipeline.shader.textured != 0) {
++    auto remember = [&](BindGroupRef group, bool complete) {
++      s_bindMemo.frame = current_frame();
++      s_bindMemo.epoch = g_textureEpoch;
++      s_bindMemo.len = bindLen;
++      std::memcpy(s_bindMemo.key.data(), bindKey.data(),
++                  bindLen * sizeof(uint64_t));
++      s_bindMemo.group = group;
++      s_bindMemo.complete = complete;
++    };
+     if (plan.texmap_mask == 0u) {
+       // Single-texmap fast path: primary texture + plan.sampler at binding 0/1.
+       if (plan.has_texture) {
+@@ -919,6 +1081,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+           textureBindGroup = bind_group_ref(descriptor);
+         }
+       }
++      remember(textureBindGroup, true);
+     } else {
+       // Multi-texmap: bind each used texmap at 2t (texture) / 2t+1 (sampler),
+       // matching the WGSL declarations. Per-texmap PlanSampler from
+@@ -951,8 +1114,10 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+         entries.push_back(WGPUBindGroupEntry{
+             .binding = 2u * t + 1u, .sampler = heldSamplers.back().Get()});
+       }
+-      if (!complete)
++      if (!complete) {
++        remember(0, false);
+         return false;
++      }
+       const WGPUBindGroupDescriptor descriptor{
+           .label = {"GXCore Texture Bind Group", WGPU_STRLEN},
+           .layout = texture_bind_group_layout(plan.texmap_mask).Get(),
+@@ -960,6 +1125,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+           .entries = entries.data(),
+       };
+       textureBindGroup = bind_group_ref(descriptor);
++      remember(textureBindGroup, true);
+     }
+   }
+ 
+@@ -969,24 +1135,56 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+   const auto idxRange = push_indices(
+       reinterpret_cast<const uint8_t*>(plan.indices.data()),
+       plan.indices.size() * sizeof(uint16_t), 4);
+-  const auto uniformRange = push_uniform(
+-      reinterpret_cast<const uint8_t*>(&plan.constants),
+-      sizeof(plan.constants));
++  // Consecutive draws usually carry identical constants (several KB of
++  // matrices and lights): reuse the previous upload within the same frame.
++  struct UniformMemo {
++    uint32_t frame = UINT32_MAX;
++    std::vector<uint8_t> bytes;
++    Range range{};
++  };
++  auto push_uniform_memo = [](UniformMemo& memo, const void* data,
++                              size_t size) -> Range {
++    if (memo.frame == current_frame() && memo.bytes.size() == size &&
++        std::memcmp(memo.bytes.data(), data, size) == 0)
++      return memo.range;
++    memo.range = push_uniform(static_cast<const uint8_t*>(data), size);
++    memo.frame = current_frame();
++    memo.bytes.assign(static_cast<const uint8_t*>(data),
++                      static_cast<const uint8_t*>(data) + size);
++    return memo.range;
++  };
++  static UniformMemo s_vertexUniforms;
++  static UniformMemo s_pixelUniforms;
++  const auto uniformRange = push_uniform_memo(
++      s_vertexUniforms, &plan.constants, sizeof(plan.constants));
+   const bool tev = plan.pipeline.shader.tev_valid != 0;
+   Range pixelUniformRange{};
+   if (tev) {
+-    pixelUniformRange = push_uniform(
+-        reinterpret_cast<const uint8_t*>(&plan.pixel_constants),
+-        sizeof(plan.pixel_constants));
++    pixelUniformRange = push_uniform_memo(
++        s_pixelUniforms, &plan.pixel_constants, sizeof(plan.pixel_constants));
++  }
++
++  // pipeline_ref hashes the whole config even for a repeat; compare bytes.
++  const PipelineConfig pipelineConfig{
++      .version = GXCorePipelineConfigVersion,
++      .key = plan.pipeline,
++      .msaaSamples = get_sample_count(),
++  };
++  static PipelineConfig s_lastPipelineConfig{};
++  static PipelineRef s_lastPipeline{};
++  static bool s_havePipeline = false;
++  if (!s_havePipeline ||
++      std::memcmp(&s_lastPipelineConfig, &pipelineConfig,
++                  sizeof pipelineConfig) != 0) {
++    s_lastPipeline = pipeline_ref(pipelineConfig);
++    s_lastPipelineConfig = pipelineConfig;
++    s_havePipeline = true;
+   }
++  const PipelineRef pipeline = s_lastPipeline;
+ 
+   auto issue_draw = [&]() {
+     push_draw_command(DrawData{
+-        .pipeline = pipeline_ref(PipelineConfig{
+-            .version = GXCorePipelineConfigVersion,
+-            .key = plan.pipeline,
+-            .msaaSamples = get_sample_count(),
+-        }),
++        .pipeline = pipeline,
+         .vertRange = vertRange,
+         .idxRange = idxRange,
+         .uniformRange = uniformRange,
 diff --git a/graphics/aurora/lib/gfx/xfb_present.hpp b/graphics/aurora/lib/gfx/xfb_present.hpp
 index b205cfa..ee13954 100644
 --- a/graphics/aurora/lib/gfx/xfb_present.hpp
@@ -559,8 +873,22 @@ index b205cfa..ee13954 100644
 +const TextureHandle* last_display_copy() noexcept;
  
  } // namespace aurora::gfx::gxcore
+diff --git a/graphics/frontend/include/gxruntime/aurora_recomp/render_sink.hpp b/graphics/frontend/include/gxruntime/aurora_recomp/render_sink.hpp
+index 88110c8..6e59778 100644
+--- a/graphics/frontend/include/gxruntime/aurora_recomp/render_sink.hpp
++++ b/graphics/frontend/include/gxruntime/aurora_recomp/render_sink.hpp
+@@ -517,6 +517,9 @@ std::uint32_t build_array_sizes(const ConsumedDraw& draw, std::uint32_t* out,
+ 
+ RenderPacket make_render_packet(std::uint32_t sequence,
+                                 const DolGxRecompTraceEvent& event);
++// In-place form for a packet reused across events; see render_sink.cpp.
++void fill_render_packet(RenderPacket& packet, std::uint32_t sequence,
++                        const DolGxRecompTraceEvent& event);
+ const char* trace_event_name(DolGxRecompEventKind kind);
+ 
+ } // namespace gxruntime::aurora_recomp
 diff --git a/graphics/frontend/include/gxruntime/aurora_recomp/retail_gx_frontend.hpp b/graphics/frontend/include/gxruntime/aurora_recomp/retail_gx_frontend.hpp
-index 1ef8382..c27c418 100644
+index 1ef8382..5d65988 100644
 --- a/graphics/frontend/include/gxruntime/aurora_recomp/retail_gx_frontend.hpp
 +++ b/graphics/frontend/include/gxruntime/aurora_recomp/retail_gx_frontend.hpp
 @@ -116,6 +116,13 @@ public:
@@ -597,16 +925,17 @@ index 1ef8382..c27c418 100644
  
    DolGxRecompState state_{};
    std::vector<std::uint8_t> fifo_buffer_;
-@@ -165,6 +185,8 @@ private:
+@@ -165,6 +185,9 @@ private:
    void notify_events(std::uint32_t first_event);
  
    bool packet_drain_enabled_ = false;
 +  AuroraRenderSink* drain_sink_ = nullptr;
++  RenderPacket emit_packet_{};  // reused by emit_new_packets
 +  std::uint32_t drain_first_event_ = 0u;
    std::uint64_t zero_vertex_draws_ = 0;
    TraceEventObserver event_observer_ = nullptr;
    void* event_observer_user_ = nullptr;
-@@ -177,9 +199,15 @@ private:
+@@ -177,9 +200,15 @@ private:
    std::uint32_t last_error_b_ = 0;
    std::uint32_t last_error_c_ = 0;
    std::uint32_t last_error_d_ = 0;
@@ -653,6 +982,127 @@ index 56ea697..1ef3293 100644
 +bool decode_gx_state(const RecordView& r, std::span<const std::uint8_t>& bytes);
  
  } // namespace gxruntime::aurora_recomp::trace
+diff --git a/graphics/frontend/src/render_sink.cpp b/graphics/frontend/src/render_sink.cpp
+index 2ef5b3d..a5a13eb 100644
+--- a/graphics/frontend/src/render_sink.cpp
++++ b/graphics/frontend/src/render_sink.cpp
+@@ -196,18 +196,32 @@ bool ConsumingAuroraRenderSink::submit_packet(const RenderPacket& packet) {
+       if (arrays_[i].base_valid && arrays_[i].stride_valid)
+         active_mask |= (1u << i);
+     }
+-    ConsumedDraw draw{
+-        .sequence = packet.sequence,
+-        .primitive = packet.draw.primitive,
+-        .vtx_fmt = packet.draw.vtx_fmt,
+-        .vertex_count = packet.draw.vertex_count,
+-        .vertex_size = packet.draw.vertex_size,
+-        .cull_all = cull_all_,
+-        .active_array_mask = active_mask,
+-        .texture = bound_texture_,
+-    };
++    // The previous draw's trailing INDEXED_SPAN packets are now all in, so it is
++    // span-complete: assemble it before it is replaced.
++    if (!draws_.empty())
++      accumulate_assembly(draws_.back());
++    // Build the new draw in place. In streaming mode the one retained element
++    // is reused rather than cleared and copied in again: a ConsumedDraw carries
++    // several KB of matrices, and two full copies per draw were a measurable
++    // part of a 9,000-draw frame. Every field is set below (array inputs are
++    // read only up to array_input_count).
++    if (!streaming_ || draws_.empty())
++      draws_.emplace_back();
++    else if (draws_.size() > 1u)
++      draws_.erase(draws_.begin(), draws_.end() - 1);
++    ConsumedDraw& draw = draws_.back();
++    draw.sequence = packet.sequence;
++    draw.primitive = packet.draw.primitive;
++    draw.vtx_fmt = packet.draw.vtx_fmt;
++    draw.vertex_count = packet.draw.vertex_count;
++    draw.vertex_size = packet.draw.vertex_size;
++    draw.cull_all = cull_all_;
++    draw.active_array_mask = active_mask;
++    draw.texture = bound_texture_;
+     for (std::uint32_t t = 0; t < ConsumedDraw::kMaxTexmaps; ++t)
+       draw.textures[t] = bound_textures_[t];
++    draw.array_input_count = 0;
++    draw.vertex_payload.clear();
+     draw.transform_flags = packet.draw.transform_flags;
+     draw.current_pn_matrix = packet.draw.current_pn_matrix;
+     draw.payload_pn_matrix_mask = packet.draw.payload_pn_matrix_mask;
+@@ -242,18 +256,7 @@ bool ConsumingAuroraRenderSink::submit_packet(const RenderPacket& packet) {
+                 sizeof(draw.post_matrix_word_mask));
+     draw.dualtex_info = packet.draw.dualtex_info;
+     draw.dualtex_valid = packet.draw.dualtex_valid;
+-    // The previous draw's trailing INDEXED_SPAN packets are now all in, so it is
+-    // span-complete: assemble it before it is dropped (streaming clears draws_).
+-    if (!draws_.empty())
+-      accumulate_assembly(draws_.back());
+-    // Array inputs are appended by the draw's trailing INDEXED_SPAN packets
+-    // (only indexed attrs read CP arrays). In streaming mode keep only the
+-    // latest draw so the vector stays bounded; back() is still the target of
+-    // those spans.
+-    if (streaming_)
+-      draws_.clear();
+-    draws_.push_back(draw);
+-    back_assembled_ = false; // the just-pushed draw is not yet assembled
++    back_assembled_ = false; // the new draw is not yet assembled
+     // Retain the draw's raw per-vertex bytes (valid only during this call) so an
+     // issuing sink can assemble vertices after submit. Append after push_back so
+     // the copy lands on the just-added draw.
+@@ -522,11 +525,23 @@ std::uint32_t build_array_sizes(const ConsumedDraw& draw, std::uint32_t* out,
+ 
+ RenderPacket make_render_packet(std::uint32_t sequence,
+                                 const DolGxRecompTraceEvent& event) {
+-  RenderPacket packet{
+-      .kind = RenderPacketKind::TraceEvent,
+-      .sequence = sequence,
+-      .event = event,
+-  };
++  RenderPacket packet{};
++  fill_render_packet(packet, sequence, event);
++  return packet;
++}
++
++// Fill a reused packet in place. The draw member (several KB of matrices and
++// lights) is not cleared: only Draw packets read it, and the emitter copies
++// the draw's whole transform snapshot over it (or resets it when a draw has
++// none). Zeroing it for every event cost ~8% of the GX thread in big scenes.
++void fill_render_packet(RenderPacket& packet, std::uint32_t sequence,
++                        const DolGxRecompTraceEvent& event) {
++  packet.kind = RenderPacketKind::TraceEvent;
++  packet.sequence = sequence;
++  packet.event = event;
++  packet.stream = {};
++  packet.state = {};
++  packet.resource = {};
+ 
+   switch (event.kind) {
+   case DOL_GX_RECOMP_EVENT_FIFO_BYTES:
+@@ -681,18 +696,16 @@ RenderPacket make_render_packet(std::uint32_t sequence,
+     break;
+   case DOL_GX_RECOMP_EVENT_DRAW:
+     packet.kind = RenderPacketKind::Draw;
+-    packet.draw = {
+-        .primitive = event.a,
+-        .vtx_fmt = event.b,
+-        .vertex_count = event.c,
+-        .vertex_size = event.d,
+-    };
++    packet.draw.primitive = event.a;
++    packet.draw.vtx_fmt = event.b;
++    packet.draw.vertex_count = event.c;
++    packet.draw.vertex_size = event.d;
++    packet.draw.vertex_payload = nullptr;
++    packet.draw.vertex_payload_size = 0;
+     break;
+   default:
+     break;
+   }
+-
+-  return packet;
+ }
+ 
+ const char* trace_event_name(DolGxRecompEventKind kind) {
 diff --git a/graphics/frontend/src/replay.cpp b/graphics/frontend/src/replay.cpp
 index e21b335..80dc91b 100644
 --- a/graphics/frontend/src/replay.cpp
@@ -686,10 +1136,37 @@ index e21b335..80dc91b 100644
        // Unknown kinds are forward-compatible: skip.
        break;
 diff --git a/graphics/frontend/src/retail_gx_frontend.cpp b/graphics/frontend/src/retail_gx_frontend.cpp
-index 06fff92..2445472 100644
+index 06fff92..f30079f 100644
 --- a/graphics/frontend/src/retail_gx_frontend.cpp
 +++ b/graphics/frontend/src/retail_gx_frontend.cpp
-@@ -324,6 +324,8 @@ void RetailGxFrontend::reset(const DolGuestAddressResolver* resolver) {
+@@ -246,11 +246,13 @@ std::uint32_t payload_pn_matrix_mask(const DolGxRecompState& state,
+   return mask;
+ }
+ 
+-DrawTransformSnapshot snapshot_transform(const DolGxRecompState& state,
+-                                         const DolGxRecompVertexLayout& layout,
+-                                         std::span<const std::uint8_t> vertex_data,
+-                                         std::uint16_t vertex_count) {
+-  DrawTransformSnapshot out{};
++// Fills a freshly value-initialised (zeroed) snapshot in place: the snapshot is
++// several KB, and returning it by value cost an extra copy per draw.
++void snapshot_transform(DrawTransformSnapshot& out,
++                        const DolGxRecompState& state,
++                        const DolGxRecompVertexLayout& layout,
++                        std::span<const std::uint8_t> vertex_data,
++                        std::uint16_t vertex_count) {
+   if (state.viewport_valid) {
+     out.transform_flags |= kDrawTransformViewportValid;
+     std::memcpy(out.viewport, state.viewport, sizeof(out.viewport));
+@@ -292,7 +294,6 @@ DrawTransformSnapshot snapshot_transform(const DolGxRecompState& state,
+               sizeof(out.post_matrix_word_mask));
+   out.dualtex_info = state.dualtex_info;
+   out.dualtex_valid = state.dualtex_valid;
+-  return out;
+ }
+ 
+ } // namespace
+@@ -324,6 +325,8 @@ void RetailGxFrontend::reset(const DolGuestAddressResolver* resolver) {
    last_error_b_ = 0u;
    last_error_c_ = 0u;
    last_error_d_ = 0u;
@@ -698,7 +1175,7 @@ index 06fff92..2445472 100644
  }
  
  bool RetailGxFrontend::set_vertex_layout(std::uint8_t vtx_fmt,
-@@ -386,6 +388,9 @@ bool RetailGxFrontend::flush(AuroraRenderSink* sink) {
+@@ -386,6 +389,9 @@ bool RetailGxFrontend::flush(AuroraRenderSink* sink) {
      (void)dol_gx_recomp_trace_events(&state_, &first_event);
    }
  
@@ -708,7 +1185,7 @@ index 06fff92..2445472 100644
    std::size_t consumed = 0;
    if (!parse_stream(fifo_buffer_, true, true, 0u, &consumed))
      return false;
-@@ -395,6 +400,7 @@ bool RetailGxFrontend::flush(AuroraRenderSink* sink) {
+@@ -395,6 +401,7 @@ bool RetailGxFrontend::flush(AuroraRenderSink* sink) {
                         fifo_buffer_.begin() +
                             static_cast<std::ptrdiff_t>(consumed));
    }
@@ -716,7 +1193,7 @@ index 06fff92..2445472 100644
    notify_events(first_event);
  
    if (sink == nullptr)
-@@ -419,6 +425,9 @@ bool RetailGxFrontend::write_display_list(std::span<const std::uint8_t> bytes,
+@@ -419,6 +426,9 @@ bool RetailGxFrontend::write_display_list(std::span<const std::uint8_t> bytes,
    // Mirrors the 0x40 opcode branch of parse_stream: a zero-size list is a
    // no-op, the list bytes are recorded, then parsed at DL depth with partial
    // commands forbidden and full consumption required.
@@ -726,7 +1203,7 @@ index 06fff92..2445472 100644
    if (!bytes.empty()) {
      if (!dol_gx_recomp_push_fifo(&state_, bytes.data(),
                                   static_cast<std::uint32_t>(bytes.size())))
-@@ -429,6 +438,7 @@ bool RetailGxFrontend::write_display_list(std::span<const std::uint8_t> bytes,
+@@ -429,6 +439,7 @@ bool RetailGxFrontend::write_display_list(std::span<const std::uint8_t> bytes,
        return false;
      }
    }
@@ -734,7 +1211,7 @@ index 06fff92..2445472 100644
    notify_events(first_event);
  
    if (sink == nullptr)
-@@ -450,12 +460,16 @@ bool RetailGxFrontend::replay_fifo(std::span<const std::uint8_t> bytes,
+@@ -450,12 +461,16 @@ bool RetailGxFrontend::replay_fifo(std::span<const std::uint8_t> bytes,
      (void)dol_gx_recomp_trace_events(&state_, &first_event);
    }
  
@@ -751,7 +1228,7 @@ index 06fff92..2445472 100644
    notify_events(first_event);
  
    if (sink == nullptr)
-@@ -467,6 +481,33 @@ bool RetailGxFrontend::replay_fifo(std::span<const std::uint8_t> bytes,
+@@ -467,6 +482,33 @@ bool RetailGxFrontend::replay_fifo(std::span<const std::uint8_t> bytes,
    return true;
  }
  
@@ -785,7 +1262,7 @@ index 06fff92..2445472 100644
  void RetailGxFrontend::notify_events(std::uint32_t first_event) {
    if (event_observer_ == nullptr)
      return;
-@@ -515,6 +556,11 @@ bool RetailGxFrontend::parse_stream(std::span<const std::uint8_t> bytes,
+@@ -515,6 +557,11 @@ bool RetailGxFrontend::parse_stream(std::span<const std::uint8_t> bytes,
  
    std::size_t pos = 0;
    while (pos < bytes.size()) {
@@ -797,7 +1274,7 @@ index 06fff92..2445472 100644
      const std::uint8_t cmd = bytes[pos];
      if (cmd == 0x00u) {
        if (record_fifo_bytes &&
-@@ -631,11 +677,17 @@ bool RetailGxFrontend::parse_stream(std::span<const std::uint8_t> bytes,
+@@ -631,11 +678,17 @@ bool RetailGxFrontend::parse_stream(std::span<const std::uint8_t> bytes,
        in_display_list_ = true;
        dl_command_offset_ = call_offset;
        std::size_t dl_consumed = 0;
@@ -820,7 +1297,7 @@ index 06fff92..2445472 100644
          in_display_list_ = prev_in_dl;
          dl_command_offset_ = prev_dl_off;
          return false;
-@@ -710,13 +762,19 @@ bool RetailGxFrontend::parse_stream(std::span<const std::uint8_t> bytes,
+@@ -710,13 +763,19 @@ bool RetailGxFrontend::parse_stream(std::span<const std::uint8_t> bytes,
        const std::size_t vertex_bytes =
            static_cast<std::size_t>(vertex_count) * vertex_size;
        const std::size_t command_size = 3u + vertex_bytes;
@@ -841,7 +1318,7 @@ index 06fff92..2445472 100644
        if (!handle_draw(cmd,
                         std::span<const std::uint8_t>{bytes.data() + pos + 3u,
                                                       vertex_bytes},
-@@ -754,6 +812,11 @@ bool RetailGxFrontend::handle_bp(std::uint32_t raw) {
+@@ -754,6 +813,11 @@ bool RetailGxFrontend::handle_bp(std::uint32_t raw) {
    const std::uint32_t value = raw & 0x00FFFFFFu;
    if (!dol_gx_recomp_note_bp_reg(&state_, reg, value))
      return false;
@@ -853,7 +1330,50 @@ index 06fff92..2445472 100644
  
    std::uint8_t slot = 0;
    if (map_image0_reg(reg, &slot) || map_image3_reg(reg, &slot))
-@@ -1021,6 +1084,195 @@ void RetailGxFrontend::drain_emitted_packets(std::uint32_t emitted_count) {
+@@ -882,8 +946,8 @@ bool RetailGxFrontend::handle_draw(std::uint8_t command,
+     // Retain this draw's raw per-vertex bytes in trace order; emit_new_packets
+     // pops them in lockstep so each Draw packet references its own payload.
+     draw_payload_queue_.emplace_back(vertex_data.begin(), vertex_data.end());
+-    draw_transform_queue_.push_back(
+-        snapshot_transform(state_, *layout, vertex_data, vertex_count));
++    snapshot_transform(draw_transform_queue_.emplace_back(), state_, *layout,
++                       vertex_data, vertex_count);
+   }
+ 
+   for (std::uint32_t i = 0u; i < layout->indexed_attr_count; ++i) {
+@@ -931,10 +995,13 @@ bool RetailGxFrontend::emit_new_packets(AuroraRenderSink& sink,
+   if (first_event > events.size())
+     return false;
+ 
++  // One packet reused for every event (fill_render_packet leaves the large
++  // draw member alone; Draw packets get it from their snapshot below).
++  RenderPacket& packet = emit_packet_;
+   for (std::uint32_t i = first_event; i < events.size(); ++i) {
+     const std::uint32_t sequence =
+         packet_drain_enabled_ ? next_packet_sequence_++ : i;
+-    RenderPacket packet = make_render_packet(sequence, events[i]);
++    fill_render_packet(packet, sequence, events[i]);
+     // Draw events are emitted exactly once, in order, so the retained payloads
+     // pop FIFO in lockstep. Attach this draw's raw bytes for the issuing sink.
+     if (packet.kind == RenderPacketKind::Draw &&
+@@ -989,6 +1056,16 @@ bool RetailGxFrontend::emit_new_packets(AuroraRenderSink& sink,
+                   sizeof(packet.draw.post_matrix_word_mask));
+       packet.draw.dualtex_info = transform.dualtex_info;
+       packet.draw.dualtex_valid = transform.dualtex_valid;
++    } else if (packet.kind == RenderPacketKind::Draw) {
++      // No snapshot: clear what an earlier draw left in the reused packet.
++      RenderDrawPacket fresh{};
++      fresh.primitive = packet.draw.primitive;
++      fresh.vtx_fmt = packet.draw.vtx_fmt;
++      fresh.vertex_count = packet.draw.vertex_count;
++      fresh.vertex_size = packet.draw.vertex_size;
++      fresh.vertex_payload = packet.draw.vertex_payload;
++      fresh.vertex_payload_size = packet.draw.vertex_payload_size;
++      packet.draw = fresh;
+     }
+     if (!sink.submit_packet(packet))
+       return false;
+@@ -1021,6 +1098,195 @@ void RetailGxFrontend::drain_emitted_packets(std::uint32_t emitted_count) {
    emitted_trace_count_ = 0u;
  }
  
@@ -1261,10 +1781,28 @@ index 2d64013..04da7f7 100644
    append_u32(s, "num_tex_gens", sk.num_tex_gens, true);
    append_u32(s, "dualtex_enabled", sk.dualtex_enabled, true);
 diff --git a/graphics/gxcore/src/gxcore.cpp b/graphics/gxcore/src/gxcore.cpp
-index 2fb6944..7fefce3 100644
+index 2fb6944..96be2b8 100644
 --- a/graphics/gxcore/src/gxcore.cpp
 +++ b/graphics/gxcore/src/gxcore.cpp
-@@ -112,4 +112,12 @@ bool GxCoreSink::submit_packet(const ar::RenderPacket& packet) {
+@@ -1,4 +1,5 @@
+ // SPDX-License-Identifier: GPL-3.0-or-later
++#include <cstdlib>
+ #include "gxruntime/gxcore/gxcore.hpp"
+ 
+ // GxCoreSink: the AuroraRenderSink that pairs every span-complete draw with the
+@@ -23,6 +24,11 @@ void GxCoreSink::on_consumed_draw(const ar::ConsumedDraw& draw,
+   auto* self = static_cast<GxCoreSink*>(user);
+   if (self->plan_observer_ == nullptr)
+     return;
++  // DOL_GXCORE_SKIP_PLANS=1 (performance experiment): drop every draw before
++  // planning, to measure what the rest of the frame costs.
++  static const bool skip_plans = std::getenv("DOL_GXCORE_SKIP_PLANS") != nullptr;
++  if (skip_plans)
++    return;
+   const DrawPlan plan = self->pending_state_.build_draw_plan(
+       draw, self->counters_, &self->cached_attrs_, &self->cached_zslope_);
+   self->plan_observer_(plan, self->plan_observer_user_);
+@@ -112,4 +118,12 @@ bool GxCoreSink::submit_packet(const ar::RenderPacket& packet) {
  
  void GxCoreSink::flush_frame() { consumer_.flush_assembly(); }
  

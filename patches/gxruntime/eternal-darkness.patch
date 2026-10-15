@@ -1,8 +1,8 @@
 diff --git a/backends/aurora/aurora_backend.cpp b/backends/aurora/aurora_backend.cpp
-index d94f811..0089b97 100644
+index d94f811..dc0f90d 100644
 --- a/backends/aurora/aurora_backend.cpp
 +++ b/backends/aurora/aurora_backend.cpp
-@@ -19,9 +19,15 @@
+@@ -19,9 +19,20 @@
  #include <dolphin/pad.h>
  #include <dolphin/vi.h>
  #include <SDL3/SDL_audio.h>
@@ -13,12 +13,17 @@ index d94f811..0089b97 100644
  #include <SDL3/SDL_timer.h>
 +#include <SDL3/SDL_surface.h>
 +#include <SDL3/SDL_cpuinfo.h>
++#ifdef _WIN32
++#define WIN32_LEAN_AND_MEAN
++#define NOMINMAX
++#include <windows.h>
++#endif
 +#include <SDL3/SDL_thread.h>
 +#include <SDL3/SDL_video.h>
  
  #include <gx/fifo.hpp>
  #include <gx/gx.hpp>
-@@ -30,12 +36,23 @@
+@@ -30,12 +41,23 @@
  #include <cstdio>
  #include <cstdlib>
  #include <cstring>
@@ -42,7 +47,7 @@ index d94f811..0089b97 100644
  
  #if GXRUNTIME_HAS_AURORA_RECOMP
  // gxcore substrate submission lives in the Aurora fork (lib/gfx/gxcore_draw.cpp),
-@@ -46,9 +63,31 @@ namespace aurora::gfx::gxcore {
+@@ -46,9 +68,31 @@ namespace aurora::gfx::gxcore {
  bool submit_draw_plan(const gxruntime::gxcore::DrawPlan& plan);
  void copy_efb_to_texture(const gxruntime::gxcore::EfbCopyCommand& cmd);
  void reset_texture_cache();
@@ -74,7 +79,7 @@ index d94f811..0089b97 100644
  // Forward for continuous EFB readback attach (fork-internal).
  namespace aurora::gfx::efb_readback {
  void set_continuous(bool enabled) noexcept;
-@@ -57,10 +96,24 @@ bool peek(const std::uint8_t** rgba, std::uint32_t* width,
+@@ -57,10 +101,24 @@ bool peek(const std::uint8_t** rgba, std::uint32_t* width,
            std::uint32_t* height) noexcept;
  } // namespace aurora::gfx::efb_readback
  
@@ -100,7 +105,7 @@ index d94f811..0089b97 100644
  bool g_graphics_log = false;
  bool g_force_untextured = false;
  bool g_gx_core_enabled = true; // gxcore is the default renderer; DOL_GX_CORE=0 opts out
-@@ -112,6 +165,28 @@ std::array<PendingTlutMetadata, 20> g_pending_tluts{};
+@@ -112,6 +170,28 @@ std::array<PendingTlutMetadata, 20> g_pending_tluts{};
  // validating sink checked. The live Aurora path stays authoritative; this only
  // proves the consumer survives real FIFO traffic ahead of renderer cutover.
  gxruntime::aurora_recomp::RetailGxFrontend g_shadow_frontend;
@@ -129,7 +134,7 @@ index d94f811..0089b97 100644
  gxruntime::aurora_recomp::ConsumingAuroraRenderSink g_shadow_packet_sink;
  bool g_shadow_frontend_enabled = false;
  bool g_shadow_frontend_failed = false;
-@@ -124,9 +199,17 @@ bool g_shadow_frontend_failed = false;
+@@ -124,9 +204,17 @@ bool g_shadow_frontend_failed = false;
  gxruntime::gxcore::GxCoreSink g_core_sink;
  unsigned long long g_core_submitted = 0;
  unsigned long long g_core_rejected = 0;
@@ -147,7 +152,7 @@ index d94f811..0089b97 100644
      if (aurora::gfx::gxcore::submit_draw_plan(plan))
          ++g_core_submitted;
      else
-@@ -244,6 +327,7 @@ void log_callback(AuroraLogLevel level, const char* module, const char* message,
+@@ -244,6 +332,7 @@ void log_callback(AuroraLogLevel level, const char* module, const char* message,
  }
  
  void poll_events() {
@@ -155,7 +160,7 @@ index d94f811..0089b97 100644
      const AuroraEvent* event = aurora_update();
      while (event != nullptr && event->type != AURORA_NONE) {
          if (event->type == AURORA_EXIT)
-@@ -379,13 +463,39 @@ unsigned long long g_trace_present_scope_frame = 0ull;
+@@ -379,13 +468,39 @@ unsigned long long g_trace_present_scope_frame = 0ull;
  bool g_trace_frame_begun = false;
  unsigned long long g_trace_frames_recorded = 0ull;
  gxruntime::aurora_recomp::trace::TraceWriter g_trace_writer;
@@ -202,7 +207,7 @@ index d94f811..0089b97 100644
  
  unsigned long long trace_current_frame() {
      return g_trace_present_scope_frame != 0ull ? g_trace_present_scope_frame
-@@ -435,6 +545,17 @@ bool trace_should_record() {
+@@ -435,6 +550,17 @@ bool trace_should_record() {
          g_trace_writer.frame_begin(static_cast<u32>(frame));
          g_trace_frame_begun = true;
          ++g_trace_frames_recorded;
@@ -220,7 +225,7 @@ index d94f811..0089b97 100644
      }
      return true;
  }
-@@ -442,18 +563,46 @@ bool trace_should_record() {
+@@ -442,18 +568,46 @@ bool trace_should_record() {
  void trace_record_mem_update(u32 address, u32 size, const void* data) {
      if (size == 0 || data == nullptr || !trace_should_record())
          return;
@@ -276,7 +281,7 @@ index d94f811..0089b97 100644
  }
  
  void trace_close_and_log() {
-@@ -491,6 +640,10 @@ void trace_on_present() {
+@@ -491,6 +645,10 @@ void trace_on_present() {
          trace_close_and_log();
      g_trace_present_scope_frame = 0ull;
      g_trace_frame_begun = false;
@@ -287,7 +292,7 @@ index d94f811..0089b97 100644
  }
  // ---------------------------------------------------------------------------
  
-@@ -587,6 +740,29 @@ void shadow_frontend_call_display_list(const void* data, u32 size) {
+@@ -587,6 +745,29 @@ void shadow_frontend_call_display_list(const void* data, u32 size) {
      }
  }
  
@@ -317,7 +322,7 @@ index d94f811..0089b97 100644
  void shadow_frontend_write(u64 value, u8 size) {
      if (!g_shadow_frontend_enabled || g_shadow_frontend_failed)
          return;
-@@ -615,24 +791,7 @@ void shadow_frontend_write(u64 value, u8 size) {
+@@ -615,24 +796,7 @@ void shadow_frontend_write(u64 value, u8 size) {
      }
      const std::span<const std::uint8_t> fragment(bytes, size);
      if (g_gx_core_enabled) {
@@ -343,7 +348,7 @@ index d94f811..0089b97 100644
          return;
      }
      if (!g_shadow_frontend.write_fifo(fragment) ||
-@@ -842,8 +1001,750 @@ void shadow_transform_observer(
+@@ -842,8 +1006,828 @@ void shadow_transform_observer(
      }
  }
  #endif
@@ -439,6 +444,33 @@ index d94f811..0089b97 100644
 +std::uint64_t g_idle_ns = 0;               // main thread waiting for the game
 +
 +bool on_game_thread() { return t_game_thread; }
++
++// The GX threads are the frame's critical path: ask for full-speed cores.
++// macOS and Windows 11 otherwise treat a new thread as background work, run
++// it on efficiency cores and throttle it (EcoQoS), which on the Windows PC
++// made every stage two to three times slower. DOL_GX_THREAD_PRIORITY=0 skips it.
++void use_performance_cores() {
++    static const bool skip = [] {
++        const char* env = std::getenv("DOL_GX_THREAD_PRIORITY");
++        return env != nullptr && std::strcmp(env, "0") == 0;
++    }();
++    if (skip)
++        return;
++#ifdef __APPLE__
++    // Raises the QoS class, which keeps it off the efficiency cores.
++    SDL_SetCurrentThreadPriority(SDL_THREAD_PRIORITY_HIGH);
++#endif
++#ifdef _WIN32
++    // A higher priority made the PC slower (spinning workers then crowd out
++    // the decode and render threads); only opt out of power throttling.
++    THREAD_POWER_THROTTLING_STATE state{};
++    state.Version = THREAD_POWER_THROTTLING_CURRENT_VERSION;
++    state.ControlMask = THREAD_POWER_THROTTLING_EXECUTION_SPEED;
++    state.StateMask = 0;  // opted out: never throttled
++    SetThreadInformation(GetCurrentThread(), ThreadPowerThrottling, &state,
++                         sizeof state);
++#endif
++}
 +
 +void close_gx() {
 +    if (g_open_gx == kNoRecord)
@@ -569,14 +601,17 @@ index d94f811..0089b97 100644
 +    std::atomic<int> plan_state{0};
 +};
 +
-+// Each slot is ~14 KB; room for the plan workers to run ahead of the main
-+// thread without leaving the cache.
-+constexpr std::uint64_t kRingSlots = 256u;
++// Each slot is ~14 KB and the decode thread writes every slot it fills, so a
++// ring that outgrows the cache turns those writes into misses
++// (DOL_GX_RING_SLOTS to experiment).
++std::uint64_t kRingSlots = 64u;
 +std::unique_ptr<RenderItem[]> g_ring;
-+std::atomic<std::uint64_t> g_ring_head{0};  // next slot the main thread reads
-+std::atomic<std::uint64_t> g_ring_tail{0};  // next slot the decode thread fills
-+std::atomic<bool> g_main_waiting{false};
-+std::atomic<bool> g_decode_waiting{false};
++// Each on its own cache line: the decode thread writes the tail per draw
++// while the others poll, and sharing a line would stall those writes.
++alignas(64) std::atomic<std::uint64_t> g_ring_head{0};  // next slot main reads
++alignas(64) std::atomic<std::uint64_t> g_ring_tail{0};  // next slot decode fills
++alignas(64) std::atomic<bool> g_main_waiting{false};
++alignas(64) std::atomic<bool> g_decode_waiting{false};
 +std::mutex g_ring_mutex;
 +std::condition_variable g_cv_ring_main;
 +std::condition_variable g_cv_ring_decode;
@@ -592,9 +627,9 @@ index d94f811..0089b97 100644
 +// leaving what the cross-draw caches need for the main thread to finish in
 +// stream order. DOL_GX_PLAN_WORKERS sets how many (0: the main thread plans).
 +constexpr int kMaxPlanWorkers = 8;
-+std::atomic<std::uint64_t> g_plan_next{0};  // next slot nobody has claimed
-+std::atomic<bool> g_workers_stop{false};
-+std::atomic<int> g_workers_sleeping{0};
++alignas(64) std::atomic<std::uint64_t> g_plan_next{0};  // next slot unclaimed
++alignas(64) std::atomic<bool> g_workers_stop{false};
++alignas(64) std::atomic<int> g_workers_sleeping{0};
 +std::mutex g_work_mutex;
 +std::condition_variable g_cv_work;
 +int g_worker_count = 0;
@@ -606,12 +641,21 @@ index d94f811..0089b97 100644
 +// Spin briefly for `ready` before a thread falls back to sleeping: handing
 +// over thousands of draws a frame, a sleep and wake-up per draw costs more
 +// than the work.
++inline void cpu_relax() {
++#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
++    __builtin_ia32_pause();
++#elif defined(__aarch64__)
++    __asm__ __volatile__("yield");
++#endif
++}
++
 +template <typename Ready>
 +bool spin_for(Ready ready, std::uint64_t ns) {
 +    const std::uint64_t until = SDL_GetTicksNS() + ns;
 +    for (unsigned i = 0;; ++i) {
 +        if (ready())
 +            return true;
++        cpu_relax();
 +        if ((i & 63u) == 63u) {
 +            if (SDL_GetTicksNS() >= until)
 +                return false;
@@ -663,10 +707,48 @@ index d94f811..0089b97 100644
 +void plan_draw(RenderItem& item, gxruntime::gxcore::GapCounters& counters) {
 +    item.state.build_draw_plan_into(item.plan, item.draw, counters, nullptr,
 +                                    nullptr, /*record_cross=*/true);
++    gxruntime::gxcore::DrawPlan& plan = item.plan;
++    if (plan.ok) {
++        // The cached N/B/T are still zero here; finish_plan mixes them in.
++        plan.constants_hash = gxruntime::gxcore::hash_bytes(&plan.constants,
++                                                            sizeof plan.constants);
++        plan.pixel_constants_hash = gxruntime::gxcore::hash_bytes(
++            &plan.pixel_constants, sizeof plan.pixel_constants);
++        plan.pipeline_hash =
++            gxruntime::gxcore::hash_bytes(&plan.pipeline, sizeof plan.pipeline);
++    }
++}
++
++// The fingerprint below hashes the three cached-attribute rows as one block.
++static_assert(offsetof(gxruntime::gxcore::VertexShaderConstants, cached_tangent) ==
++                  offsetof(gxruntime::gxcore::VertexShaderConstants, cached_normal) + 16 &&
++              offsetof(gxruntime::gxcore::VertexShaderConstants, cached_binormal) ==
++                  offsetof(gxruntime::gxcore::VertexShaderConstants, cached_normal) + 32);
++
++// Main thread, in stream order: the cross-draw caches, then the fingerprints
++// of whatever they changed.
++void finish_plan(gxruntime::gxcore::DrawPlan& plan) {
++    gxruntime::gxcore::finish_cross_draw(plan, g_plan_attrs, g_plan_zslope,
++                                         g_plan_counters);
++    if (!plan.ok || plan.constants_hash == 0u)
++        return;
++    if (plan.cross.recorded)
++        plan.constants_hash = gxruntime::gxcore::hash_bytes(
++            plan.constants.cached_normal,
++            sizeof plan.constants.cached_normal + sizeof plan.constants.cached_tangent +
++                sizeof plan.constants.cached_binormal,
++            plan.constants_hash);
++    if (plan.cross.zslope_needed) {
++        plan.pixel_constants_hash = gxruntime::gxcore::hash_bytes(
++            &plan.pixel_constants, sizeof plan.pixel_constants);
++        plan.pipeline_hash =
++            gxruntime::gxcore::hash_bytes(&plan.pipeline, sizeof plan.pipeline);
++    }
 +}
 +
 +// Plan worker: claim the next unplanned slot and plan it if it is a draw.
 +int SDLCALL plan_worker_main(void* user) {
++    use_performance_cores();
 +    auto& counters = *static_cast<gxruntime::gxcore::GapCounters*>(user);
 +    while (!g_workers_stop.load()) {
 +        const std::uint64_t seq = g_plan_next.load();
@@ -860,6 +942,7 @@ index d94f811..0089b97 100644
 +
 +// Decode thread: replay the game's chunks until it has finished.
 +int SDLCALL decode_thread_main(void*) {
++    use_performance_cores();
 +    for (;;) {
 +        std::vector<std::uint8_t> chunk;
 +        {
@@ -906,8 +989,7 @@ index d94f811..0089b97 100644
 +        switch (item.kind) {
 +        case Item::Draw:
 +            if (live) {
-+                gxruntime::gxcore::finish_cross_draw(item.plan, g_plan_attrs,
-+                                                     g_plan_zslope, g_plan_counters);
++                finish_plan(item.plan);
 +                core_plan_observer(item.plan, nullptr);
 +            }
 +            break;
@@ -978,6 +1060,7 @@ index d94f811..0089b97 100644
 +int SDLCALL game_thread_main(void* user) {
 +    auto* run = static_cast<GameRun*>(user);
 +    t_game_thread = true;
++    use_performance_cores();
 +    run->result = run->fn(run->arg);
 +    publish();
 +    {
@@ -1094,7 +1177,7 @@ index d94f811..0089b97 100644
  extern "C" {
  
  void aurora_backend_set_array_guest(u32 attr, u32 guest_address,
-@@ -937,7 +1838,7 @@ bool dol_aurora_initialize(int argc, char** argv,
+@@ -937,7 +1921,7 @@ bool dol_aurora_initialize(int argc, char** argv,
      g_trace_present_scope_frame = 0ull;
      g_trace_frame_begun = false;
      g_trace_frames_recorded = 0ull;
@@ -1103,7 +1186,7 @@ index d94f811..0089b97 100644
      const char* trace_out = std::getenv("DOL_AURORA_RECOMP_TRACE_OUT");
      if (trace_out != nullptr && trace_out[0] != '\0') {
          g_trace_path = trace_out;
-@@ -1069,7 +1970,11 @@ static void flush_gxcore_gap_counters() {
+@@ -1069,7 +2053,11 @@ static void flush_gxcore_gap_counters() {
  #if GXRUNTIME_HAS_AURORA_RECOMP
      if (!g_gx_core_enabled)
          return;
@@ -1116,7 +1199,7 @@ index d94f811..0089b97 100644
      struct {
          const char* name;
          unsigned long long value;
-@@ -1114,10 +2019,132 @@ void dol_aurora_flush_gap_report(void) {
+@@ -1114,10 +2102,132 @@ void dol_aurora_flush_gap_report(void) {
      flush_gxcore_gap_counters();
  }
  
@@ -1250,7 +1333,7 @@ index d94f811..0089b97 100644
          aurora::gfx::efb_readback::set_continuous(true);
          aurora_request_framebuffer_readback();
      }
-@@ -1169,7 +2196,8 @@ void aurora_backend_present(void) {
+@@ -1169,7 +2279,8 @@ void aurora_backend_present(void) {
      // gxcore accumulates the frame's draws as their spans complete; the final
      // pending draw is only planned at the frame boundary. Submit it into the
      // still-open Aurora frame before end_frame flushes the command list.
@@ -1260,7 +1343,7 @@ index d94f811..0089b97 100644
          g_core_sink.flush_frame();
      // TEMP DIAG: per-frame gxcore gap-counter deltas so a live
      // goal celebration reveals which skip reason dominates (missing_vcd /
-@@ -1201,8 +2229,11 @@ void aurora_backend_present(void) {
+@@ -1201,8 +2312,11 @@ void aurora_backend_present(void) {
          g_frame_open = false;
      }
      // Host EFB fill: push latest present-source snapshot into software backing
@@ -1274,7 +1357,7 @@ index d94f811..0089b97 100644
          const std::uint8_t* rgba = nullptr;
          std::uint32_t w = 0;
          std::uint32_t h = 0;
-@@ -1212,6 +2243,72 @@ void aurora_backend_present(void) {
+@@ -1212,6 +2326,72 @@ void aurora_backend_present(void) {
          }
      }
      ++g_present_count;
@@ -1347,7 +1430,7 @@ index d94f811..0089b97 100644
      if (g_frame_pacing_log &&
          (g_present_count <= 10 || (g_present_count % 60) == 0)) {
          const AuroraStats* stats = aurora_get_stats();
-@@ -1432,6 +2529,7 @@ void aurora_backend_present(void) {
+@@ -1432,6 +2612,7 @@ void aurora_backend_present(void) {
      const unsigned long long present_fifo = g_fifo_bytes;
      g_fifo_bytes = 0;
      poll_events();
@@ -1355,7 +1438,7 @@ index d94f811..0089b97 100644
      if (!g_should_quit) {
          g_frame_open = aurora_begin_frame();
  #if GXRUNTIME_HAS_AURORA_RECOMP
-@@ -1482,7 +2580,13 @@ void aurora_backend_gx_write(u64 value, u8 size) {
+@@ -1482,7 +2663,13 @@ void aurora_backend_gx_write(u64 value, u8 size) {
          return;
      g_fifo_bytes += size;
  #if GXRUNTIME_HAS_AURORA_RECOMP
@@ -1370,7 +1453,7 @@ index d94f811..0089b97 100644
      // Record AFTER the shadow write so MEM_UPDATEs its resolves emitted
      // precede this GX_WRITE in the trace (replay reads them first), and
      // BEFORE the live-Aurora forwarding below so the pristine value is
-@@ -1737,6 +2841,7 @@ void aurora_backend_set_xfb_black(bool black) {
+@@ -1737,6 +2924,7 @@ void aurora_backend_set_xfb_black(bool black) {
  }
  
  bool aurora_backend_pad_init(void) {
@@ -1378,7 +1461,7 @@ index d94f811..0089b97 100644
      if (PADInit() == FALSE)
          return false;
  
-@@ -1780,6 +2885,7 @@ bool aurora_backend_pad_init(void) {
+@@ -1780,6 +2968,7 @@ bool aurora_backend_pad_init(void) {
  }
  
  u32 aurora_backend_pad_read(DolPadState state[4]) {
@@ -1386,7 +1469,7 @@ index d94f811..0089b97 100644
      PADStatus status[4]{};
      const u32 motor_mask = PADRead(status);
      for (u32 i = 0; i < 4; i++) {
-@@ -1796,22 +2902,41 @@ u32 aurora_backend_pad_read(DolPadState state[4]) {
+@@ -1796,22 +2985,41 @@ u32 aurora_backend_pad_read(DolPadState state[4]) {
              .error = status[i].err,
          };
      }
@@ -1428,7 +1511,7 @@ index d94f811..0089b97 100644
      PADSetSpec(spec);
  }
  
-@@ -1848,6 +2973,7 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1848,6 +3056,7 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
  
      int queued = SDL_GetAudioStreamQueued(g_audio_stream);
      unsigned waited_ms = 0;
@@ -1436,7 +1519,7 @@ index d94f811..0089b97 100644
      while (queued > max_queued_bytes && waited_ms < 20u) {
          g_audio_throttle_count++;
          if (g_audio_queue_log &&
-@@ -1860,8 +2986,17 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1860,8 +3069,17 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
                           max_queued_bytes);
          SDL_Delay(1);
          waited_ms++;
@@ -1454,7 +1537,7 @@ index d94f811..0089b97 100644
  
      const bool low_queue =
          queued >= 0 && queued < bytes_per_second / 100;
-@@ -1876,6 +3011,20 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1876,6 +3094,20 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
                       g_audio_push_count, queued, queued + bytes,
                       g_audio_playing ? 1u : 0u, g_audio_throttle_count);
      }
@@ -1475,7 +1558,7 @@ index d94f811..0089b97 100644
      if (!SDL_PutAudioStreamData(g_audio_stream, samples, bytes))
          std::fprintf(stderr, "[audio] failed to queue samples: %s\n", SDL_GetError());
      else if (!g_audio_playing && queued + bytes >= prebuffer_bytes) {
-@@ -1886,10 +3035,338 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1886,10 +3118,340 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
      }
  }
  
@@ -1693,6 +1776,8 @@ index d94f811..0089b97 100644
 +    SDL_SetPointerProperty(props, SDL_PROP_THREAD_CREATE_USERDATA_POINTER, &run);
 +    SDL_SetNumberProperty(props, SDL_PROP_THREAD_CREATE_STACKSIZE_NUMBER,
 +                          64ll * 1024 * 1024);
++    if (const char* env = std::getenv("DOL_GX_RING_SLOTS"))
++        gxq::kRingSlots = std::clamp<std::uint64_t>(std::strtoull(env, nullptr, 10), 8u, 4096u);
 +    gxq::g_ring.reset(new gxq::RenderItem[gxq::kRingSlots]);
 +    gxq::g_ring_head = 0;
 +    gxq::g_ring_tail = 0;
@@ -1814,7 +1899,7 @@ index d94f811..0089b97 100644
      const DolPlatformOps ops = {
          .should_quit = aurora_backend_should_quit,
          .present = aurora_backend_present,
-@@ -1918,6 +3395,7 @@ void install_platform_ops() {
+@@ -1918,6 +3480,7 @@ void install_platform_ops() {
          .audio_set_sample_rate = aurora_backend_audio_set_sample_rate,
          .audio_push = aurora_backend_audio_push,
      };
@@ -1940,7 +2025,7 @@ index 7af8fca..4c14e34 100644
      g_requested.store(false, std::memory_order_release);
    else
 diff --git a/graphics/aurora/lib/gfx/gxcore_draw.cpp b/graphics/aurora/lib/gfx/gxcore_draw.cpp
-index 71136b9..6febd7b 100644
+index 71136b9..9d00b99 100644
 --- a/graphics/aurora/lib/gfx/gxcore_draw.cpp
 +++ b/graphics/aurora/lib/gfx/gxcore_draw.cpp
 @@ -19,6 +19,8 @@
@@ -2390,7 +2475,7 @@ index 71136b9..6febd7b 100644
      }
    }
  
-@@ -969,24 +1247,63 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -969,24 +1247,96 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    const auto idxRange = push_indices(
        reinterpret_cast<const uint8_t*>(plan.indices.data()),
        plan.indices.size() * sizeof(uint16_t), 4);
@@ -2399,18 +2484,35 @@ index 71136b9..6febd7b 100644
 -      sizeof(plan.constants));
 +  // Consecutive draws usually carry identical constants (several KB of
 +  // matrices and lights): reuse the previous upload within the same frame.
++  // With a planner's fingerprint (hash != 0) the repeat check compares
++  // that instead of the bytes.
 +  struct UniformMemo {
 +    uint32_t frame = UINT32_MAX;
 +    std::vector<uint8_t> bytes;
++    uint64_t hash = 0;
++    size_t size = 0;
 +    Range range{};
 +  };
-+  auto push_uniform_memo = [](UniformMemo& memo, const void* data,
-+                              size_t size) -> Range {
-+    if (memo.frame == current_frame() && memo.bytes.size() == size &&
++  auto push_uniform_memo = [](UniformMemo& memo, const void* data, size_t size,
++                              uint64_t hash) -> Range {
++    if (hash != 0u) {
++      if (memo.frame == current_frame() && memo.hash == hash && memo.size == size)
++        return memo.range;
++      memo.range = push_uniform(static_cast<const uint8_t*>(data), size);
++      memo.frame = current_frame();
++      memo.hash = hash;
++      memo.size = size;
++      memo.bytes.clear();
++      return memo.range;
++    }
++    if (memo.frame == current_frame() && memo.hash == 0u &&
++        memo.bytes.size() == size &&
 +        std::memcmp(memo.bytes.data(), data, size) == 0)
 +      return memo.range;
 +    memo.range = push_uniform(static_cast<const uint8_t*>(data), size);
 +    memo.frame = current_frame();
++    memo.hash = 0;
++    memo.size = size;
 +    memo.bytes.assign(static_cast<const uint8_t*>(data),
 +                      static_cast<const uint8_t*>(data) + size);
 +    return memo.range;
@@ -2421,10 +2523,13 @@ index 71136b9..6febd7b 100644
 +  if (const float shift = widescreen_hud_shift(plan); shift != 0.f) {
 +    gxc::VertexShaderConstants moved = plan.constants;
 +    moved.projection[0][3] += shift;
-+    uniformRange = push_uniform_memo(s_vertexUniforms, &moved, sizeof(moved));
++    const uint64_t hash = plan.constants_hash != 0u
++                              ? gxc::hash_bytes(&shift, sizeof shift, plan.constants_hash)
++                              : 0u;
++    uniformRange = push_uniform_memo(s_vertexUniforms, &moved, sizeof(moved), hash);
 +  } else {
 +    uniformRange = push_uniform_memo(s_vertexUniforms, &plan.constants,
-+                                     sizeof(plan.constants));
++                                     sizeof(plan.constants), plan.constants_hash);
 +  }
    const bool tev = plan.pipeline.shader.tev_valid != 0;
    Range pixelUniformRange{};
@@ -2433,7 +2538,8 @@ index 71136b9..6febd7b 100644
 -        reinterpret_cast<const uint8_t*>(&plan.pixel_constants),
 -        sizeof(plan.pixel_constants));
 +    pixelUniformRange = push_uniform_memo(
-+        s_pixelUniforms, &plan.pixel_constants, sizeof(plan.pixel_constants));
++        s_pixelUniforms, &plan.pixel_constants, sizeof(plan.pixel_constants),
++        plan.pixel_constants_hash);
 +  }
 +
 +  // pipeline_ref hashes the whole config even for a repeat; compare bytes.
@@ -2445,11 +2551,23 @@ index 71136b9..6febd7b 100644
 +  static PipelineConfig s_lastPipelineConfig{};
 +  static PipelineRef s_lastPipeline{};
 +  static bool s_havePipeline = false;
-+  if (!s_havePipeline ||
-+      std::memcmp(&s_lastPipelineConfig, &pipelineConfig,
-+                  sizeof pipelineConfig) != 0) {
++  static uint64_t s_lastPipelineHash = 0;  // 0: compare the config bytes
++  const uint64_t pipelineHash =
++      plan.pipeline_hash != 0u
++          ? gxc::hash_bytes(&pipelineConfig.msaaSamples, sizeof pipelineConfig.msaaSamples,
++                            plan.pipeline_hash)
++          : 0u;
++  const bool samePipeline =
++      s_havePipeline &&
++      (pipelineHash != 0u
++           ? pipelineHash == s_lastPipelineHash
++           : s_lastPipelineHash == 0u &&
++                 std::memcmp(&s_lastPipelineConfig, &pipelineConfig,
++                             sizeof pipelineConfig) == 0);
++  if (!samePipeline) {
 +    s_lastPipeline = pipeline_ref(pipelineConfig);
 +    s_lastPipelineConfig = pipelineConfig;
++    s_lastPipelineHash = pipelineHash;
 +    s_havePipeline = true;
    }
 +  const PipelineRef pipeline = s_lastPipeline;
@@ -2601,10 +2719,48 @@ index b741e17..9b5fa67 100644
  // window/swapchain native size. Pass 0,0 to clear. Applied immediately when
  // a window exists (recreates g_frameBuffer).
 diff --git a/graphics/frontend/include/gxruntime/aurora_recomp/render_sink.hpp b/graphics/frontend/include/gxruntime/aurora_recomp/render_sink.hpp
-index 88110c8..4a70aa4 100644
+index 88110c8..4d59556 100644
 --- a/graphics/frontend/include/gxruntime/aurora_recomp/render_sink.hpp
 +++ b/graphics/frontend/include/gxruntime/aurora_recomp/render_sink.hpp
-@@ -320,6 +320,20 @@ public:
+@@ -96,6 +96,8 @@ struct RenderResourcePacket {
+   std::uint32_t copy_clear = 0;
+ };
+ 
++struct DrawTransformSnapshot;  // retail_gx_frontend.hpp
++
+ struct RenderDrawPacket {
+   std::uint32_t primitive = 0;
+   std::uint32_t vtx_fmt = 0;
+@@ -109,6 +111,10 @@ struct RenderDrawPacket {
+   // null in pure-state replays that don't carry the draw bytes.
+   const std::uint8_t* vertex_payload = nullptr;
+   std::uint32_t vertex_payload_size = 0;
++  // For a sink that reads_draw_snapshot(): the frontend's snapshot of the
++  // transform state below (valid during submit_packet), which the frontend
++  // then leaves out of this packet. Null: the fields below hold it.
++  const DrawTransformSnapshot* snapshot = nullptr;
+   // Transform state snapshotted at draw time. Projection/viewport validity is
+   // in transform_flags; position_matrix_valid_mask has one bit per PN matrix.
+   // current_pn_matrix is the Aurora uniform fallback when PNMTXIDX is absent;
+@@ -162,6 +168,9 @@ public:
+   virtual ~AuroraRenderSink() = default;
+ 
+   virtual bool submit_packet(const RenderPacket& packet) = 0;
++  // True when Draw packets may carry their transform state only by
++  // snapshot pointer (RenderDrawPacket::snapshot), saving a copy per draw.
++  virtual bool reads_draw_snapshot() const { return false; }
+ };
+ 
+ class RecordingAuroraRenderSink final : public AuroraRenderSink {
+@@ -298,6 +307,7 @@ using ConsumedDrawObserver = void (*)(const ConsumedDraw& draw,
+ class ConsumingAuroraRenderSink final : public AuroraRenderSink {
+ public:
+   bool submit_packet(const RenderPacket& packet) override;
++  bool reads_draw_snapshot() const override { return true; }
+ 
+   void reset();
+ 
+@@ -320,6 +330,20 @@ public:
      draw_observer_ = observer;
      draw_observer_user_ = user;
    }
@@ -2625,7 +2781,7 @@ index 88110c8..4a70aa4 100644
  
    const std::vector<ConsumedDraw>& draws() const { return draws_; }
    unsigned long long packets() const { return packets_; }
-@@ -411,6 +425,16 @@ private:
+@@ -411,6 +435,16 @@ private:
    bool streaming_ = false;
    ConsumedDrawObserver draw_observer_ = nullptr;
    void* draw_observer_user_ = nullptr;
@@ -2642,7 +2798,7 @@ index 88110c8..4a70aa4 100644
    ConsumedArrayBinding arrays_[kArrayCount]{};
    ConsumedTexture bound_texture_{};
    ConsumedTexture bound_textures_[ConsumedDraw::kMaxTexmaps]{}; // per-texmap slot
-@@ -517,6 +541,9 @@ std::uint32_t build_array_sizes(const ConsumedDraw& draw, std::uint32_t* out,
+@@ -517,6 +551,9 @@ std::uint32_t build_array_sizes(const ConsumedDraw& draw, std::uint32_t* out,
  
  RenderPacket make_render_packet(std::uint32_t sequence,
                                  const DolGxRecompTraceEvent& event);
@@ -2653,9 +2809,23 @@ index 88110c8..4a70aa4 100644
  
  } // namespace gxruntime::aurora_recomp
 diff --git a/graphics/frontend/include/gxruntime/aurora_recomp/retail_gx_frontend.hpp b/graphics/frontend/include/gxruntime/aurora_recomp/retail_gx_frontend.hpp
-index 1ef8382..5d65988 100644
+index 1ef8382..7a88000 100644
 --- a/graphics/frontend/include/gxruntime/aurora_recomp/retail_gx_frontend.hpp
 +++ b/graphics/frontend/include/gxruntime/aurora_recomp/retail_gx_frontend.hpp
+@@ -93,11 +93,11 @@ public:
+   // Pending draw payloads still queued (pre-drain); index matches DRAW order
+   // among the events just notified.
+   std::size_t pending_draw_payload_count() const {
+-    return draw_payload_queue_.size() - draw_payload_head_;
++    return draw_payload_count_ - draw_payload_head_;
+   }
+   std::span<const std::uint8_t> pending_draw_payload(std::size_t i) const {
+     const std::size_t idx = draw_payload_head_ + i;
+-    if (idx >= draw_payload_queue_.size())
++    if (idx >= draw_payload_count_)
+       return {};
+     return draw_payload_queue_[idx];
+   }
 @@ -116,6 +116,13 @@ public:
    bool replay_fifo(std::span<const std::uint8_t> bytes,
                     AuroraRenderSink* sink = nullptr);
@@ -2690,7 +2860,14 @@ index 1ef8382..5d65988 100644
  
    DolGxRecompState state_{};
    std::vector<std::uint8_t> fifo_buffer_;
-@@ -165,6 +185,9 @@ private:
+@@ -162,9 +182,16 @@ private:
+   std::vector<DrawTransformSnapshot> draw_transform_queue_;
+   std::size_t draw_payload_head_ = 0;
+   std::size_t draw_transform_head_ = 0;
++  // Entries in use; the queues keep their entries (and the payloads their
++  // capacity) across drains, so a draw allocates and zeroes nothing.
++  std::size_t draw_payload_count_ = 0;
++  std::size_t draw_transform_count_ = 0;
    void notify_events(std::uint32_t first_event);
  
    bool packet_drain_enabled_ = false;
@@ -2700,7 +2877,7 @@ index 1ef8382..5d65988 100644
    std::uint64_t zero_vertex_draws_ = 0;
    TraceEventObserver event_observer_ = nullptr;
    void* event_observer_user_ = nullptr;
-@@ -177,9 +200,15 @@ private:
+@@ -177,9 +204,15 @@ private:
    std::uint32_t last_error_b_ = 0;
    std::uint32_t last_error_c_ = 0;
    std::uint32_t last_error_d_ = 0;
@@ -2748,10 +2925,62 @@ index 56ea697..1ef3293 100644
  
  } // namespace gxruntime::aurora_recomp::trace
 diff --git a/graphics/frontend/src/render_sink.cpp b/graphics/frontend/src/render_sink.cpp
-index 2ef5b3d..2001208 100644
+index 2ef5b3d..f777a01 100644
 --- a/graphics/frontend/src/render_sink.cpp
 +++ b/graphics/frontend/src/render_sink.cpp
-@@ -35,6 +35,7 @@ void ConsumingAuroraRenderSink::reset() {
+@@ -1,10 +1,51 @@
+ // SPDX-License-Identifier: GPL-3.0-or-later
+ #include "gxruntime/aurora_recomp/render_sink.hpp"
++#include "gxruntime/aurora_recomp/retail_gx_frontend.hpp"
+ 
+ #include <cstring>
+ 
+ namespace gxruntime::aurora_recomp {
+ 
++// The draw's transform state, from the packet or the frontend's snapshot
++// (the same fields in both).
++template <typename Source>
++void copy_draw_transform(ConsumedDraw& draw, const Source& src) {
++  draw.transform_flags = src.transform_flags;
++  draw.current_pn_matrix = src.current_pn_matrix;
++  draw.payload_pn_matrix_mask = src.payload_pn_matrix_mask;
++  draw.position_matrix_valid_mask = src.position_matrix_valid_mask;
++  std::memcpy(draw.viewport, src.viewport, sizeof(draw.viewport));
++  std::memcpy(draw.projection, src.projection,
++              sizeof(draw.projection));
++  draw.projection_type = src.projection_type;
++  std::memcpy(draw.position_matrices, src.position_matrices,
++              sizeof(draw.position_matrices));
++  std::memcpy(draw.normal_matrices, src.normal_matrices,
++              sizeof(draw.normal_matrices));
++  std::memcpy(draw.normal_matrix_word_mask,
++              src.normal_matrix_word_mask,
++              sizeof(draw.normal_matrix_word_mask));
++  std::memcpy(draw.light_words, src.light_words,
++              sizeof(draw.light_words));
++  std::memcpy(draw.light_word_mask, src.light_word_mask,
++              sizeof(draw.light_word_mask));
++  std::memcpy(draw.chan_regs, src.chan_regs,
++              sizeof(draw.chan_regs));
++  draw.chan_reg_mask = src.chan_reg_mask;
++  std::memcpy(draw.tex_matrices, src.tex_matrices,
++              sizeof(draw.tex_matrices));
++  std::memcpy(draw.tex_matrix_word_mask, src.tex_matrix_word_mask,
++              sizeof(draw.tex_matrix_word_mask));
++  std::memcpy(draw.xf_regs, src.xf_regs, sizeof(draw.xf_regs));
++  draw.xf_reg_mask = src.xf_reg_mask;
++  std::memcpy(draw.post_matrices, src.post_matrices,
++              sizeof(draw.post_matrices));
++  std::memcpy(draw.post_matrix_word_mask, src.post_matrix_word_mask,
++              sizeof(draw.post_matrix_word_mask));
++  draw.dualtex_info = src.dualtex_info;
++  draw.dualtex_valid = src.dualtex_valid;
++}
++
+ bool RecordingAuroraRenderSink::submit_packet(const RenderPacket& packet) {
+   packets_.push_back(packet);
+   return true;
+@@ -35,6 +76,7 @@ void ConsumingAuroraRenderSink::reset() {
      t = ConsumedTexture{};
    cull_all_ = false;
    draws_.clear();
@@ -2759,7 +2988,7 @@ index 2ef5b3d..2001208 100644
    total_draws_ = 0;
    total_vertices_ = 0;
    payload_bytes_ = 0;
-@@ -109,8 +110,9 @@ bool ConsumingAuroraRenderSink::submit_packet(const RenderPacket& packet) {
+@@ -109,8 +151,9 @@ bool ConsumingAuroraRenderSink::submit_packet(const RenderPacket& packet) {
        // AFTER the draw it belongs to. So a draw's real array inputs are its
        // spans, not every bound array. Append the read array to the most recent
        // draw and resolve its exact byte span.
@@ -2771,7 +3000,7 @@ index 2ef5b3d..2001208 100644
          const ConsumedArrayBinding& binding = arrays_[packet.resource.index];
          if (draw.array_input_count < ConsumedDraw::kMaxArrays) {
            ConsumedArrayInput& input = draw.arrays[draw.array_input_count++];
-@@ -196,18 +198,39 @@ bool ConsumingAuroraRenderSink::submit_packet(const RenderPacket& packet) {
+@@ -196,70 +239,50 @@ bool ConsumingAuroraRenderSink::submit_packet(const RenderPacket& packet) {
        if (arrays_[i].base_valid && arrays_[i].stride_valid)
          active_mask |= (1u << i);
      }
@@ -2816,15 +3045,40 @@ index 2ef5b3d..2001208 100644
 +    draw.texture = bound_texture_;
      for (std::uint32_t t = 0; t < ConsumedDraw::kMaxTexmaps; ++t)
        draw.textures[t] = bound_textures_[t];
-+    draw.array_input_count = 0;
-+    draw.vertex_payload.clear();
-     draw.transform_flags = packet.draw.transform_flags;
-     draw.current_pn_matrix = packet.draw.current_pn_matrix;
-     draw.payload_pn_matrix_mask = packet.draw.payload_pn_matrix_mask;
-@@ -242,24 +265,13 @@ bool ConsumingAuroraRenderSink::submit_packet(const RenderPacket& packet) {
-                 sizeof(draw.post_matrix_word_mask));
-     draw.dualtex_info = packet.draw.dualtex_info;
-     draw.dualtex_valid = packet.draw.dualtex_valid;
+-    draw.transform_flags = packet.draw.transform_flags;
+-    draw.current_pn_matrix = packet.draw.current_pn_matrix;
+-    draw.payload_pn_matrix_mask = packet.draw.payload_pn_matrix_mask;
+-    draw.position_matrix_valid_mask = packet.draw.position_matrix_valid_mask;
+-    std::memcpy(draw.viewport, packet.draw.viewport, sizeof(draw.viewport));
+-    std::memcpy(draw.projection, packet.draw.projection,
+-                sizeof(draw.projection));
+-    draw.projection_type = packet.draw.projection_type;
+-    std::memcpy(draw.position_matrices, packet.draw.position_matrices,
+-                sizeof(draw.position_matrices));
+-    std::memcpy(draw.normal_matrices, packet.draw.normal_matrices,
+-                sizeof(draw.normal_matrices));
+-    std::memcpy(draw.normal_matrix_word_mask,
+-                packet.draw.normal_matrix_word_mask,
+-                sizeof(draw.normal_matrix_word_mask));
+-    std::memcpy(draw.light_words, packet.draw.light_words,
+-                sizeof(draw.light_words));
+-    std::memcpy(draw.light_word_mask, packet.draw.light_word_mask,
+-                sizeof(draw.light_word_mask));
+-    std::memcpy(draw.chan_regs, packet.draw.chan_regs,
+-                sizeof(draw.chan_regs));
+-    draw.chan_reg_mask = packet.draw.chan_reg_mask;
+-    std::memcpy(draw.tex_matrices, packet.draw.tex_matrices,
+-                sizeof(draw.tex_matrices));
+-    std::memcpy(draw.tex_matrix_word_mask, packet.draw.tex_matrix_word_mask,
+-                sizeof(draw.tex_matrix_word_mask));
+-    std::memcpy(draw.xf_regs, packet.draw.xf_regs, sizeof(draw.xf_regs));
+-    draw.xf_reg_mask = packet.draw.xf_reg_mask;
+-    std::memcpy(draw.post_matrices, packet.draw.post_matrices,
+-                sizeof(draw.post_matrices));
+-    std::memcpy(draw.post_matrix_word_mask, packet.draw.post_matrix_word_mask,
+-                sizeof(draw.post_matrix_word_mask));
+-    draw.dualtex_info = packet.draw.dualtex_info;
+-    draw.dualtex_valid = packet.draw.dualtex_valid;
 -    // The previous draw's trailing INDEXED_SPAN packets are now all in, so it is
 -    // span-complete: assemble it before it is dropped (streaming clears draws_).
 -    if (!draws_.empty())
@@ -2837,6 +3091,12 @@ index 2ef5b3d..2001208 100644
 -      draws_.clear();
 -    draws_.push_back(draw);
 -    back_assembled_ = false; // the just-pushed draw is not yet assembled
++    draw.array_input_count = 0;
++    draw.vertex_payload.clear();
++    if (packet.draw.snapshot != nullptr)
++      copy_draw_transform(draw, *packet.draw.snapshot);
++    else
++      copy_draw_transform(draw, packet.draw);
 +    back_assembled_ = false; // the new draw is not yet assembled
      // Retain the draw's raw per-vertex bytes (valid only during this call) so an
      // issuing sink can assemble vertices after submit. Append after push_back so
@@ -2848,7 +3108,7 @@ index 2ef5b3d..2001208 100644
            packet.draw.vertex_payload,
            packet.draw.vertex_payload + packet.draw.vertex_payload_size);
        payload_bytes_ += packet.draw.vertex_payload_size;
-@@ -296,6 +308,15 @@ bool ConsumingAuroraRenderSink::resolve_array_input(
+@@ -296,6 +319,15 @@ bool ConsumingAuroraRenderSink::resolve_array_input(
  void ConsumingAuroraRenderSink::accumulate_assembly(const ConsumedDraw& draw) {
    if (back_assembled_)
      return;
@@ -2864,7 +3124,7 @@ index 2ef5b3d..2001208 100644
    // Count-only (nullptr): the live path does not retain per-vertex elements.
    const AssembledDrawStats stats = assemble_consumed_draw(draw, nullptr);
    ++assembled_draws_;
-@@ -316,14 +337,16 @@ void ConsumingAuroraRenderSink::accumulate_assembly(const ConsumedDraw& draw) {
+@@ -316,14 +348,16 @@ void ConsumingAuroraRenderSink::accumulate_assembly(const ConsumedDraw& draw) {
      storage_bytes_ += sizes[i];
    if (!stats.ok)
      ++assemble_failed_draws_;
@@ -2884,7 +3144,7 @@ index 2ef5b3d..2001208 100644
  }
  
  void ConsumingAuroraRenderSink::tally_array_input(bool resolved) {
-@@ -522,11 +545,23 @@ std::uint32_t build_array_sizes(const ConsumedDraw& draw, std::uint32_t* out,
+@@ -522,11 +556,23 @@ std::uint32_t build_array_sizes(const ConsumedDraw& draw, std::uint32_t* out,
  
  RenderPacket make_render_packet(std::uint32_t sequence,
                                  const DolGxRecompTraceEvent& event) {
@@ -2913,7 +3173,7 @@ index 2ef5b3d..2001208 100644
  
    switch (event.kind) {
    case DOL_GX_RECOMP_EVENT_FIFO_BYTES:
-@@ -681,18 +716,16 @@ RenderPacket make_render_packet(std::uint32_t sequence,
+@@ -681,18 +727,16 @@ RenderPacket make_render_packet(std::uint32_t sequence,
      break;
    case DOL_GX_RECOMP_EVENT_DRAW:
      packet.kind = RenderPacketKind::Draw;
@@ -2971,7 +3231,7 @@ index e21b335..80dc91b 100644
        // Unknown kinds are forward-compatible: skip.
        break;
 diff --git a/graphics/frontend/src/retail_gx_frontend.cpp b/graphics/frontend/src/retail_gx_frontend.cpp
-index 06fff92..0ec7b57 100644
+index 06fff92..2fe4b3d 100644
 --- a/graphics/frontend/src/retail_gx_frontend.cpp
 +++ b/graphics/frontend/src/retail_gx_frontend.cpp
 @@ -2,6 +2,8 @@
@@ -2983,7 +3243,7 @@ index 06fff92..0ec7b57 100644
  #include <cstring>
  #include <new>
  
-@@ -246,11 +248,13 @@ std::uint32_t payload_pn_matrix_mask(const DolGxRecompState& state,
+@@ -246,11 +248,18 @@ std::uint32_t payload_pn_matrix_mask(const DolGxRecompState& state,
    return mask;
  }
  
@@ -2992,17 +3252,34 @@ index 06fff92..0ec7b57 100644
 -                                         std::span<const std::uint8_t> vertex_data,
 -                                         std::uint16_t vertex_count) {
 -  DrawTransformSnapshot out{};
-+// Fills a freshly value-initialised (zeroed) snapshot in place: the snapshot is
-+// several KB, and returning it by value cost an extra copy per draw.
++// Fills a reused snapshot in place, every field (the snapshot is several KB:
++// returning it by value, or zeroing it first, cost a copy per draw).
 +void snapshot_transform(DrawTransformSnapshot& out,
 +                        const DolGxRecompState& state,
 +                        const DolGxRecompVertexLayout& layout,
 +                        std::span<const std::uint8_t> vertex_data,
 +                        std::uint16_t vertex_count) {
++  out.transform_flags = 0;
++  out.position_matrix_valid_mask = 0;
++  out.projection_type = 0;
++  std::memset(out.viewport, 0, sizeof(out.viewport));
++  std::memset(out.projection, 0, sizeof(out.projection));
    if (state.viewport_valid) {
      out.transform_flags |= kDrawTransformViewportValid;
      std::memcpy(out.viewport, state.viewport, sizeof(out.viewport));
-@@ -292,7 +296,6 @@ DrawTransformSnapshot snapshot_transform(const DolGxRecompState& state,
+@@ -266,8 +275,10 @@ DrawTransformSnapshot snapshot_transform(const DolGxRecompState& state,
+   if (out.payload_pn_matrix_mask != 0u)
+     out.transform_flags |= kDrawTransformPayloadPnMatrixValid;
+   for (std::uint32_t i = 0; i < DOL_GX_RECOMP_POSITION_MATRIX_COUNT; ++i) {
+-    if (!state.position_matrix_valid[i])
++    if (!state.position_matrix_valid[i]) {
++      std::memset(out.position_matrices[i], 0, sizeof(out.position_matrices[i]));
+       continue;
++    }
+     out.position_matrix_valid_mask |= (1u << i);
+     std::memcpy(out.position_matrices[i], state.position_matrices[i],
+                 sizeof(out.position_matrices[i]));
+@@ -292,7 +303,6 @@ DrawTransformSnapshot snapshot_transform(const DolGxRecompState& state,
                sizeof(out.post_matrix_word_mask));
    out.dualtex_info = state.dualtex_info;
    out.dualtex_valid = state.dualtex_valid;
@@ -3010,7 +3287,18 @@ index 06fff92..0ec7b57 100644
  }
  
  } // namespace
-@@ -324,6 +327,8 @@ void RetailGxFrontend::reset(const DolGuestAddressResolver* resolver) {
+@@ -306,8 +316,8 @@ RetailGxFrontend::RetailGxFrontend(const DolGuestAddressResolver& resolver) {
+ void RetailGxFrontend::reset(const DolGuestAddressResolver* resolver) {
+   dol_gx_recomp_init(&state_, resolver);
+   fifo_buffer_.clear();
+-  draw_payload_queue_.clear();
+-  draw_transform_queue_.clear();
++  draw_payload_count_ = 0u;
++  draw_transform_count_ = 0u;
+   draw_payload_head_ = 0u;
+   draw_transform_head_ = 0u;
+   zero_vertex_draws_ = 0u;
+@@ -324,6 +334,8 @@ void RetailGxFrontend::reset(const DolGuestAddressResolver* resolver) {
    last_error_b_ = 0u;
    last_error_c_ = 0u;
    last_error_d_ = 0u;
@@ -3019,7 +3307,7 @@ index 06fff92..0ec7b57 100644
  }
  
  bool RetailGxFrontend::set_vertex_layout(std::uint8_t vtx_fmt,
-@@ -386,6 +391,9 @@ bool RetailGxFrontend::flush(AuroraRenderSink* sink) {
+@@ -386,6 +398,9 @@ bool RetailGxFrontend::flush(AuroraRenderSink* sink) {
      (void)dol_gx_recomp_trace_events(&state_, &first_event);
    }
  
@@ -3029,7 +3317,7 @@ index 06fff92..0ec7b57 100644
    std::size_t consumed = 0;
    if (!parse_stream(fifo_buffer_, true, true, 0u, &consumed))
      return false;
-@@ -395,6 +403,7 @@ bool RetailGxFrontend::flush(AuroraRenderSink* sink) {
+@@ -395,6 +410,7 @@ bool RetailGxFrontend::flush(AuroraRenderSink* sink) {
                         fifo_buffer_.begin() +
                             static_cast<std::ptrdiff_t>(consumed));
    }
@@ -3037,7 +3325,7 @@ index 06fff92..0ec7b57 100644
    notify_events(first_event);
  
    if (sink == nullptr)
-@@ -419,6 +428,9 @@ bool RetailGxFrontend::write_display_list(std::span<const std::uint8_t> bytes,
+@@ -419,6 +435,9 @@ bool RetailGxFrontend::write_display_list(std::span<const std::uint8_t> bytes,
    // Mirrors the 0x40 opcode branch of parse_stream: a zero-size list is a
    // no-op, the list bytes are recorded, then parsed at DL depth with partial
    // commands forbidden and full consumption required.
@@ -3047,7 +3335,7 @@ index 06fff92..0ec7b57 100644
    if (!bytes.empty()) {
      if (!dol_gx_recomp_push_fifo(&state_, bytes.data(),
                                   static_cast<std::uint32_t>(bytes.size())))
-@@ -429,6 +441,7 @@ bool RetailGxFrontend::write_display_list(std::span<const std::uint8_t> bytes,
+@@ -429,6 +448,7 @@ bool RetailGxFrontend::write_display_list(std::span<const std::uint8_t> bytes,
        return false;
      }
    }
@@ -3055,7 +3343,7 @@ index 06fff92..0ec7b57 100644
    notify_events(first_event);
  
    if (sink == nullptr)
-@@ -450,12 +463,16 @@ bool RetailGxFrontend::replay_fifo(std::span<const std::uint8_t> bytes,
+@@ -450,12 +470,16 @@ bool RetailGxFrontend::replay_fifo(std::span<const std::uint8_t> bytes,
      (void)dol_gx_recomp_trace_events(&state_, &first_event);
    }
  
@@ -3072,7 +3360,7 @@ index 06fff92..0ec7b57 100644
    notify_events(first_event);
  
    if (sink == nullptr)
-@@ -467,6 +484,33 @@ bool RetailGxFrontend::replay_fifo(std::span<const std::uint8_t> bytes,
+@@ -467,6 +491,33 @@ bool RetailGxFrontend::replay_fifo(std::span<const std::uint8_t> bytes,
    return true;
  }
  
@@ -3106,7 +3394,7 @@ index 06fff92..0ec7b57 100644
  void RetailGxFrontend::notify_events(std::uint32_t first_event) {
    if (event_observer_ == nullptr)
      return;
-@@ -515,6 +559,11 @@ bool RetailGxFrontend::parse_stream(std::span<const std::uint8_t> bytes,
+@@ -515,6 +566,11 @@ bool RetailGxFrontend::parse_stream(std::span<const std::uint8_t> bytes,
  
    std::size_t pos = 0;
    while (pos < bytes.size()) {
@@ -3118,7 +3406,7 @@ index 06fff92..0ec7b57 100644
      const std::uint8_t cmd = bytes[pos];
      if (cmd == 0x00u) {
        if (record_fifo_bytes &&
-@@ -631,11 +680,17 @@ bool RetailGxFrontend::parse_stream(std::span<const std::uint8_t> bytes,
+@@ -631,11 +687,17 @@ bool RetailGxFrontend::parse_stream(std::span<const std::uint8_t> bytes,
        in_display_list_ = true;
        dl_command_offset_ = call_offset;
        std::size_t dl_consumed = 0;
@@ -3141,7 +3429,7 @@ index 06fff92..0ec7b57 100644
          in_display_list_ = prev_in_dl;
          dl_command_offset_ = prev_dl_off;
          return false;
-@@ -710,13 +765,19 @@ bool RetailGxFrontend::parse_stream(std::span<const std::uint8_t> bytes,
+@@ -710,13 +772,19 @@ bool RetailGxFrontend::parse_stream(std::span<const std::uint8_t> bytes,
        const std::size_t vertex_bytes =
            static_cast<std::size_t>(vertex_count) * vertex_size;
        const std::size_t command_size = 3u + vertex_bytes;
@@ -3162,7 +3450,7 @@ index 06fff92..0ec7b57 100644
        if (!handle_draw(cmd,
                         std::span<const std::uint8_t>{bytes.data() + pos + 3u,
                                                       vertex_bytes},
-@@ -754,6 +815,11 @@ bool RetailGxFrontend::handle_bp(std::uint32_t raw) {
+@@ -754,6 +822,11 @@ bool RetailGxFrontend::handle_bp(std::uint32_t raw) {
    const std::uint32_t value = raw & 0x00FFFFFFu;
    if (!dol_gx_recomp_note_bp_reg(&state_, reg, value))
      return false;
@@ -3174,18 +3462,25 @@ index 06fff92..0ec7b57 100644
  
    std::uint8_t slot = 0;
    if (map_image0_reg(reg, &slot) || map_image3_reg(reg, &slot))
-@@ -882,8 +948,8 @@ bool RetailGxFrontend::handle_draw(std::uint8_t command,
+@@ -881,9 +954,14 @@ bool RetailGxFrontend::handle_draw(std::uint8_t command,
+     };
      // Retain this draw's raw per-vertex bytes in trace order; emit_new_packets
      // pops them in lockstep so each Draw packet references its own payload.
-     draw_payload_queue_.emplace_back(vertex_data.begin(), vertex_data.end());
+-    draw_payload_queue_.emplace_back(vertex_data.begin(), vertex_data.end());
 -    draw_transform_queue_.push_back(
 -        snapshot_transform(state_, *layout, vertex_data, vertex_count));
-+    snapshot_transform(draw_transform_queue_.emplace_back(), state_, *layout,
-+                       vertex_data, vertex_count);
++    if (draw_payload_count_ == draw_payload_queue_.size())
++      draw_payload_queue_.emplace_back();
++    draw_payload_queue_[draw_payload_count_++].assign(vertex_data.begin(),
++                                                      vertex_data.end());
++    if (draw_transform_count_ == draw_transform_queue_.size())
++      draw_transform_queue_.emplace_back();
++    snapshot_transform(draw_transform_queue_[draw_transform_count_++], state_,
++                       *layout, vertex_data, vertex_count);
    }
  
    for (std::uint32_t i = 0u; i < layout->indexed_attr_count; ++i) {
-@@ -931,10 +997,13 @@ bool RetailGxFrontend::emit_new_packets(AuroraRenderSink& sink,
+@@ -931,64 +1009,85 @@ bool RetailGxFrontend::emit_new_packets(AuroraRenderSink& sink,
    if (first_event > events.size())
      return false;
  
@@ -3200,24 +3495,135 @@ index 06fff92..0ec7b57 100644
      // Draw events are emitted exactly once, in order, so the retained payloads
      // pop FIFO in lockstep. Attach this draw's raw bytes for the issuing sink.
      if (packet.kind == RenderPacketKind::Draw &&
-@@ -989,6 +1058,16 @@ bool RetailGxFrontend::emit_new_packets(AuroraRenderSink& sink,
-                   sizeof(packet.draw.post_matrix_word_mask));
-       packet.draw.dualtex_info = transform.dualtex_info;
-       packet.draw.dualtex_valid = transform.dualtex_valid;
-+    } else if (packet.kind == RenderPacketKind::Draw) {
-+      // No snapshot: clear what an earlier draw left in the reused packet.
-+      RenderDrawPacket fresh{};
-+      fresh.primitive = packet.draw.primitive;
-+      fresh.vtx_fmt = packet.draw.vtx_fmt;
-+      fresh.vertex_count = packet.draw.vertex_count;
-+      fresh.vertex_size = packet.draw.vertex_size;
-+      fresh.vertex_payload = packet.draw.vertex_payload;
-+      fresh.vertex_payload_size = packet.draw.vertex_payload_size;
-+      packet.draw = fresh;
+-        draw_payload_head_ < draw_payload_queue_.size()) {
++        draw_payload_head_ < draw_payload_count_) {
+       const std::vector<std::uint8_t>& payload =
+           draw_payload_queue_[draw_payload_head_++];
+       packet.draw.vertex_payload = payload.data();
+       packet.draw.vertex_payload_size =
+           static_cast<std::uint32_t>(payload.size());
+     }
+-    if (packet.kind == RenderPacketKind::Draw &&
+-        draw_transform_head_ < draw_transform_queue_.size()) {
+-      const DrawTransformSnapshot& transform =
+-          draw_transform_queue_[draw_transform_head_++];
+-      packet.draw.transform_flags = transform.transform_flags;
+-      packet.draw.current_pn_matrix = transform.current_pn_matrix;
+-      packet.draw.payload_pn_matrix_mask =
+-          transform.payload_pn_matrix_mask;
+-      packet.draw.position_matrix_valid_mask =
+-          transform.position_matrix_valid_mask;
+-      std::memcpy(packet.draw.viewport, transform.viewport,
+-                  sizeof(packet.draw.viewport));
+-      std::memcpy(packet.draw.projection, transform.projection,
+-                  sizeof(packet.draw.projection));
+-      packet.draw.projection_type = transform.projection_type;
+-      std::memcpy(packet.draw.position_matrices, transform.position_matrices,
+-                  sizeof(packet.draw.position_matrices));
+-      std::memcpy(packet.draw.normal_matrices, transform.normal_matrices,
+-                  sizeof(packet.draw.normal_matrices));
+-      std::memcpy(packet.draw.normal_matrix_word_mask,
+-                  transform.normal_matrix_word_mask,
+-                  sizeof(packet.draw.normal_matrix_word_mask));
+-      std::memcpy(packet.draw.light_words, transform.light_words,
+-                  sizeof(packet.draw.light_words));
+-      std::memcpy(packet.draw.light_word_mask, transform.light_word_mask,
+-                  sizeof(packet.draw.light_word_mask));
+-      std::memcpy(packet.draw.chan_regs, transform.chan_regs,
+-                  sizeof(packet.draw.chan_regs));
+-      packet.draw.chan_reg_mask = transform.chan_reg_mask;
+-      std::memcpy(packet.draw.tex_matrices, transform.tex_matrices,
+-                  sizeof(packet.draw.tex_matrices));
+-      std::memcpy(packet.draw.tex_matrix_word_mask,
+-                  transform.tex_matrix_word_mask,
+-                  sizeof(packet.draw.tex_matrix_word_mask));
+-      std::memcpy(packet.draw.xf_regs, transform.xf_regs,
+-                  sizeof(packet.draw.xf_regs));
+-      packet.draw.xf_reg_mask = transform.xf_reg_mask;
+-      std::memcpy(packet.draw.post_matrices, transform.post_matrices,
+-                  sizeof(packet.draw.post_matrices));
+-      std::memcpy(packet.draw.post_matrix_word_mask,
+-                  transform.post_matrix_word_mask,
+-                  sizeof(packet.draw.post_matrix_word_mask));
+-      packet.draw.dualtex_info = transform.dualtex_info;
+-      packet.draw.dualtex_valid = transform.dualtex_valid;
++    if (packet.kind == RenderPacketKind::Draw) {
++      const DrawTransformSnapshot* snapshot =
++          draw_transform_head_ < draw_transform_count_
++              ? &draw_transform_queue_[draw_transform_head_++]
++              : nullptr;
++      if (snapshot != nullptr && sink.reads_draw_snapshot()) {
++        // The sink reads the snapshot itself: no copy into the packet.
++        packet.draw.snapshot = snapshot;
++      } else if (snapshot != nullptr) {
++        const DrawTransformSnapshot& transform = *snapshot;
++        packet.draw.snapshot = nullptr;
++        packet.draw.transform_flags = transform.transform_flags;
++        packet.draw.current_pn_matrix = transform.current_pn_matrix;
++        packet.draw.payload_pn_matrix_mask =
++            transform.payload_pn_matrix_mask;
++        packet.draw.position_matrix_valid_mask =
++            transform.position_matrix_valid_mask;
++        std::memcpy(packet.draw.viewport, transform.viewport,
++                    sizeof(packet.draw.viewport));
++        std::memcpy(packet.draw.projection, transform.projection,
++                    sizeof(packet.draw.projection));
++        packet.draw.projection_type = transform.projection_type;
++        std::memcpy(packet.draw.position_matrices, transform.position_matrices,
++                    sizeof(packet.draw.position_matrices));
++        std::memcpy(packet.draw.normal_matrices, transform.normal_matrices,
++                    sizeof(packet.draw.normal_matrices));
++        std::memcpy(packet.draw.normal_matrix_word_mask,
++                    transform.normal_matrix_word_mask,
++                    sizeof(packet.draw.normal_matrix_word_mask));
++        std::memcpy(packet.draw.light_words, transform.light_words,
++                    sizeof(packet.draw.light_words));
++        std::memcpy(packet.draw.light_word_mask, transform.light_word_mask,
++                    sizeof(packet.draw.light_word_mask));
++        std::memcpy(packet.draw.chan_regs, transform.chan_regs,
++                    sizeof(packet.draw.chan_regs));
++        packet.draw.chan_reg_mask = transform.chan_reg_mask;
++        std::memcpy(packet.draw.tex_matrices, transform.tex_matrices,
++                    sizeof(packet.draw.tex_matrices));
++        std::memcpy(packet.draw.tex_matrix_word_mask,
++                    transform.tex_matrix_word_mask,
++                    sizeof(packet.draw.tex_matrix_word_mask));
++        std::memcpy(packet.draw.xf_regs, transform.xf_regs,
++                    sizeof(packet.draw.xf_regs));
++        packet.draw.xf_reg_mask = transform.xf_reg_mask;
++        std::memcpy(packet.draw.post_matrices, transform.post_matrices,
++                    sizeof(packet.draw.post_matrices));
++        std::memcpy(packet.draw.post_matrix_word_mask,
++                    transform.post_matrix_word_mask,
++                    sizeof(packet.draw.post_matrix_word_mask));
++        packet.draw.dualtex_info = transform.dualtex_info;
++        packet.draw.dualtex_valid = transform.dualtex_valid;
++      } else {
++        // No snapshot: clear what an earlier draw left in the reused packet.
++        RenderDrawPacket fresh{};
++        fresh.primitive = packet.draw.primitive;
++        fresh.vtx_fmt = packet.draw.vtx_fmt;
++        fresh.vertex_count = packet.draw.vertex_count;
++        fresh.vertex_size = packet.draw.vertex_size;
++        fresh.vertex_payload = packet.draw.vertex_payload;
++        fresh.vertex_payload_size = packet.draw.vertex_payload_size;
++        packet.draw = fresh;
++      }
      }
      if (!sink.submit_packet(packet))
        return false;
-@@ -1021,6 +1100,195 @@ void RetailGxFrontend::drain_emitted_packets(std::uint32_t emitted_count) {
+@@ -1005,8 +1104,8 @@ void RetailGxFrontend::drain_emitted_packets(std::uint32_t emitted_count) {
+   // Drain mode emits every pending event each flush, so all retained draw
+   // payloads were just consumed; release them and reset the FIFO cursor so the
+   // queue cannot grow unbounded across a long run.
+-  draw_payload_queue_.clear();
+-  draw_transform_queue_.clear();
++  draw_payload_count_ = 0u;
++  draw_transform_count_ = 0u;
+   draw_payload_head_ = 0u;
+   draw_transform_head_ = 0u;
+   if (emitted_count >= state_.trace_count) {
+@@ -1021,6 +1120,195 @@ void RetailGxFrontend::drain_emitted_packets(std::uint32_t emitted_count) {
    emitted_trace_count_ = 0u;
  }
  
@@ -3532,7 +3938,7 @@ index 623f047..554428e 100644
 +
  } // namespace gxruntime::gxcore
 diff --git a/graphics/gxcore/include/gxruntime/gxcore/gxcore.hpp b/graphics/gxcore/include/gxruntime/gxcore/gxcore.hpp
-index 4d14391..19edeea 100644
+index 4d14391..bb91bc6 100644
 --- a/graphics/gxcore/include/gxruntime/gxcore/gxcore.hpp
 +++ b/graphics/gxcore/include/gxruntime/gxcore/gxcore.hpp
 @@ -16,6 +16,10 @@
@@ -3595,7 +4001,7 @@ index 4d14391..19edeea 100644
  
    GxCoreSink();
  
-@@ -124,11 +151,32 @@ public:
+@@ -124,11 +151,35 @@ public:
      copy_observer_ = observer;
      copy_observer_user_ = user;
    }
@@ -3619,6 +4025,9 @@ index 4d14391..19edeea 100644
  
    bool submit_packet(
        const gxruntime::aurora_recomp::RenderPacket& packet) override;
++  bool reads_draw_snapshot() const override {
++    return consumer_.reads_draw_snapshot();
++  }
    // Frame boundary: plan the final pending draw of the frame.
    void flush_frame();
 +  // Forget all register state and any pending draw (a save-state load); keeps
@@ -3628,7 +4037,7 @@ index 4d14391..19edeea 100644
  
    const GapCounters& counters() const { return counters_; }
    GapCounters& counters() { return counters_; }
-@@ -151,6 +199,10 @@ private:
+@@ -151,6 +202,10 @@ private:
    void* plan_observer_user_ = nullptr;
    CopyObserver copy_observer_ = nullptr;
    void* copy_observer_user_ = nullptr;
@@ -3640,13 +4049,45 @@ index 4d14391..19edeea 100644
  };
  
 diff --git a/graphics/gxcore/include/gxruntime/gxcore/shader.hpp b/graphics/gxcore/include/gxruntime/gxcore/shader.hpp
-index b9bfd5d..406941f 100644
+index b9bfd5d..f464f10 100644
 --- a/graphics/gxcore/include/gxruntime/gxcore/shader.hpp
 +++ b/graphics/gxcore/include/gxruntime/gxcore/shader.hpp
-@@ -688,9 +688,24 @@ struct PlanTexture {
+@@ -12,6 +12,7 @@
+ // include this file.
+ 
+ #include <cstdint>
++#include <cstring>
+ #include <string>
+ #include <type_traits>
+ #include <vector>
+@@ -688,9 +689,54 @@ struct PlanTexture {
  
  // packed uniforms, the pipeline key, and the bound texture's guest identity +
  // host bytes (converted by the substrate's GX codecs at upload).
++// 64-bit fingerprint of plain bytes; never 0 (0 means "not computed"). Four
++// independent lanes keep it quick on the several-KB constant blocks.
++inline std::uint64_t hash_bytes(const void* data, std::size_t size,
++                                std::uint64_t seed = 0x9E3779B97F4A7C15ull) {
++  const auto* p = static_cast<const unsigned char*>(data);
++  constexpr std::uint64_t k = 0x9E3779B97F4A7C15ull;
++  std::uint64_t lane[4] = {seed ^ size, seed + k, seed ^ (k >> 7), seed - k};
++  std::size_t i = 0;
++  for (; i + 32 <= size; i += 32)
++    for (int l = 0; l < 4; ++l) {
++      std::uint64_t w;
++      std::memcpy(&w, p + i + 8 * l, 8);
++      lane[l] = (lane[l] ^ (w * k)) * 0xc2b2ae3d27d4eb4full;
++      lane[l] ^= lane[l] >> 29;
++    }
++  std::uint64_t h = lane[0] ^ (lane[1] * 3) ^ (lane[2] * 5) ^ (lane[3] * 7);
++  for (; i < size; ++i)
++    h = (h ^ p[i]) * 0x100000001b3ull;
++  h ^= h >> 33;
++  h *= 0xff51afd7ed558ccdull;
++  h ^= h >> 33;
++  return h | 1u;
++}
++
 +// What a plan built out of stream order (record_cross) needs from, and gives
 +// to, the cross-draw caches; finish_cross_draw applies it in stream order.
 +struct PlanCrossDraw {
@@ -3665,6 +4106,12 @@ index b9bfd5d..406941f 100644
    bool ok = false;
    const char* skip_reason = nullptr; // set when ok==false
 +  PlanCrossDraw cross{};
++  // Fingerprints of constants / pixel_constants / pipeline (hash_bytes), set
++  // by a planner that has time for them so submission can spot a repeat of
++  // the previous draw's uploads without comparing kilobytes. 0: not set.
++  std::uint64_t constants_hash = 0;
++  std::uint64_t pixel_constants_hash = 0;
++  std::uint64_t pipeline_hash = 0;
    PipelineKey pipeline{};
    VertexShaderConstants constants{};
    PixelShaderConstants pixel_constants{}; // S14 TEV color/konst/alpha uniforms

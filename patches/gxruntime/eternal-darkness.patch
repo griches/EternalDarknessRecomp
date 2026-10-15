@@ -2373,7 +2373,7 @@ index 7af8fca..4c14e34 100644
      g_requested.store(false, std::memory_order_release);
    else
 diff --git a/graphics/aurora/lib/gfx/gxcore_draw.cpp b/graphics/aurora/lib/gfx/gxcore_draw.cpp
-index 71136b9..6264835 100644
+index 71136b9..c3f4b3a 100644
 --- a/graphics/aurora/lib/gfx/gxcore_draw.cpp
 +++ b/graphics/aurora/lib/gfx/gxcore_draw.cpp
 @@ -19,6 +19,10 @@
@@ -2605,8 +2605,20 @@ index 71136b9..6264835 100644
  
    const wgpu::RenderPipelineDescriptor descriptor{
        .label = "GXCore Pipeline",
-@@ -568,8 +699,9 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
+@@ -566,10 +697,21 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+ 
+ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
    if (!bind_pipeline(data.pipeline, pass)) {
++    // ED_PIPELINE_SKIP_LOG: draws skipped while their pipeline compiles.
++    static uint32_t frame = UINT32_MAX, skipped = 0;
++    static const bool log = std::getenv("ED_PIPELINE_SKIP_LOG") != nullptr;
++    if (frame != current_frame()) {
++      if (log && skipped != 0)
++        std::fprintf(stderr, "[pipeline-skip] frame=%u skipped=%u\n", frame, skipped);
++      frame = current_frame();
++      skipped = 0;
++    }
++    ++skipped;
      return;
    }
 -  const std::array vsOffsets{data.uniformRange.offset};
@@ -2617,7 +2629,7 @@ index 71136b9..6264835 100644
    if (data.tev) {
      // group 2 = PS uniform (same dynamic-uniform bind group, its own offset);
      // group 3 = texture.
-@@ -591,8 +723,13 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
+@@ -591,8 +733,13 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
  
  void reset_texture_cache() {
    g_textureCache.clear();
@@ -2631,7 +2643,7 @@ index 71136b9..6264835 100644
    g_ramXfbTextures.clear();
    g_last_xfb_dest_stride = 0;
    g_last_xfb_height = 0;
-@@ -612,6 +749,8 @@ const TextureCacheStats& texture_cache_stats() { return g_textureCacheStats; }
+@@ -612,6 +759,8 @@ const TextureCacheStats& texture_cache_stats() { return g_textureCacheStats; }
  // color/Z afterwards. The bound draw's geometry is already in the pass (the
  // sink flushed the pending draw before firing this).
  void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
@@ -2640,7 +2652,7 @@ index 71136b9..6264835 100644
    // Mirror the copy-clear color/Z (BP 0x4F-0x51 at this copy) into the gx
    // state GXSetCopyClear would have written: begin_frame's pass-0 EFB clear
    // reads g_gxState.clearColor/clearDepth, and in gxcore mode the live gx
-@@ -660,8 +799,9 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -660,8 +809,9 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
        dstHeight = xfb_h;
    }
  
@@ -2652,7 +2664,7 @@ index 71136b9..6264835 100644
        it->second->size.width != dstWidth || it->second->size.height != dstHeight) {
      TextureHandle handle;
      if (!is_xfb && gfx::tex_copy_conv::needs_conversion(fmt)) {
-@@ -670,7 +810,7 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -670,7 +820,7 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
        handle = gfx::new_render_texture(dstWidth, dstHeight, GX_TF_RGBA8,
                                         is_xfb ? "GXCore XFB" : "GXCore Copy");
      }
@@ -2661,7 +2673,7 @@ index 71136b9..6264835 100644
    }
    if (!it->second) {
      return;
-@@ -709,11 +849,30 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -709,11 +859,30 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
    // XFB YUYV into guest RAM from this readback on every display copy, so it
    // must stay armed in product runs too (cost: one EFB readback per display
    // copy, ~1-2/frame).
@@ -2693,7 +2705,7 @@ index 71136b9..6264835 100644
    gfx::resolve_pass(it->second, srcRect, do_clear && cmd.color_update,
                      do_clear && cmd.alpha_update,
                      do_clear && cmd.depth_update,
-@@ -730,7 +889,7 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -730,7 +899,7 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
    // never read XFB RAM stay safe.
    // dest_stride_bytes = BP 0x4D << 5 when set; else tight width*2.
    // XFB dest height from y_scale (byte_size/stride or cmd.xfb_height).
@@ -2702,7 +2714,7 @@ index 71136b9..6264835 100644
        (cmd.width & 1u) == 0u) {
      if (!efb_readback::continuous()) {
        efb_readback::set_continuous(true);
-@@ -782,10 +941,103 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -782,10 +951,103 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
    }
  }
  
@@ -2806,7 +2818,7 @@ index 71136b9..6264835 100644
  
    if (plan.viewport_valid) {
      // Raw XF viewport -> logical viewport, the raw path's own formula
-@@ -839,23 +1091,108 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -839,23 +1101,108 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      const uint32_t size = std::min(tsize, available);
      // Hash the actual source texels (+ TLUT for CI) so a content change under an
      // unchanged guest identity is a distinct cache entry — see TextureKey.
@@ -2920,7 +2932,7 @@ index 71136b9..6264835 100644
      // gxcore owns the decode for every format: produce tightly-packed RGBA8 and
      // upload it as a pre-decoded PC texture (no substrate re-conversion).
      std::vector<uint8_t> decoded;
-@@ -868,8 +1205,32 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -868,8 +1215,32 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      } else {
        decoded = gxc::decode_texture(format, width, height, bytes, size);
      }
@@ -2954,7 +2966,7 @@ index 71136b9..6264835 100644
        handle = new_static_texture_2d(
            width, height, 1, GX_TF_RGBA8_PC,
            ArrayRef<uint8_t>{decoded.data(), decoded.size()}, false,
-@@ -892,7 +1253,96 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -892,7 +1263,96 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    };
  
    BindGroupRef textureBindGroup = 0;
@@ -3051,7 +3063,7 @@ index 71136b9..6264835 100644
      if (plan.texmap_mask == 0u) {
        // Single-texmap fast path: primary texture + plan.sampler at binding 0/1.
        if (plan.has_texture) {
-@@ -903,7 +1353,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -903,7 +1363,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
              plan.tlut_data, plan.tlut_available);
          if (bound) {
            const auto sampler =
@@ -3060,7 +3072,7 @@ index 71136b9..6264835 100644
            const std::array entries{
                WGPUBindGroupEntry{.binding = 0,
                                   .textureView =
-@@ -919,6 +1369,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -919,6 +1379,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            textureBindGroup = bind_group_ref(descriptor);
          }
        }
@@ -3068,7 +3080,7 @@ index 71136b9..6264835 100644
      } else {
        // Multi-texmap: bind each used texmap at 2t (texture) / 2t+1 (sampler),
        // matching the WGSL declarations. Per-texmap PlanSampler from
-@@ -945,14 +1396,16 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -945,14 +1406,16 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
          held.push_back(bound);
          const gxc::PlanSampler& ps =
              pt.sampler.valid ? pt.sampler : plan.samplers[t];
@@ -3087,7 +3099,7 @@ index 71136b9..6264835 100644
        const WGPUBindGroupDescriptor descriptor{
            .label = {"GXCore Texture Bind Group", WGPU_STRLEN},
            .layout = texture_bind_group_layout(plan.texmap_mask).Get(),
-@@ -960,6 +1413,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -960,6 +1423,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            .entries = entries.data(),
        };
        textureBindGroup = bind_group_ref(descriptor);
@@ -3095,7 +3107,7 @@ index 71136b9..6264835 100644
      }
    }
  
-@@ -969,27 +1423,125 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -969,27 +1433,125 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    const auto idxRange = push_indices(
        reinterpret_cast<const uint8_t*>(plan.indices.data()),
        plan.indices.size() * sizeof(uint16_t), 4);
@@ -3311,6 +3323,73 @@ index 0a23a3f..9f25bbf 100644
  // U8 dst-alpha: pipelines created with use_dst_alpha while DualSourceBlending
  // was unavailable (single-source SrcAlpha fallback). Zero when feature present.
  unsigned long long dst_alpha_fallback_count() noexcept;
+diff --git a/graphics/aurora/lib/gfx/pipeline_cache.cpp b/graphics/aurora/lib/gfx/pipeline_cache.cpp
+index 822a560..c2ab896 100644
+--- a/graphics/aurora/lib/gfx/pipeline_cache.cpp
++++ b/graphics/aurora/lib/gfx/pipeline_cache.cpp
+@@ -14,6 +14,7 @@
+ 
+ #include <algorithm>
+ #include <atomic>
++#include <chrono>
+ #include <condition_variable>
+ #include <cstdlib>
+ #include <deque>
+@@ -1146,9 +1147,53 @@ PipelineRef find_pipeline(ShaderType type, const rmlui::PipelineConfig& config,
+ #endif
+ 
+ #ifdef AURORA_ENABLE_GXCORE
++// A gxcore draw whose pipeline is still compiling is skipped, which shows as a
++// frame without an effect (a sepia overlay), a character flickering in, or
++// part of a new screen missing, more often where compiling is slow (D3D12).
++// Wait for it instead, first in the compile queue, up to 50 ms in a frame (a
++// short hitch the first time something appears); past that, skip as before.
++// AURORA_DRAW_WAIT_MS sets the budget; 0 restores skipping.
++static void wait_for_draw_pipeline(PipelineRef hash) {
++  static const double budgetMs = [] {
++    const char* value = std::getenv("AURORA_DRAW_WAIT_MS");
++    return value != nullptr ? std::atof(value) : 50.0;
++  }();
++  if (budgetMs <= 0.0 || !g_hasPipelineThread) {
++    return;
++  }
++  static uint32_t s_frame = UINT32_MAX;
++  static double s_waitedMs = 0.0;
++  if (s_frame != current_frame()) {
++    s_frame = current_frame();
++    s_waitedMs = 0.0;
++  }
++  if (s_waitedMs >= budgetMs) {
++    return;
++  }
++  std::unique_lock lock{g_pipelineMutex};
++  if (g_pipelines.contains(hash)) {
++    return;
++  }
++  auto it = find_pending_pipeline(g_pipelineQueue, hash);
++  if (it != g_pipelineQueue.end() && it != g_pipelineQueue.begin()) {
++    PendingPipeline pending = std::move(*it);
++    g_pipelineQueue.erase(it);
++    g_pipelineQueue.emplace_front(std::move(pending));
++  } else if (it == g_pipelineQueue.end()) {
++    touch_pending_pipeline(hash, PipelinePriority::Blocking);
++  }
++  g_pipelineQueueCv.notify_one();
++  const auto start = std::chrono::steady_clock::now();
++  g_pipelineReadyCv.wait_for(lock, std::chrono::duration<double, std::milli>(budgetMs - s_waitedMs),
++                             [=] { return g_pipelines.contains(hash) || g_pipelineThreadEnd; });
++  s_waitedMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
++}
++
+ template <>
+ PipelineRef find_pipeline(ShaderType type, const gxcore::PipelineConfig& config, NewPipelineCallback&& cb) {
+-  return find_pipeline_impl(type, config, std::move(cb));
++  const PipelineRef hash = find_pipeline_impl(type, config, std::move(cb));
++  wait_for_draw_pipeline(hash);
++  return hash;
+ }
+ #endif
+ 
 diff --git a/graphics/aurora/lib/gfx/plane_capture.cpp b/graphics/aurora/lib/gfx/plane_capture.cpp
 index f51a682..11a455a 100644
 --- a/graphics/aurora/lib/gfx/plane_capture.cpp

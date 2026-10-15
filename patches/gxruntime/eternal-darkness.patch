@@ -1,5 +1,5 @@
 diff --git a/backends/aurora/aurora_backend.cpp b/backends/aurora/aurora_backend.cpp
-index d94f811..b850e24 100644
+index d94f811..7329d79 100644
 --- a/backends/aurora/aurora_backend.cpp
 +++ b/backends/aurora/aurora_backend.cpp
 @@ -19,7 +19,9 @@
@@ -25,7 +25,15 @@ index d94f811..b850e24 100644
  #include <span>
  #include <string>
  #include <unordered_map>
-@@ -57,8 +62,18 @@ bool peek(const std::uint8_t** rgba, std::uint32_t* width,
+@@ -46,6 +51,7 @@ namespace aurora::gfx::gxcore {
+ bool submit_draw_plan(const gxruntime::gxcore::DrawPlan& plan);
+ void copy_efb_to_texture(const gxruntime::gxcore::EfbCopyCommand& cmd);
+ void reset_texture_cache();
++int take_frame_widescreen_vote() noexcept;
+ } // namespace aurora::gfx::gxcore
+ #endif
+ 
+@@ -57,8 +63,18 @@ bool peek(const std::uint8_t** rgba, std::uint32_t* width,
            std::uint32_t* height) noexcept;
  } // namespace aurora::gfx::efb_readback
  
@@ -44,7 +52,7 @@ index d94f811..b850e24 100644
  bool g_frame_open = false;
  bool g_should_quit = false;
  bool g_graphics_log = false;
-@@ -112,6 +127,10 @@ std::array<PendingTlutMetadata, 20> g_pending_tluts{};
+@@ -112,6 +128,10 @@ std::array<PendingTlutMetadata, 20> g_pending_tluts{};
  // validating sink checked. The live Aurora path stays authoritative; this only
  // proves the consumer survives real FIFO traffic ahead of renderer cutover.
  gxruntime::aurora_recomp::RetailGxFrontend g_shadow_frontend;
@@ -55,7 +63,7 @@ index d94f811..b850e24 100644
  gxruntime::aurora_recomp::ConsumingAuroraRenderSink g_shadow_packet_sink;
  bool g_shadow_frontend_enabled = false;
  bool g_shadow_frontend_failed = false;
-@@ -379,13 +398,39 @@ unsigned long long g_trace_present_scope_frame = 0ull;
+@@ -379,13 +399,39 @@ unsigned long long g_trace_present_scope_frame = 0ull;
  bool g_trace_frame_begun = false;
  unsigned long long g_trace_frames_recorded = 0ull;
  gxruntime::aurora_recomp::trace::TraceWriter g_trace_writer;
@@ -102,7 +110,7 @@ index d94f811..b850e24 100644
  
  unsigned long long trace_current_frame() {
      return g_trace_present_scope_frame != 0ull ? g_trace_present_scope_frame
-@@ -435,6 +480,17 @@ bool trace_should_record() {
+@@ -435,6 +481,17 @@ bool trace_should_record() {
          g_trace_writer.frame_begin(static_cast<u32>(frame));
          g_trace_frame_begun = true;
          ++g_trace_frames_recorded;
@@ -120,7 +128,7 @@ index d94f811..b850e24 100644
      }
      return true;
  }
-@@ -442,18 +498,46 @@ bool trace_should_record() {
+@@ -442,18 +499,46 @@ bool trace_should_record() {
  void trace_record_mem_update(u32 address, u32 size, const void* data) {
      if (size == 0 || data == nullptr || !trace_should_record())
          return;
@@ -176,7 +184,7 @@ index d94f811..b850e24 100644
  }
  
  void trace_close_and_log() {
-@@ -491,6 +575,10 @@ void trace_on_present() {
+@@ -491,6 +576,10 @@ void trace_on_present() {
          trace_close_and_log();
      g_trace_present_scope_frame = 0ull;
      g_trace_frame_begun = false;
@@ -187,7 +195,7 @@ index d94f811..b850e24 100644
  }
  // ---------------------------------------------------------------------------
  
-@@ -937,7 +1025,7 @@ bool dol_aurora_initialize(int argc, char** argv,
+@@ -937,7 +1026,7 @@ bool dol_aurora_initialize(int argc, char** argv,
      g_trace_present_scope_frame = 0ull;
      g_trace_frame_begun = false;
      g_trace_frames_recorded = 0ull;
@@ -196,7 +204,7 @@ index d94f811..b850e24 100644
      const char* trace_out = std::getenv("DOL_AURORA_RECOMP_TRACE_OUT");
      if (trace_out != nullptr && trace_out[0] != '\0') {
          g_trace_path = trace_out;
-@@ -1114,6 +1202,12 @@ void dol_aurora_flush_gap_report(void) {
+@@ -1114,6 +1203,12 @@ void dol_aurora_flush_gap_report(void) {
      flush_gxcore_gap_counters();
  }
  
@@ -209,10 +217,50 @@ index d94f811..b850e24 100644
  void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user) {
      g_efb_frame_fill = fn;
      g_efb_frame_fill_user = user;
-@@ -1212,6 +1306,15 @@ void aurora_backend_present(void) {
+@@ -1212,6 +1307,55 @@ void aurora_backend_present(void) {
          }
      }
      ++g_present_count;
++#if GXRUNTIME_HAS_AURORA_RECOMP
++    // Follow the game's widescreen setting: show 16:9 while its 3D draws
++    // project at 16:9 (anamorphic, as on a widescreen TV), 4:3 otherwise.
++    // DOL_ASPECT=4:3 or 16:9 pins one; DOL_ASPECT=stretch keeps the old
++    // fill-the-window behaviour.
++    if (g_gx_core_enabled) {
++        static int mode = -2;  // -2 unset, -1 4:3, +1 16:9
++        static int pending = 0;
++        static int streak = 0;
++        static const char* forced = std::getenv("DOL_ASPECT");
++        const int vote = aurora::gfx::gxcore::take_frame_widescreen_vote();
++        if (forced != nullptr && std::strcmp(forced, "stretch") == 0) {
++            // leave Aurora's default stretch
++        } else if (forced != nullptr) {
++            const int want = std::strcmp(forced, "16:9") == 0 ? 1 : -1;
++            if (mode != want) {
++                mode = want;
++                aurora_set_display_aspect(want > 0 ? 16.f / 9.f : 4.f / 3.f, true);
++            }
++        } else {
++            if (mode == -2) {
++                mode = -1;
++                aurora_set_display_aspect(4.f / 3.f, false);
++            }
++            if (vote != 0 && vote != mode) {
++                streak = vote == pending ? streak + 1 : 1;
++                pending = vote;
++                if (streak >= 10) {
++                    mode = vote;
++                    streak = 0;
++                    std::fprintf(stderr, "[aspect] game projects at %s: showing %s\n",
++                                 mode > 0 ? "16:9" : "4:3", mode > 0 ? "16:9" : "4:3");
++                    aurora_set_display_aspect(mode > 0 ? 16.f / 9.f : 4.f / 3.f, true);
++                }
++            } else if (vote == mode) {
++                streak = 0;
++            }
++        }
++    }
++#endif
 +    if (g_gx_time_log) {
 +        static std::uint64_t last_present_ns;
 +        const std::uint64_t now = SDL_GetTicksNS();
@@ -225,7 +273,7 @@ index d94f811..b850e24 100644
      if (g_frame_pacing_log &&
          (g_present_count <= 10 || (g_present_count % 60) == 0)) {
          const AuroraStats* stats = aurora_get_stats();
-@@ -1432,6 +1535,7 @@ void aurora_backend_present(void) {
+@@ -1432,6 +1576,7 @@ void aurora_backend_present(void) {
      const unsigned long long present_fifo = g_fifo_bytes;
      g_fifo_bytes = 0;
      poll_events();
@@ -233,7 +281,7 @@ index d94f811..b850e24 100644
      if (!g_should_quit) {
          g_frame_open = aurora_begin_frame();
  #if GXRUNTIME_HAS_AURORA_RECOMP
-@@ -1482,7 +1586,13 @@ void aurora_backend_gx_write(u64 value, u8 size) {
+@@ -1482,7 +1627,13 @@ void aurora_backend_gx_write(u64 value, u8 size) {
          return;
      g_fifo_bytes += size;
  #if GXRUNTIME_HAS_AURORA_RECOMP
@@ -248,7 +296,7 @@ index d94f811..b850e24 100644
      // Record AFTER the shadow write so MEM_UPDATEs its resolves emitted
      // precede this GX_WRITE in the trace (replay reads them first), and
      // BEFORE the live-Aurora forwarding below so the pristine value is
-@@ -1848,6 +1958,7 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1848,6 +1999,7 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
  
      int queued = SDL_GetAudioStreamQueued(g_audio_stream);
      unsigned waited_ms = 0;
@@ -256,7 +304,7 @@ index d94f811..b850e24 100644
      while (queued > max_queued_bytes && waited_ms < 20u) {
          g_audio_throttle_count++;
          if (g_audio_queue_log &&
-@@ -1860,8 +1971,17 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1860,8 +2012,17 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
                           max_queued_bytes);
          SDL_Delay(1);
          waited_ms++;
@@ -274,7 +322,7 @@ index d94f811..b850e24 100644
  
      const bool low_queue =
          queued >= 0 && queued < bytes_per_second / 100;
-@@ -1886,6 +2006,169 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1886,6 +2047,169 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
      }
  }
  
@@ -444,17 +492,36 @@ index d94f811..b850e24 100644
  } // extern "C"
  
  namespace {
+diff --git a/graphics/aurora/include/aurora/aurora.h b/graphics/aurora/include/aurora/aurora.h
+index b86b214..f6b70de 100644
+--- a/graphics/aurora/include/aurora/aurora.h
++++ b/graphics/aurora/include/aurora/aurora.h
+@@ -138,6 +138,10 @@ void aurora_set_background_input(bool value);
+ void aurora_set_resampler(AuroraSampler sampler);
+ /* F2: pin EFB present_source to fixed WxH (metric dump surface). 0,0 clears. */
+ void aurora_set_efb_fixed_size(uint32_t width, uint32_t height);
++// Show the game at this display aspect (4:3, 16:9 ...): the framebuffer is fit
++// to it and letterboxed, and a windowed (not fullscreen) window is resized to
++// the aspect at its current height when resize_window is set.
++void aurora_set_display_aspect(float aspect, bool resize_window);
+ 
+ AuroraBackend aurora_get_backend();
+ const AuroraBackend* aurora_get_available_backends(size_t* count);
 diff --git a/graphics/aurora/lib/aurora.cpp b/graphics/aurora/lib/aurora.cpp
-index b09ef4d..efb1a26 100644
+index b09ef4d..c293c6d 100644
 --- a/graphics/aurora/lib/aurora.cpp
 +++ b/graphics/aurora/lib/aurora.cpp
-@@ -1,3 +1,5 @@
+@@ -1,5 +1,9 @@
 +#include <cstdio>
 +#include <cstdlib>
  #include <aurora/aurora.h>
  
++#include <cmath>
++
  #ifdef AURORA_ENABLE_GX
-@@ -258,9 +260,31 @@ void end_frame() noexcept {
+ #include "gfx/common.hpp"
+ #include "gfx/render_worker.hpp"
+@@ -258,9 +262,31 @@ void end_frame() noexcept {
    // E7 present-from-XFB: VI current → GPU Virtual-XFB, else YUYV-from-RAM
    // decode, else EFB-direct (Strikers when no RAM XFB / match fails).
    const std::uint32_t xfbAddr = vi::xfb_black() ? 0u : vi::current_xfb();
@@ -487,19 +554,38 @@ index b09ef4d..efb1a26 100644
    const uint32_t contentW =
        xfbTex && *xfbTex ? (*xfbTex)->size.width : efbSource.size.width;
    const uint32_t contentH =
+@@ -478,3 +504,17 @@ void aurora_set_resampler(AuroraSampler sampler) {
+ void aurora_set_efb_fixed_size(uint32_t width, uint32_t height) {
+   aurora::window::set_fixed_efb_size(width, height);
+ }
++
++void aurora_set_display_aspect(float aspect, bool resize_window) {
++  if (aspect <= 0.f)
++    return;
++  aurora::window::set_display_aspect(aspect);
++  if (resize_window && !aurora::window::get_fullscreen()) {
++    const AuroraWindowSize size = aurora::window::get_window_size();
++    if (size.height > 0) {
++      const auto width = static_cast<uint32_t>(std::lround(static_cast<float>(size.height) * aspect));
++      if (width != size.width)
++        aurora::window::set_window_size(width, size.height);
++    }
++  }
++}
 diff --git a/graphics/aurora/lib/gfx/gxcore_draw.cpp b/graphics/aurora/lib/gfx/gxcore_draw.cpp
-index 71136b9..15dbb7b 100644
+index 71136b9..c100eb1 100644
 --- a/graphics/aurora/lib/gfx/gxcore_draw.cpp
 +++ b/graphics/aurora/lib/gfx/gxcore_draw.cpp
-@@ -19,6 +19,7 @@
+@@ -19,6 +19,8 @@
  #include <absl/container/flat_hash_map.h>
  
  #include <algorithm>
 +#include <array>
++#include <cmath>
  #include <cstring>
  #include <vector>
  
-@@ -228,6 +229,30 @@ struct TextureKey {
+@@ -228,6 +230,30 @@ struct TextureKey {
  };
  
  absl::flat_hash_map<TextureKey, TextureHandle> g_textureCache;
@@ -530,7 +616,7 @@ index 71136b9..15dbb7b 100644
  // address -> the key currently cached at that guest address. When new content
  // arrives at an address (movie streaming, screen transitions), the prior entry
  // for that address is evicted so the content-hashed cache stays bounded to one
-@@ -242,6 +267,13 @@ TextureCacheStats g_textureCacheStats;
+@@ -242,6 +268,13 @@ TextureCacheStats g_textureCacheStats;
  // (a re-copy to the same address updates in place, matching the live path).
  // E7: format-0xF display copies also land here (Virtual XFB GPU texture).
  absl::flat_hash_map<uint32_t, TextureHandle> g_efbCopyTextures;
@@ -544,7 +630,7 @@ index 71136b9..15dbb7b 100644
  
  // E7 present-from-RAM: YUYV decoded from guest MEM1 when no GPU copy exists
  // (software/external XFB writers). Keyed by physical address; re-upload when
-@@ -281,13 +313,17 @@ unsigned long long xfb_ram_present_count() noexcept {
+@@ -281,13 +314,17 @@ unsigned long long xfb_ram_present_count() noexcept {
    return g_xfb_ram_present_count;
  }
  
@@ -564,7 +650,7 @@ index 71136b9..15dbb7b 100644
      return &it->second;
  
    const auto dims = aurora::vi::configured_xfb_size();
-@@ -536,6 +572,10 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -536,6 +573,10 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
    default:
      break; // None here; All was skipped at plan time
    }
@@ -575,7 +661,7 @@ index 71136b9..15dbb7b 100644
  
    const wgpu::RenderPipelineDescriptor descriptor{
        .label = "GXCore Pipeline",
-@@ -591,8 +631,12 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
+@@ -591,8 +632,12 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
  
  void reset_texture_cache() {
    g_textureCache.clear();
@@ -588,7 +674,7 @@ index 71136b9..15dbb7b 100644
    g_ramXfbTextures.clear();
    g_last_xfb_dest_stride = 0;
    g_last_xfb_height = 0;
-@@ -612,6 +656,8 @@ const TextureCacheStats& texture_cache_stats() { return g_textureCacheStats; }
+@@ -612,6 +657,8 @@ const TextureCacheStats& texture_cache_stats() { return g_textureCacheStats; }
  // color/Z afterwards. The bound draw's geometry is already in the pass (the
  // sink flushed the pending draw before firing this).
  void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
@@ -597,7 +683,7 @@ index 71136b9..15dbb7b 100644
    // Mirror the copy-clear color/Z (BP 0x4F-0x51 at this copy) into the gx
    // state GXSetCopyClear would have written: begin_frame's pass-0 EFB clear
    // reads g_gxState.clearColor/clearDepth, and in gxcore mode the live gx
-@@ -660,8 +706,9 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -660,8 +707,9 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
        dstHeight = xfb_h;
    }
  
@@ -609,7 +695,7 @@ index 71136b9..15dbb7b 100644
        it->second->size.width != dstWidth || it->second->size.height != dstHeight) {
      TextureHandle handle;
      if (!is_xfb && gfx::tex_copy_conv::needs_conversion(fmt)) {
-@@ -670,7 +717,7 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -670,7 +718,7 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
        handle = gfx::new_render_texture(dstWidth, dstHeight, GX_TF_RGBA8,
                                         is_xfb ? "GXCore XFB" : "GXCore Copy");
      }
@@ -618,7 +704,7 @@ index 71136b9..15dbb7b 100644
    }
    if (!it->second) {
      return;
-@@ -714,6 +761,20 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -714,6 +762,20 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
        efb_readback::set_continuous(true);
      efb_readback::request();
    }
@@ -639,7 +725,42 @@ index 71136b9..15dbb7b 100644
    gfx::resolve_pass(it->second, srcRect, do_clear && cmd.color_update,
                      do_clear && cmd.alpha_update,
                      do_clear && cmd.depth_update,
-@@ -839,10 +900,22 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -782,10 +844,34 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+   }
+ }
+ 
++// Perspective draws this frame by projection aspect (y scale / x scale): an
++// anamorphic widescreen mode projects at ~16:9 into the same EFB.
++unsigned g_frameDraws43 = 0;
++unsigned g_frameDrawsWide = 0;
++
++int take_frame_widescreen_vote() noexcept {
++  const int vote = g_frameDrawsWide + g_frameDraws43 < 32u ? 0
++                   : g_frameDrawsWide > g_frameDraws43    ? 1
++                                                          : -1;
++  g_frameDraws43 = 0;
++  g_frameDrawsWide = 0;
++  return vote;
++}
++
+ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+   if (!plan.ok || plan.vertex_count == 0 || plan.indices.empty()) {
+     return false;
+   }
++  {
++    const auto& P = plan.constants.projection;
++    if (P[3][2] == -1.f && P[0][0] != 0.f) {
++      const float aspect = std::fabs(P[1][1] / P[0][0]);
++      if (aspect > 1.2f && aspect < 1.45f)
++        ++g_frameDraws43;
++      else if (aspect > 1.65f && aspect < 1.9f)
++        ++g_frameDrawsWide;
++    }
++  }
+ 
+   if (plan.viewport_valid) {
+     // Raw XF viewport -> logical viewport, the raw path's own formula
+@@ -839,10 +925,22 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      const uint32_t size = std::min(tsize, available);
      // Hash the actual source texels (+ TLUT for CI) so a content change under an
      // unchanged guest identity is a distinct cache entry — see TextureKey.
@@ -666,7 +787,7 @@ index 71136b9..15dbb7b 100644
      const TextureKey key{address,     tsize,        format,      width,
                           height,      tlut_address, tlut_format, tlut_entries,
                           content_hash};
-@@ -892,7 +965,96 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -892,7 +990,96 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    };
  
    BindGroupRef textureBindGroup = 0;
@@ -763,7 +884,7 @@ index 71136b9..15dbb7b 100644
      if (plan.texmap_mask == 0u) {
        // Single-texmap fast path: primary texture + plan.sampler at binding 0/1.
        if (plan.has_texture) {
-@@ -919,6 +1081,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -919,6 +1106,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            textureBindGroup = bind_group_ref(descriptor);
          }
        }
@@ -771,7 +892,7 @@ index 71136b9..15dbb7b 100644
      } else {
        // Multi-texmap: bind each used texmap at 2t (texture) / 2t+1 (sampler),
        // matching the WGSL declarations. Per-texmap PlanSampler from
-@@ -951,8 +1114,10 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -951,8 +1139,10 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
          entries.push_back(WGPUBindGroupEntry{
              .binding = 2u * t + 1u, .sampler = heldSamplers.back().Get()});
        }
@@ -783,7 +904,7 @@ index 71136b9..15dbb7b 100644
        const WGPUBindGroupDescriptor descriptor{
            .label = {"GXCore Texture Bind Group", WGPU_STRLEN},
            .layout = texture_bind_group_layout(plan.texmap_mask).Get(),
-@@ -960,6 +1125,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -960,6 +1150,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            .entries = entries.data(),
        };
        textureBindGroup = bind_group_ref(descriptor);
@@ -791,7 +912,7 @@ index 71136b9..15dbb7b 100644
      }
    }
  
-@@ -969,24 +1135,56 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -969,24 +1160,56 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    const auto idxRange = push_indices(
        reinterpret_cast<const uint8_t*>(plan.indices.data()),
        plan.indices.size() * sizeof(uint16_t), 4);
@@ -859,6 +980,22 @@ index 71136b9..15dbb7b 100644
          .vertRange = vertRange,
          .idxRange = idxRange,
          .uniformRange = uniformRange,
+diff --git a/graphics/aurora/lib/gfx/gxcore_draw.hpp b/graphics/aurora/lib/gfx/gxcore_draw.hpp
+index 0a23a3f..3604085 100644
+--- a/graphics/aurora/lib/gfx/gxcore_draw.hpp
++++ b/graphics/aurora/lib/gfx/gxcore_draw.hpp
+@@ -83,6 +83,11 @@ struct TextureCacheStats {
+ };
+ const TextureCacheStats& texture_cache_stats();
+ 
++// +1 when this frame's perspective draws were mostly ~16:9 (an anamorphic
++// widescreen mode), -1 when mostly ~4:3, 0 with too few 3D draws to tell.
++// Resets the count; call once per presented frame.
++int take_frame_widescreen_vote() noexcept;
++
+ // U8 dst-alpha: pipelines created with use_dst_alpha while DualSourceBlending
+ // was unavailable (single-source SrcAlpha fallback). Zero when feature present.
+ unsigned long long dst_alpha_fallback_count() noexcept;
 diff --git a/graphics/aurora/lib/gfx/xfb_present.hpp b/graphics/aurora/lib/gfx/xfb_present.hpp
 index b205cfa..ee13954 100644
 --- a/graphics/aurora/lib/gfx/xfb_present.hpp
@@ -873,6 +1010,62 @@ index b205cfa..ee13954 100644
 +const TextureHandle* last_display_copy() noexcept;
  
  } // namespace aurora::gfx::gxcore
+diff --git a/graphics/aurora/lib/window.cpp b/graphics/aurora/lib/window.cpp
+index 74864c3..f590478 100644
+--- a/graphics/aurora/lib/window.cpp
++++ b/graphics/aurora/lib/window.cpp
+@@ -42,6 +42,9 @@ SDL_Window* g_window;
+ SDL_Renderer* g_renderer;
+ float g_frameBufferScale = 0.f;
+ bool g_frameBufferAspectFit = false;
++// Display aspect for the fit (0 = the configured EFB size's own aspect). Set by
++// set_display_aspect, e.g. 16:9 for a game's anamorphic widescreen mode.
++float g_frameBufferAspect = 0.f;
+ // F2 metric surface: when both non-zero, EFB (fb_width/fb_height) is forced
+ // to this size regardless of SDL window / display scale / aspect-fit.
+ uint32_t g_fixedEfbWidth = 0;
+@@ -413,8 +416,10 @@ AuroraWindowSize get_window_size() {
+     if (g_frameBufferAspectFit) {
+       const auto [baseW, baseH] = vi::configured_fb_size();
+       if (baseW > 0 && baseH > 0) {
+-        const auto [fitW, fitH] =
+-            fit_frame_buffer_to_aspect(fb_w, fb_h, static_cast<float>(baseW) / static_cast<float>(baseH));
++        const float aspect = g_frameBufferAspect > 0.f
++                                 ? g_frameBufferAspect
++                                 : static_cast<float>(baseW) / static_cast<float>(baseH);
++        const auto [fitW, fitH] = fit_frame_buffer_to_aspect(fb_w, fb_h, aspect);
+         fb_w = fitW;
+         fb_h = fitH;
+       }
+@@ -524,6 +529,15 @@ void set_frame_buffer_scale(float scale) {
+   request_frame_buffer_resize();
+ }
+ 
++void set_display_aspect(float aspect) {
++  if (g_frameBufferAspectFit && g_frameBufferAspect == aspect) {
++    return;
++  }
++  g_frameBufferAspect = aspect;
++  g_frameBufferAspectFit = true;
++  request_frame_buffer_resize();
++}
++
+ void set_frame_buffer_aspect_fit(bool fit) {
+   if (g_frameBufferAspectFit == fit) {
+     return;
+diff --git a/graphics/aurora/lib/window.hpp b/graphics/aurora/lib/window.hpp
+index b741e17..9b5fa67 100644
+--- a/graphics/aurora/lib/window.hpp
++++ b/graphics/aurora/lib/window.hpp
+@@ -50,6 +50,8 @@ void center_window();
+ void request_frame_buffer_resize();
+ void set_frame_buffer_scale(float scale);
+ void set_frame_buffer_aspect_fit(bool fit);
++// Fit the framebuffer to this display aspect (letterboxed in the window).
++void set_display_aspect(float aspect);
+ // F2: pin EFB render target (present_source) to fixed WxH independent of
+ // window/swapchain native size. Pass 0,0 to clear. Applied immediately when
+ // a window exists (recreates g_frameBuffer).
 diff --git a/graphics/frontend/include/gxruntime/aurora_recomp/render_sink.hpp b/graphics/frontend/include/gxruntime/aurora_recomp/render_sink.hpp
 index 88110c8..6e59778 100644
 --- a/graphics/frontend/include/gxruntime/aurora_recomp/render_sink.hpp

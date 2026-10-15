@@ -17,6 +17,7 @@
 #include "gxruntime/savestate.h"
 #include "host/audio.h"
 #include "host/dtk.h"
+#include "game_data.h"
 #include "host/mmio.h"
 #include "host/hle.h"
 #include "host/interrupt.h"
@@ -134,6 +135,45 @@ static void dump_threads(CPUState* cpu) {
                 mem_read32(cpu, thread + 0x04u));
         thread = mem_read32(cpu, thread + 0x2FCu);
     }
+}
+
+// ED_HEAP_CHECK=N: every N blocks walk the OS heaps' free and allocated cell
+// lists (OSAlloc HeapDesc {size, free, allocated}, Cell {prev, next, size}) and
+// report the first broken link, to find what corrupts the heap.
+static u32 g_heap_array_ptr;  // address of the HeapArray pointer (r13 small data)
+static bool heap_ok(CPUState* cpu, unsigned long long blocks) {
+    const u32 heaps = mem_read32(cpu, g_heap_array_ptr);
+    const s32 count = (s32)mem_read32(cpu, g_heap_array_ptr + 4u);
+    if (heaps < GC_RAM_BASE || count <= 0 || count > 64)
+        return true;
+    for (s32 h = 0; h < count; h++) {
+        const u32 hd = heaps + (u32)h * 12u;
+        if ((s32)mem_read32(cpu, hd) < 0)
+            continue;  // unused descriptor
+        for (u32 list = 4u; list <= 8u; list += 4u) {
+            u32 cell = mem_read32(cpu, hd + list);
+            for (int n = 0; cell != 0u && n < 200000; n++) {
+                const u32 next = mem_read32(cpu, cell + 4u);
+                if (next != 0u && (next < GC_RAM_BASE ||
+                                   next >= GC_RAM_BASE + cpu->ram_size ||
+                                   mem_read32(cpu, next) != cell)) {
+                    fprintf(stderr,
+                            "[heap] broken at block %llu pc=0x%08X lr=0x%08X: heap %d "
+                            "%s list, cell 0x%08X next 0x%08X next->prev 0x%08X; "
+                            "cell words %08X %08X %08X %08X\n",
+                            blocks, cpu->pc, cpu->lr, (int)h,
+                            list == 4u ? "free" : "allocated", cell, next,
+                            next >= GC_RAM_BASE && next < GC_RAM_BASE + cpu->ram_size
+                                ? mem_read32(cpu, next) : 0u,
+                            mem_read32(cpu, cell), mem_read32(cpu, cell + 4u),
+                            mem_read32(cpu, cell + 8u), mem_read32(cpu, cell + 12u));
+                    return false;
+                }
+                cell = next;
+            }
+        }
+    }
+    return true;
 }
 
 int main(int argc, char** argv) {
@@ -393,6 +433,9 @@ int main(int argc, char** argv) {
                 CALL_RETURN_SENTINEL);
     }
 
+    unsigned long long heap_check_every =
+        getenv("ED_HEAP_CHECK") ? strtoull(getenv("ED_HEAP_CHECK"), NULL, 0) : 0ull;
+    g_heap_array_ptr = ED_GUEST_R13 - 21344u;  // OSAlloc's HeapArray (sbss)
     printf("[run] starting execution at 0x%08X (max %llu blocks)\n",
            cpu.pc, max_blocks);
 
@@ -499,6 +542,9 @@ int main(int argc, char** argv) {
             break;
         }
         blocks++;
+        if (heap_check_every && (blocks % heap_check_every) == 0 &&
+            !heap_ok(&cpu, blocks))
+            heap_check_every = 0;  // report the first break only
         if (trace_every && (blocks % trace_every) == 0)
             fprintf(stderr, "[trace] block %llu pc=0x%08X lr=0x%08X r1=0x%08X\n",
                     blocks, cpu.pc, cpu.lr, cpu.gpr[1]);

@@ -95,12 +95,15 @@ def r13_arg_before_call(dol, func, callee, r13):
     raise SystemExit("gamedata: queue argument not found")
 
 
-def first_r13_store(dol, func, r13):
+def r13_stores(dol, func, r13, count):
+    found = []
     for i in range(8):
         op, rt, ra, simm = dform(dol.word(func + 4 * i))
         if op == 36 and ra == 13:
-            return (r13 + simm) & 0xFFFFFFFF
-    raise SystemExit("gamedata: r13 store not found")
+            found.append((r13 + simm) & 0xFFFFFFFF)
+            if len(found) == count:
+                return found
+    raise SystemExit("gamedata: r13 stores not found")
 
 
 def main():
@@ -115,7 +118,7 @@ def main():
     r2, r13 = registers(dol)
     gx_base, gx_offset, gx_dirty = gx_data(dol, sym["GXBegin"])
     finish_queue = r13_arg_before_call(dol, sym["GXDrawDone"], sym["OSSleepThread"], r13)
-    dsp_done = first_r13_store(dol, sym["dspInitCallback"], r13)
+    dsp_done, dsp_init_done = r13_stores(dol, sym["dspInitCallback"], r13, 2)
     flush_zero = flush_prim_when_zero(dol, sym["GXCallDisplayList"], sym["__GXSendFlushPrim"])
 
     values = [
@@ -126,6 +129,7 @@ def main():
         ("ED_GX_DIRTY_STATE_OFFSET", gx_dirty, "dirty-state word in the GX state block"),
         ("ED_GX_FINISH_QUEUE", finish_queue, "FinishQueue, the OSThreadQueue GXDrawDone sleeps on"),
         ("ED_MUSYX_DSP_DONE", dsp_done, "salDspIsDone, set by dspInitCallback"),
+        ("ED_MUSYX_DSP_INIT_DONE", dsp_init_done, "salDspInitIsDone, its second store"),
         ("ED_GX_FLUSH_PRIM_WHEN_ZERO", flush_zero,
          "1: GX sends the flush primitive when the state block's first word is 0"),
     ]

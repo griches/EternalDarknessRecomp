@@ -46,6 +46,8 @@ typedef struct {
 // Trace every intercepted SDK call (and DVD activity). Set by ED_HLE_LOG.
 static bool g_hle_log = false;
 static bool g_dvd_log = false;  // ED_DVD_LOG: file opens only
+static u32 g_trace_fn[16];
+static u32 g_trace_fn_count;
 static bool g_audio_log = false;
 static bool g_graphics_log = false;
 static bool g_movie_log = false;
@@ -622,8 +624,15 @@ static void hle_salInitDsp(CPUState* cpu) {
 // ARAM buffer (aram.c). Without these, ARGetBaseAddress returns uninitialized
 // garbage and the game's ARAM heap walks an invalid free list forever.
 // ---------------------------------------------------------------------------
-static void hle_ARInit(CPUState* cpu) { (void)cpu; }              // no-op
-static void hle_ARGetBaseAddress(CPUState* cpu) { hle_set_u32(cpu, ARAM_BASE); }
+// ARAM addresses are offsets into the 16 MB of sound RAM. ARInit and
+// ARGetBaseAddress return the start of the user area, 0x4000 on hardware (the
+// first 16 KB are reserved for the OS). This game's MusyX lays its sample and
+// stream buffers out from that base and checks them against ARGetSize, so a
+// synthetic CPU-window base made every stream allocation fail. GXRuntime's ARAM
+// accepts plain offsets.
+#define ARAM_USER_BASE 0x4000u
+static void hle_ARInit(CPUState* cpu) { hle_set_u32(cpu, ARAM_USER_BASE); }
+static void hle_ARGetBaseAddress(CPUState* cpu) { hle_set_u32(cpu, ARAM_USER_BASE); }
 static void hle_ARGetSize(CPUState* cpu) { hle_set_u32(cpu, ARAM_SIZE); }
 static void hle_ARGetDMAStatus(CPUState* cpu) { hle_set_u32(cpu, 0); }  // idle
 
@@ -3298,21 +3307,21 @@ static void hle_PADSetSpec(CPUState* cpu) {
     dol_platform_pad_set_spec(hle_arg_u32(cpu, 0));
 }
 #else
-// Deterministic controller pulses for headless integration tests. This stays
-// fully opt-in so normal headless runs still report no connected controllers.
+// Deterministic controller pulses for headless integration tests. Port 1 always
+// reports a connected controller (with nothing pressed unless scripted): this
+// game parks on its "controller unplugged" screen otherwise.
 static bool headless_scripted_pad(CPUState* cpu,
                                   u16* buttons,
                                   s8* stick_x,
                                   s8* stick_y,
                                   u8* analog_a) {
-    bool connected = false;
+    const bool connected = true;
     const u64 frame = cpu->timebase / 675000ull;
     if (g_auto_input) {
         const bool pressed = frame >= 135u && ((frame - 135u) % 90u) < 12u;
         if (pressed) {
             *buttons |= 0x0100u;
             *analog_a = 0xFFu;
-            connected = true;
             if (g_auto_input_last_pulse != frame) {
                 fprintf(stderr, "[input] scripted A at frame %llu\n",
                         (unsigned long long)frame);
@@ -3320,11 +3329,8 @@ static bool headless_scripted_pad(CPUState* cpu,
             }
         }
     }
-    if (input_script_apply(cpu, buttons, stick_x, stick_y, analog_a))
-        connected = true;
+    (void)input_script_apply(cpu, buttons, stick_x, stick_y, analog_a);
     mash_to_gameplay_apply(cpu, buttons, stick_x, analog_a);
-    if (g_mash_to_gameplay)
-        connected = true;
     return connected;
 }
 
@@ -3356,13 +3362,11 @@ static void hle_PADRead(CPUState* cpu) {
 }
 
 static void hle_PADReset(CPUState* cpu) {
-    hle_set_u32(cpu, (g_auto_input || g_mash_to_gameplay ||
-                      g_input_script_count != 0u) ? 1u : 0u);
+    hle_set_u32(cpu, 1u);
 }
 
 static void hle_PADRecalibrate(CPUState* cpu) {
-    hle_set_u32(cpu, (g_auto_input || g_mash_to_gameplay ||
-                      g_input_script_count != 0u) ? 1u : 0u);
+    hle_set_u32(cpu, 1u);
 }
 
 static void hle_PADControlMotor(CPUState* cpu) {
@@ -4159,6 +4163,15 @@ static bool hle_dispatch(CPUState* cpu, u32 address) {
         return false;  // lr also bad -> let the runtime stop and report
     }
 
+    // ED_TRACE_FN=name[,name...]: log each call of those functions with its
+    // caller and first arguments, without the full ED_HLE_LOG firehose.
+    if (g_trace_fn_count != 0u) {
+        for (u32 i = 0; i < g_trace_fn_count; i++)
+            if (g_trace_fn[i] == address)
+                fprintf(stderr, "[fn] %s lr=0x%08X r3=0x%08X r4=0x%08X r5=0x%08X r6=0x%08X\n",
+                        sdk_symbol_name(address), cpu->lr, cpu->gpr[3],
+                        cpu->gpr[4], cpu->gpr[5], cpu->gpr[6]);
+    }
     HleDispatchEntry* entry = hle_dispatch_entry(address);
     if (entry == NULL)
         return false;
@@ -4242,6 +4255,15 @@ void hle_card_close(void) {
 void hle_install(CPUState* cpu) {
     g_hle_log = getenv("ED_HLE_LOG") != NULL;
     g_dvd_log = g_hle_log || getenv("ED_DVD_LOG") != NULL;
+    g_trace_fn_count = 0;
+    if (getenv("ED_TRACE_FN") != NULL) {
+        char names[512];
+        snprintf(names, sizeof names, "%s", getenv("ED_TRACE_FN"));
+        for (char* n = strtok(names, ","); n != NULL && g_trace_fn_count < 16u;
+             n = strtok(NULL, ","))
+            if (sdk_symbol_address(n) != 0u)
+                g_trace_fn[g_trace_fn_count++] = sdk_symbol_address(n);
+    }
     g_audio_log = getenv("ED_AUDIO_LOG") != NULL;
     g_graphics_log = getenv("ED_GFX_LOG") != NULL;
     g_movie_log = getenv("ED_MOVIE_LOG") != NULL;

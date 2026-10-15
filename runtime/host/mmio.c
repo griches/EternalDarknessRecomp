@@ -120,6 +120,24 @@ static bool g_pi_fifo_configured;
 
 // GXRedirectWriteGatherPipe sets base 0 / end 64 MiB and the write pointer to
 // the target, so base 0 is a redirect, not "unset".
+// The write-gather pipe collects 32 bytes and bursts whole lines to the FIFO
+// write pointer. A partial line stays in the pipe across a FIFO change: the SDK
+// relies on that when it ends a gather-pipe redirect by pushing 31 zero bytes,
+// which must not land past the end of the redirected buffer.
+static u8 g_wg_line[32];
+static u32 g_wg_fill;
+
+static void wg_burst_to_ram(CPUState* cpu) {
+    for (u32 i = 0; i < 32u; i++)
+        mem_write8(cpu, GC_RAM_BASE | (g_pi_fifo_wptr + i), g_wg_line[i]);
+    g_pi_fifo_wptr += 32u;
+    if (g_pi_fifo_end != 0u && g_pi_fifo_wptr >= g_pi_fifo_end) {
+        g_pi_fifo_wptr = g_pi_fifo_base;
+        g_pi_fifo_wrapped = true;
+    }
+    g_wg_fill = 0;
+}
+
 static bool cpu_fifo_feeds_gpu(void) {
     return !g_pi_fifo_configured || g_cp.fifo_base == 0u ||
            g_pi_fifo_base == (g_cp.fifo_base & PI_FIFO_ADDRESS_MASK);
@@ -142,6 +160,11 @@ u64 mmio_pi_fifo_read(u32 ea) {
 void mmio_pi_fifo_write(u32 ea, u64 value) {
     const u32 v = (u32)value;
     g_pi_fifo_configured = true;
+    static int pi_log = -1;  // ED_PI_LOG=1: log gather-pipe redirects
+    if (pi_log < 0)
+        pi_log = getenv("ED_PI_LOG") != NULL;
+    if (pi_log && (ea & ~3u) == 0xCC003014u && g_pi_fifo_base == 0u)
+        fprintf(stderr, "[pi] gather pipe redirected to 0x%08X\n", v);
     mmio_fifo_dump_note(ea == 0xCC00300Cu   ? "pi-fifo-base"
                         : ea == 0xCC003010u ? "pi-fifo-end"
                                             : "pi-fifo-wptr",
@@ -209,14 +232,18 @@ static bool gx_fifo_write_cb(void* user, CPUState* cpu, u32 ea, u8 size,
     mmio_fifo_dump_write(cpu, size, value);
     if (!cpu_fifo_feeds_gpu()) {
         for (u8 i = 0; i < size; i++) {
-            mem_write8(cpu, GC_RAM_BASE | g_pi_fifo_wptr,
-                       (u8)(value >> ((size - 1u - i) * 8u)));
-            if (++g_pi_fifo_wptr >= g_pi_fifo_end && g_pi_fifo_end != 0u) {
-                g_pi_fifo_wptr = g_pi_fifo_base;
-                g_pi_fifo_wrapped = true;
-            }
+            g_wg_line[g_wg_fill++] = (u8)(value >> ((size - 1u - i) * 8u));
+            if (g_wg_fill == 32u)
+                wg_burst_to_ram(cpu);
         }
         return true;
+    }
+    // Back on the GPU FIFO: bytes left in the pipe from a RAM target (the 31
+    // zeros GXRestoreWriteGatherPipe pushes) complete their line here, as NOPs.
+    if (g_wg_fill != 0u) {
+        for (u32 i = 0; i < g_wg_fill; i++)
+            dol_platform_gx_write(g_wg_line[i], 1u);
+        g_wg_fill = 0;
     }
     // ED_EXP_NOZ=1 (experiment): clear the z-compare enable in BP 0x40 writes.
     {

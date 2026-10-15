@@ -193,6 +193,11 @@ void audio_poll(CPUState* cpu) {
     if (g_log && (g_aid_chunks <= 10u || g_aid_chunks % 400u == 0u))
         fprintf(stderr, "[audio] AID chunk %llu: source=%08x peak=%u\n",
                 (unsigned long long)g_aid_chunks, physical, peak);
+    static int mute = -1;  // ED_MUTE=1: keep pacing, send silence (test runs)
+    if (mute < 0)
+        mute = getenv("ED_MUTE") != NULL;
+    if (mute)
+        memset(output, 0, sizeof output);
     dol_platform_audio_push(output, 8u);
 }
 
@@ -215,10 +220,45 @@ void audio_dsp_mail(CPUState* cpu, u32 mail) {
         return;
 
     g_waiting_for_command_list = false;
+    {
+        // ED_AX_DUMP=N: dump command list N (and its first PB) once, to
+        // compare this game's AX layout with the one ax_host expects.
+        static int dump_at = -2;
+        static int seen;
+        if (dump_at == -2)
+            dump_at = getenv("ED_AX_DUMP") ? atoi(getenv("ED_AX_DUMP")) : -1;
+        // N=999999 dumps the first list that names a PB (command 2).
+        bool has_pb = false;
+        for (u32 i = 0; i < 40u && !has_pb; i++)
+            has_pb = mem_read16(cpu, mail + i * 2u) == 2u;
+        if (dump_at == 999999 && has_pb) {
+            dump_at = seen;
+        }
+        if (dump_at >= 0 && seen++ == dump_at) {
+            fprintf(stderr, "[ax] command list 0x%08X:", mail);
+            for (u32 i = 0; i < 48u; i++)
+                fprintf(stderr, " %04X", mem_read16(cpu, mail + i * 2u));
+            fputc('\n', stderr);
+            for (u32 i = 0; i < 40u; i += 1u) {
+                if (mem_read16(cpu, mail + i * 2u) == 2u) {
+                    const u32 pb = (mem_read16(cpu, mail + i * 2u + 2u) << 16) |
+                                   mem_read16(cpu, mail + i * 2u + 4u);
+                    fprintf(stderr, "[ax] first PB 0x%08X:", pb);
+                    for (u32 j = 0; j < 0xC0u; j++)
+                        fprintf(stderr, "%s%04X", (j % 16u) ? " " : "\n  ",
+                                mem_read16(cpu, pb + j * 2u));
+                    fputc('\n', stderr);
+                    break;
+                }
+            }
+        }
+    }
     dol_ax_host_process_command_list(&g_ax_host, cpu, mail);
     mem_write32(cpu, MUSYX_DSP_DONE, 1);
 }
 
 void audio_skip_dsp_init(CPUState* cpu) {
+    // What dspInitCallback would set once the DSP task booted.
     mem_write32(cpu, MUSYX_DSP_DONE, 1);
+    mem_write32(cpu, ED_MUSYX_DSP_INIT_DONE, 1);
 }

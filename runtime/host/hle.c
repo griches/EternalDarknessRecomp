@@ -171,6 +171,38 @@ static void parse_input_script(const char* text) {
             g_input_script_count, skipped_events);
 }
 
+// ED_SKIP_INTRO=1 (testing): tap A every 16 frames to skip the intro movies
+// and accept the language and memory-card prompts, until the title screen
+// loads, then leave the pad alone. The title loads /UBookInv.tpl after the
+// opening movie (fmv0001) and the save prompts; boot opens it too, so only an
+// open after fmv0001 counts. Needs a memory card that already holds the save
+// (a fresh card loops on "create game file").
+static bool g_skip_intro;
+static bool g_skip_intro_done;
+static const char* g_skip_intro_until = "/UBookInv.tpl";
+static bool g_skip_intro_armed;
+
+static void skip_intro_note_open(const char* path) {
+    if (strstr(path, "/fmv/fmv0001.avi"))
+        g_skip_intro_armed = true;
+    if (g_skip_intro && !g_skip_intro_done && g_skip_intro_armed &&
+        strstr(path, g_skip_intro_until)) {
+        g_skip_intro_done = true;
+        fprintf(stderr, "[input] title screen reached (%s); skip-intro off\n", path);
+    }
+}
+
+static bool skip_intro_apply(CPUState* cpu, u16* buttons, u8* analog_a) {
+    if (!g_skip_intro || g_skip_intro_done)
+        return false;
+    const u64 frame = cpu->timebase / 675000ull;
+    if (frame < 30u || (frame % 16u) >= 6u)
+        return false;
+    *buttons |= 0x0100u;
+    *analog_a = 0xFFu;
+    return true;
+}
+
 static bool input_script_apply(CPUState* cpu,
                                u16* buttons,
                                s8* stick_x,
@@ -808,6 +840,7 @@ static void hle_DVDOpen(CPUState* cpu) {
     }
     if (g_dvd_log)
         fprintf(stderr, "[dvd] open '%s'\n", path);
+    skip_intro_note_open(path);
     hle_DVDFastOpen(cpu);
 }
 
@@ -3268,6 +3301,8 @@ static void hle_PADRead(CPUState* cpu) {
     if (input_script_apply(cpu, &state[0].button, &state[0].stick_x,
                            &state[0].stick_y, &state[0].analog_a))
         state[0].error = 0;
+    if (skip_intro_apply(cpu, &state[0].button, &state[0].analog_a))
+        state[0].error = 0;
     mash_to_gameplay_apply(cpu, &state[0].button, &state[0].stick_x,
                            &state[0].analog_a);
     if (g_mash_to_gameplay)
@@ -3330,6 +3365,7 @@ static bool headless_scripted_pad(CPUState* cpu,
         }
     }
     (void)input_script_apply(cpu, buttons, stick_x, stick_y, analog_a);
+    (void)skip_intro_apply(cpu, buttons, analog_a);
     mash_to_gameplay_apply(cpu, buttons, stick_x, analog_a);
     return connected;
 }
@@ -4257,6 +4293,11 @@ void hle_card_close(void) {
 void hle_install(CPUState* cpu) {
     g_hle_log = getenv("ED_HLE_LOG") != NULL;
     g_dvd_log = g_hle_log || getenv("ED_DVD_LOG") != NULL;
+    g_skip_intro = getenv("ED_SKIP_INTRO") != NULL;
+    g_skip_intro_done = false;
+    g_skip_intro_armed = false;
+    if (getenv("ED_SKIP_INTRO_UNTIL") != NULL)
+        g_skip_intro_until = getenv("ED_SKIP_INTRO_UNTIL");
     g_trace_fn_count = 0;
     if (getenv("ED_TRACE_FN") != NULL) {
         char names[512];

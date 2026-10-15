@@ -51,6 +51,9 @@ static u32 g_trace_fn_count;
 // ED_CALL_PROFILE=name: count calls of one function by caller (lr) and print
 // the counts once per VIFlush, so per-frame differences show without the
 // slowdown of logging every call.
+#ifdef ED_AURORA
+void VISetWindowTitle(const char* title);  // Aurora (dolphin/vi.h)
+#endif
 static u32 g_call_prof_fn;
 static u32 g_call_prof_vi;
 static struct { u32 lr, n; } g_call_prof[64];
@@ -4394,6 +4397,37 @@ static bool hle_dispatch(CPUState* cpu, u32 address) {
                     head[0], head[1], head[2], head[3], head[4], head[5], head[6], head[7]);
         }
     }
+#ifdef ED_AURORA
+    // Game frames per second (VIFlush calls) in the window title, refreshed
+    // each second. ED_NO_FPS=1 leaves the title alone.
+    if (address == g_call_prof_vi && g_call_prof_vi != 0u) {
+        static int fps_on = -1;
+        static unsigned frames;
+        static struct timespec mark;
+        if (fps_on < 0)
+            fps_on = getenv("ED_NO_FPS") == NULL;
+        if (fps_on) {
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            frames++;
+            if (mark.tv_sec == 0) {
+                mark = now;
+                frames = 0;
+            } else {
+                const double dt = (double)(now.tv_sec - mark.tv_sec) +
+                                  (double)(now.tv_nsec - mark.tv_nsec) * 1e-9;
+                if (dt >= 1.0) {
+                    char title[64];
+                    snprintf(title, sizeof title, "Eternal Darkness \u2014 %.0f fps",
+                             (double)frames / dt);
+                    VISetWindowTitle(title);
+                    mark = now;
+                    frames = 0;
+                }
+            }
+        }
+    }
+#endif
     if (g_call_prof_fn != 0u) {
         if (address == g_call_prof_fn) {
             for (u32 i = 0; i < 64u; i++)

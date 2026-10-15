@@ -733,7 +733,13 @@ static void efb_frame_fill_cb(const uint8_t* rgba, uint32_t width,
         dump_dir = getenv("ED_EFB_DUMP");
         dump_checked = 1;
     }
-    if (dump_dir != NULL && (++frame % (getenv("ED_EFB_DUMP_EVERY") ? (unsigned)atoi(getenv("ED_EFB_DUMP_EVERY")) : 30u)) == 0u) {
+    // ED_EFB_DUMP_FROM=N: start at frame N; ED_EFB_DUMP_COUNT=M: stop after M.
+    static unsigned dumped;
+    const unsigned from = getenv("ED_EFB_DUMP_FROM") ? (unsigned)atoi(getenv("ED_EFB_DUMP_FROM")) : 0u;
+    const unsigned count = getenv("ED_EFB_DUMP_COUNT") ? (unsigned)atoi(getenv("ED_EFB_DUMP_COUNT")) : ~0u;
+    if (dump_dir != NULL && ++frame >= from && dumped < count &&
+        (frame % (getenv("ED_EFB_DUMP_EVERY") ? (unsigned)atoi(getenv("ED_EFB_DUMP_EVERY")) : 30u)) == 0u) {
+        dumped++;
         char path[512];
         snprintf(path, sizeof path, "%s/efb_%05u.ppm", dump_dir, frame);
         FILE* f = fopen(path, "wb");

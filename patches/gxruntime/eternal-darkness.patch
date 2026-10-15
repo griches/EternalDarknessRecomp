@@ -252,7 +252,7 @@ index d94f811..db80a17 100644
  
  namespace {
 diff --git a/graphics/aurora/lib/aurora.cpp b/graphics/aurora/lib/aurora.cpp
-index b09ef4d..9a5e545 100644
+index b09ef4d..efb1a26 100644
 --- a/graphics/aurora/lib/aurora.cpp
 +++ b/graphics/aurora/lib/aurora.cpp
 @@ -1,3 +1,5 @@
@@ -261,7 +261,7 @@ index b09ef4d..9a5e545 100644
  #include <aurora/aurora.h>
  
  #ifdef AURORA_ENABLE_GX
-@@ -258,9 +260,26 @@ void end_frame() noexcept {
+@@ -258,9 +260,31 @@ void end_frame() noexcept {
    // E7 present-from-XFB: VI current → GPU Virtual-XFB, else YUYV-from-RAM
    // decode, else EFB-direct (Strikers when no RAM XFB / match fails).
    const std::uint32_t xfbAddr = vi::xfb_black() ? 0u : vi::current_xfb();
@@ -269,10 +269,15 @@ index b09ef4d..9a5e545 100644
 +  // display copies comes out empty, so the window presents the EFB directly.
 +  // ED_PRESENT_XFB=1 restores the XFB route for investigating that.
 +  static const bool present_xfb = std::getenv("ED_PRESENT_XFB") != nullptr;
++  // EFB-direct presents the EFB as it was at the latest display copy (what
++  // the VI would scan out), not the live EFB: in frames with texture copies
++  // and further passes the live EFB at present time did not match the frame.
++  static const bool present_live_efb = std::getenv("ED_PRESENT_LIVE_EFB") != nullptr;
    const gfx::TextureHandle* xfbTex =
 -      xfbAddr != 0u ? gfx::gxcore::lookup_xfb_texture(xfbAddr) : nullptr;
 +      xfbAddr != 0u && present_xfb ? gfx::gxcore::lookup_xfb_texture(xfbAddr)
-+                                   : nullptr;
++      : (!present_live_efb && !vi::xfb_black()) ? gfx::gxcore::last_display_copy()
++                                               : nullptr;
    const auto& efbSource = webgpu::present_source();
 +  static const bool present_log = std::getenv("ED_PRESENT_LOG") != nullptr;
 +  if (present_log) {
@@ -289,6 +294,109 @@ index b09ef4d..9a5e545 100644
    const uint32_t contentW =
        xfbTex && *xfbTex ? (*xfbTex)->size.width : efbSource.size.width;
    const uint32_t contentH =
+diff --git a/graphics/aurora/lib/gfx/gxcore_draw.cpp b/graphics/aurora/lib/gfx/gxcore_draw.cpp
+index 71136b9..e7490a2 100644
+--- a/graphics/aurora/lib/gfx/gxcore_draw.cpp
++++ b/graphics/aurora/lib/gfx/gxcore_draw.cpp
+@@ -242,6 +242,13 @@ TextureCacheStats g_textureCacheStats;
+ // (a re-copy to the same address updates in place, matching the live path).
+ // E7: format-0xF display copies also land here (Virtual XFB GPU texture).
+ absl::flat_hash_map<uint32_t, TextureHandle> g_efbCopyTextures;
++// Display copies (Virtual XFB) live apart from texture copies: a game may copy
++// the EFB as a texture into its XFB memory and then display-copy to the same
++// address (Eternal Darkness's sepia memory scenes do both every frame). Sharing
++// one map let the display copy evict the texture the next draws sample, so
++// alternate frames showed only the clear colour.
++absl::flat_hash_map<uint32_t, TextureHandle> g_xfbCopyTextures;
++TextureHandle g_lastDisplayCopy;  // see last_display_copy()
+ 
+ // E7 present-from-RAM: YUYV decoded from guest MEM1 when no GPU copy exists
+ // (software/external XFB writers). Keyed by physical address; re-upload when
+@@ -281,13 +288,17 @@ unsigned long long xfb_ram_present_count() noexcept {
+   return g_xfb_ram_present_count;
+ }
+ 
++const TextureHandle* last_display_copy() noexcept {
++  return g_lastDisplayCopy ? &g_lastDisplayCopy : nullptr;
++}
++
+ const TextureHandle* lookup_xfb_texture(std::uint32_t physical_address) noexcept {
+   if (physical_address == 0u)
+     return nullptr;
+   // Prefer GPU Virtual-XFB from display-copy (Strikers / EFB-direct path stays
+   // on this hit; RAM decode only when no copy texture exists).
+-  auto it = g_efbCopyTextures.find(physical_address);
+-  if (it != g_efbCopyTextures.end() && it->second)
++  auto it = g_xfbCopyTextures.find(physical_address);
++  if (it != g_xfbCopyTextures.end() && it->second)
+     return &it->second;
+ 
+   const auto dims = aurora::vi::configured_xfb_size();
+@@ -593,6 +604,8 @@ void reset_texture_cache() {
+   g_textureCache.clear();
+   g_textureAddrKey.clear();
+   g_efbCopyTextures.clear();
++  g_xfbCopyTextures.clear();
++  g_lastDisplayCopy.reset();
+   g_ramXfbTextures.clear();
+   g_last_xfb_dest_stride = 0;
+   g_last_xfb_height = 0;
+@@ -660,8 +673,9 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+       dstHeight = xfb_h;
+   }
+ 
+-  auto it = g_efbCopyTextures.find(cmd.dest_address);
+-  if (it == g_efbCopyTextures.end() || !it->second ||
++  auto& copies = is_xfb ? g_xfbCopyTextures : g_efbCopyTextures;
++  auto it = copies.find(cmd.dest_address);
++  if (it == copies.end() || !it->second ||
+       it->second->size.width != dstWidth || it->second->size.height != dstHeight) {
+     TextureHandle handle;
+     if (!is_xfb && gfx::tex_copy_conv::needs_conversion(fmt)) {
+@@ -670,7 +684,7 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+       handle = gfx::new_render_texture(dstWidth, dstHeight, GX_TF_RGBA8,
+                                        is_xfb ? "GXCore XFB" : "GXCore Copy");
+     }
+-    it = g_efbCopyTextures.insert_or_assign(cmd.dest_address, handle).first;
++    it = copies.insert_or_assign(cmd.dest_address, handle).first;
+   }
+   if (!it->second) {
+     return;
+@@ -714,6 +728,20 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+       efb_readback::set_continuous(true);
+     efb_readback::request();
+   }
++  if (is_xfb) {
++    // Snapshot the EFB at render resolution for the EFB-direct present.
++    const auto& efb = webgpu::present_source();
++    if (!g_lastDisplayCopy || g_lastDisplayCopy->size.width != efb.size.width ||
++        g_lastDisplayCopy->size.height != efb.size.height)
++      g_lastDisplayCopy = gfx::new_render_texture(efb.size.width, efb.size.height,
++                                                  GX_TF_RGBA8, "GXCore Display Copy");
++    if (g_lastDisplayCopy)
++      gfx::resolve_pass(g_lastDisplayCopy,
++                        gfx::ClipRect{0, 0, static_cast<int32_t>(efb.size.width),
++                                      static_cast<int32_t>(efb.size.height)},
++                        false, false, false, Vec4<float>{0.f, 0.f, 0.f, 0.f},
++                        clearDepthValue, GX_TF_RGBA8, nullptr);
++  }
+   gfx::resolve_pass(it->second, srcRect, do_clear && cmd.color_update,
+                     do_clear && cmd.alpha_update,
+                     do_clear && cmd.depth_update,
+diff --git a/graphics/aurora/lib/gfx/xfb_present.hpp b/graphics/aurora/lib/gfx/xfb_present.hpp
+index b205cfa..ee13954 100644
+--- a/graphics/aurora/lib/gfx/xfb_present.hpp
++++ b/graphics/aurora/lib/gfx/xfb_present.hpp
+@@ -16,5 +16,9 @@ const TextureHandle* lookup_xfb_texture(std::uint32_t physical_address) noexcept
+ unsigned long long xfb_display_copy_count() noexcept;
+ // Times present fell through to YUYV→RGBA RAM decode (no GPU copy hit).
+ unsigned long long xfb_ram_present_count() noexcept;
++// The EFB as it was at the latest display copy, at render resolution. Null
++// before the first display copy. The EFB-direct present shows this, not the
++// live EFB, so passes after the copy cannot change what reaches the screen.
++const TextureHandle* last_display_copy() noexcept;
+ 
+ } // namespace aurora::gfx::gxcore
 diff --git a/graphics/frontend/include/gxruntime/aurora_recomp/retail_gx_frontend.hpp b/graphics/frontend/include/gxruntime/aurora_recomp/retail_gx_frontend.hpp
 index 1ef8382..85c5668 100644
 --- a/graphics/frontend/include/gxruntime/aurora_recomp/retail_gx_frontend.hpp

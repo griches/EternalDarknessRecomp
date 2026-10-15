@@ -187,7 +187,12 @@ static int g_fifo_dump_state;
 static u64 g_fifo_dump_total;
 static u64 g_fifo_dump_frame_offset;
 
+static unsigned long long g_fifo_dump_from;  // ED_FIFO_DUMP_FROM=frame
+static unsigned long long g_fifo_dump_present;
+
 static bool fifo_dump_open(void) {
+    if (g_fifo_dump_present < g_fifo_dump_from)
+        return false;
     if (g_fifo_dump_state == 0) {
         const char* path = getenv("ED_FIFO_DUMP");
         g_fifo_dump = path ? fopen(path, "w") : NULL;
@@ -213,6 +218,10 @@ void mmio_fifo_dump_write(const CPUState* cpu, u8 size, u64 value) {
 }
 
 void mmio_fifo_dump_note(const char* what, u32 a, u32 b) {
+    if (g_fifo_dump_present == 0 && getenv("ED_FIFO_DUMP_FROM") != NULL)
+        g_fifo_dump_from = strtoull(getenv("ED_FIFO_DUMP_FROM"), NULL, 0);
+    if (strcmp(what, "present") == 0)
+        g_fifo_dump_present++;
     if (!fifo_dump_open())
         return;
     fprintf(g_fifo_dump, "---- %s 0x%08X %u\n", what, a, b);

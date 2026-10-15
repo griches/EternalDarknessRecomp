@@ -114,3 +114,117 @@ index bbefbee..8297108 100644
    emit(out, "    o.pos = clip;\n");
    // Vertex colors (Dolphin VertexShaderGen WriteVertexBody). First select each
    // channel's vertex color with the GX presence rules: channel 0 prefers
+diff --git a/include/gxruntime/ax_host.h b/include/gxruntime/ax_host.h
+index 3731914..694a939 100644
+--- a/include/gxruntime/ax_host.h
++++ b/include/gxruntime/ax_host.h
+@@ -59,6 +59,10 @@ typedef struct DolAxHost {
+ 
+ void dol_ax_host_init(DolAxHost* ax);
+ void dol_ax_host_set_log(DolAxHost* ax, bool enabled);
++// The launch-era AX ucode (Dolphin crc 0x4e8a8b21; used by 2001-2002 titles
++// such as Eternal Darkness) encodes mixer_control differently (main L/R always
++// mix) and its PB has no low-pass filter, so loop_counter sits at 0xBA.
++void dol_ax_host_set_old_ucode(DolAxHost* ax, bool enabled);
+ void dol_ax_host_reset_stats(DolAxHost* ax);
+ const DolAxHostStats* dol_ax_host_stats(const DolAxHost* ax);
+ 
+diff --git a/src/ax_host.c b/src/ax_host.c
+index 2c0e5ff..424acdb 100644
+--- a/src/ax_host.c
++++ b/src/ax_host.c
+@@ -48,6 +48,9 @@ typedef struct {
+     u16 loop_counter;
+ } SampleReader;
+ 
++static bool g_old_ucode;  // see dol_ax_host_set_old_ucode
++#define PB_LOOP_COUNTER (g_old_ucode ? 0xBAu : 0xC2u)
++
+ static void sample_reader_load(SampleReader* reader, CPUState* cpu, u32 pb) {
+     memset(reader, 0, sizeof *reader);
+     reader->cpu = cpu;
+@@ -67,7 +70,7 @@ static void sample_reader_load(SampleReader* reader, CPUState* cpu, u32 pb) {
+     reader->loop_pred_scale = mem_read16(cpu, pb + 0xB4u);
+     reader->loop_yn1 = (s16)mem_read16(cpu, pb + 0xB6u);
+     reader->loop_yn2 = (s16)mem_read16(cpu, pb + 0xB8u);
+-    reader->loop_counter = mem_read16(cpu, pb + 0xC2u);
++    reader->loop_counter = mem_read16(cpu, pb + PB_LOOP_COUNTER);
+ }
+ 
+ static void sample_reader_store(const SampleReader* reader) {
+@@ -79,7 +82,7 @@ static void sample_reader_store(const SampleReader* reader) {
+     mem_write16(cpu, pb + 0xA0u, reader->pred_scale);
+     mem_write16(cpu, pb + 0xA2u, (u16)reader->yn1);
+     mem_write16(cpu, pb + 0xA4u, (u16)reader->yn2);
+-    mem_write16(cpu, pb + 0xC2u, reader->loop_counter);
++    mem_write16(cpu, pb + PB_LOOP_COUNTER, reader->loop_counter);
+ }
+ 
+ static void sample_reader_finish_or_loop(SampleReader* reader) {
+@@ -235,6 +238,36 @@ static void mix_channel(DolAxHost* ax, CPUState* cpu, u32 pb, const s16* input,
+     mem_write16(cpu, pb + dpop_offset, (u16)last);
+ }
+ 
++// Old-ucode mixer_control to the newer bit layout used below (Dolphin
++// AXUCode::ConvertMixerControl): main L/R always mix; bit 4 selects DPL2.
++// New layout: 0x1/0x2/0x4 main L/R/S, 0x8 main ramp, 0x10/0x20/0x80 auxA
++// L/R/S, 0x40 auxA ramp, 0x100 auxA-S ramp, 0x200/0x400/0x1000 auxB L/R/S,
++// 0x800 auxB ramp, 0x2000 auxB-S ramp.
++static u16 convert_old_mixer_control(u16 mc) {
++    u16 ret = 0x0001u | 0x0002u;
++    if (mc & 0x0010u) {
++        if ((mc & 0x0006u) == 0)
++            ret |= 0x0200u | 0x0400u;
++        if ((mc & 0x0007u) == 1)
++            ret |= 0x0010u | 0x0020u | 0x0080u;
++    } else {
++        if (mc & 0x0001u)
++            ret |= 0x0010u | 0x0020u;
++        if (mc & 0x0002u)
++            ret |= 0x0200u | 0x0400u;
++        if (mc & 0x0004u) {
++            ret |= 0x0004u;
++            if (ret & 0x0010u)
++                ret |= 0x0080u;
++            if (ret & 0x0200u)
++                ret |= 0x1000u;
++        }
++    }
++    if (mc & 0x0008u)
++        ret |= 0x0008u | 0x0040u | 0x0100u | 0x0800u | 0x2000u;
++    return ret;
++}
++
+ static void process_voice_ms(DolAxHost* ax, CPUState* cpu, u32 pb,
+                              u32 frame_offset) {
+     if (mem_read16(cpu, pb + 0x0Eu) != 1)
+@@ -251,7 +284,7 @@ static void process_voice_ms(DolAxHost* ax, CPUState* cpu, u32 pb,
+     }
+     mem_write16(cpu, pb + 0x64u, (u16)envelope);
+ 
+-    if (mem_read16(cpu, pb + 0xBAu)) {
++    if (!g_old_ucode && mem_read16(cpu, pb + 0xBAu)) {
+         s16 history = (s16)mem_read16(cpu, pb + 0xBCu);
+         u16 a0 = mem_read16(cpu, pb + 0xBEu);
+         s16 b0 = (s16)mem_read16(cpu, pb + 0xC0u);
+@@ -263,6 +296,8 @@ static void process_voice_ms(DolAxHost* ax, CPUState* cpu, u32 pb,
+     }
+ 
+     u16 control = mem_read16(cpu, pb + 0x0Cu);
++    if (g_old_ucode)
++        control = convert_old_mixer_control(control);
+     mix_channel(ax, cpu, pb, samples, DOL_AX_MAIN_L, 0x12u, 0x52u,
+                 (control & 0x0001u) != 0, (control & 0x0008u) != 0, frame_offset);
+     mix_channel(ax, cpu, pb, samples, DOL_AX_MAIN_R, 0x16u, 0x58u,
+@@ -435,6 +470,11 @@ void dol_ax_host_init(DolAxHost* ax) {
+     memset(ax, 0, sizeof *ax);
+ }
+ 
++void dol_ax_host_set_old_ucode(DolAxHost* ax, bool enabled) {
++    (void)ax;
++    g_old_ucode = enabled;
++}
++
+ void dol_ax_host_set_log(DolAxHost* ax, bool enabled) {
+     if (ax != NULL)
+         ax->log = enabled;

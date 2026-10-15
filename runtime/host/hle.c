@@ -4168,9 +4168,11 @@ static bool hle_dispatch(CPUState* cpu, u32 address) {
     if (g_trace_fn_count != 0u) {
         for (u32 i = 0; i < g_trace_fn_count; i++)
             if (g_trace_fn[i] == address)
-                fprintf(stderr, "[fn] %s lr=0x%08X r3=0x%08X r4=0x%08X r5=0x%08X r6=0x%08X\n",
+                fprintf(stderr, "[fn] %s lr=0x%08X r3=0x%08X r4=0x%08X r5=0x%08X r6=0x%08X "
+                        "f1=%g f2=%g f3=%g msr.fp=%u\n",
                         sdk_symbol_name(address), cpu->lr, cpu->gpr[3],
-                        cpu->gpr[4], cpu->gpr[5], cpu->gpr[6]);
+                        cpu->gpr[4], cpu->gpr[5], cpu->gpr[6], cpu->fpr[1],
+                        cpu->fpr[2], cpu->fpr[3], (cpu->msr >> 13) & 1u);
     }
     HleDispatchEntry* entry = hle_dispatch_entry(address);
     if (entry == NULL)

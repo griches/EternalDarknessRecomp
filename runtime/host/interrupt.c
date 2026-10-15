@@ -39,7 +39,10 @@
 // vsynced, so this cadence only needs to be large enough that normal frame work
 // reaches GXCopyDisp before the next VI tick. The old 2,000,000-block cadence
 // made the front end present at roughly 11 FPS on macOS.
-#define DEFAULT_FRAME_BLOCKS 350000ull
+// Eternal Darkness's HVQ movie decoder runs several times that much code per
+// frame; at 350,000 the guest clock raced ahead of the audio it produced and the
+// movies crawled at a few frames per second. ED_FRAME_BLOCKS overrides.
+#define DEFAULT_FRAME_BLOCKS 2000000ull
 
 // The Broadway/Gekko time base runs at one quarter of the 162 MHz bus clock.
 // DolViClock advances it in lockstep with the simulated 60 Hz VI cadence so

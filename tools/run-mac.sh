@@ -1,10 +1,10 @@
 #!/bin/sh
 # run-mac.sh SECONDS SHOTS_PREFIX [env...]: run the windowed build, screenshot the
 # window every SHOT_EVERY (default 8) s, then force-quit it (it ignores SIGTERM).
-# Runs are muted (ED_MUTE=1).
+# Pass ED_MUTE=1 to silence a run.
 cd "$(dirname "$0")/.."
 secs=$1; prefix=$2; shift 2
-env ED_MUTE=1 "$@" ./build-mac/EternalDarkness generated/main.dol --iso dump/GEDP01.iso \
+env "$@" ./build-mac/EternalDarkness generated/main.dol --iso dump/GEDP01.iso \
     --max-blocks 100000000000 > "build/runs/$prefix.log" 2>&1 &
 pid=$!
 n=0; t=0

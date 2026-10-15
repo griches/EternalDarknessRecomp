@@ -54,6 +54,8 @@ void audio_init(void) {
     g_aid_chunks = 0;
     g_log = getenv("ED_AUDIO_LOG") != NULL;
     dol_ax_host_set_log(&g_ax_host, g_log);
+    // Eternal Darkness runs the launch-era AX ucode (see ax_host.h).
+    dol_ax_host_set_old_ucode(&g_ax_host, true);
 }
 
 void audio_shutdown(void) {
@@ -231,6 +233,12 @@ void audio_dsp_mail(CPUState* cpu, u32 mail) {
         bool has_pb = false;
         for (u32 i = 0; i < 40u && !has_pb; i++)
             has_pb = mem_read16(cpu, mail + i * 2u) == 2u;
+        static int pb_lists;
+        static int dump_after = -2;
+        if (dump_after == -2)
+            dump_after = getenv("ED_AX_DUMP_AFTER") ? atoi(getenv("ED_AX_DUMP_AFTER")) : -1;
+        if (has_pb && dump_after >= 0 && pb_lists++ == dump_after)
+            dump_at = seen;
         if (dump_at == 999999 && has_pb) {
             dump_at = seen;
         }

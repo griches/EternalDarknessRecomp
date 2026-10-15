@@ -10,8 +10,37 @@ index 5279cdb..26adfdb 100644
      fprintf(chunk, "#include \"../%s\"\n\n", job->include_name);
      emit_function(chunk, job->insts, job->count, job->func_addr);
  
+diff --git a/src/backend/dispatch.c b/src/backend/dispatch.c
+index 83314bb..0eac038 100644
+--- a/src/backend/dispatch.c
++++ b/src/backend/dispatch.c
+@@ -117,6 +117,24 @@ void emit_dispatch_helpers(FILE* out, const FunctionList* funcs, u32 entry_point
+     }
+     fprintf(out, "    return NULL;\n");
+     fprintf(out, "}\n");
++    fprintf(out,
++        "\n/* Run the chunk holding target (outside the calling chunk) as a nested\n"
++        " * call. Returns 1 when it comes back to [start, start + size) with budget\n"
++        " * left, so the caller re-enters its own switch; 0 sends the caller back to\n"
++        " * the dispatch loop (or up to the chunk that called it). */\n"
++        "static inline int dolrecomp_call_chunk(CPUState* ctx, u32 target, u32 start,\n"
++        "                                       u32 size) {\n"
++        "    if (dolrecomp_call_depth >= DOLRECOMP_MAX_CALL_DEPTH || !DOLRECOMP_CHAIN(target))\n"
++        "        return 0;\n"
++        "    DolRecompFunction fn = dolrecomp_find_original(target);\n"
++        "    if (fn == NULL)\n"
++        "        return 0;\n"
++        "    dolrecomp_call_depth++;\n"
++        "    fn(ctx);\n"
++        "    dolrecomp_call_depth--;\n"
++        "    return ctx->exception == 0u && ctx->pc - start < size &&\n"
++        "           DOLRECOMP_CHAIN(ctx->pc);\n"
++        "}\n");
+     fprintf(out, "\nstatic inline int dolrecomp_call_original(CPUState* ctx, u32 address) {\n");
+     fprintf(out, "    DolRecompFunction fn = dolrecomp_find_original(address);\n");
+     fprintf(out, "    if (!fn) return 0;\n");
 diff --git a/src/backend/emitter.c b/src/backend/emitter.c
-index 4868b4c..6ed8386 100644
+index 4868b4c..0388cb7 100644
 --- a/src/backend/emitter.c
 +++ b/src/backend/emitter.c
 @@ -37,6 +37,19 @@ static void emit_set_cr1_from_fpscr(FILE* out) {
@@ -34,13 +63,33 @@ index 4868b4c..6ed8386 100644
  static void emit_compare_s32(FILE* out, u8 crf, const char* lhs, const char* rhs) {
      u32 shift = cr_field_shift(crf);
  
-@@ -314,11 +327,18 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst, bool local_target
+@@ -308,28 +321,50 @@ static bool branch_target_is_local(u32 func_start, u32 func_end, u32 target) {
+     return target >= func_start && target < func_end && ((target - func_start) & 3u) == 0;
+ }
+ 
+-static void emit_direct_branch(FILE* out, const PPCInst* inst, bool local_target) {
++/* A branch out of this chunk: run the target's chunk as a nested call, and
++ * carry on here if it comes back to this chunk (dolrecomp_call_chunk). */
++static void emit_call_chunk(FILE* out, const char* target, u32 func_start,
++                            u32 func_end) {
++    fprintf(out, "            if (dolrecomp_call_chunk(ctx, %s, 0x%08Xu, 0x%08Xu)) goto dolrecomp_dispatch;\n",
++            target, func_start, func_end - func_start);
++}
++
++static void emit_direct_branch(FILE* out, const PPCInst* inst, bool local_target,
++                               u32 func_start, u32 func_end) {
+     bool local_backward = local_target && inst->branch_target <= inst->address;
++    char target[16];
++    snprintf(target, sizeof target, "0x%08Xu", inst->branch_target);
+ 
      if (inst->lk) {
          fprintf(out, "            ctx->lr = 0x%08Xu;\n", inst->address + 4);
          fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
 +        if (local_target)
 +            fprintf(out, "            if (DOLRECOMP_CHAIN(0x%08Xu)) goto label_%08X;\n",
 +                    inst->branch_target, inst->branch_target);
++        else
++            emit_call_chunk(out, target, func_start, func_end);
          fprintf(out, "            return;\n");
          return;
      }
@@ -53,7 +102,11 @@ index 4868b4c..6ed8386 100644
          fprintf(out, "            return;\n");
      } else if (local_target) {
          fprintf(out, "            goto label_%08X;\n", inst->branch_target);
-@@ -329,7 +349,8 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst, bool local_target
+     } else {
+         fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
++        emit_call_chunk(out, target, func_start, func_end);
+         fprintf(out, "            return;\n");
+     }
  }
  
  static void emit_dynamic_branch(FILE* out, const PPCInst* inst,
@@ -63,17 +116,21 @@ index 4868b4c..6ed8386 100644
      fprintf(out, "    {\n");
      fprintf(out, "        u32 target = %s;\n", target_expr);
      emit_branch_condition(out, inst->bo, inst->bi);
-@@ -338,6 +359,9 @@ static void emit_dynamic_branch(FILE* out, const PPCInst* inst,
+@@ -338,6 +373,13 @@ static void emit_dynamic_branch(FILE* out, const PPCInst* inst,
          fprintf(out, "            ctx->lr = 0x%08Xu;\n", inst->address + 4);
      }
      fprintf(out, "            ctx->pc = target;\n");
 +    /* A return or computed call that lands in this chunk re-enters its switch. */
 +    fprintf(out, "            if (target - 0x%08Xu < 0x%08Xu && DOLRECOMP_CHAIN(target)) goto dolrecomp_dispatch;\n",
 +            func_start, func_end - func_start);
++    /* A computed call (bctrl/blrl) into another chunk nests like a bl; a return
++     * (blr) out of the chunk unwinds to whoever called this chunk. */
++    if (inst->lk && func_end > func_start)
++        emit_call_chunk(out, "target", func_start, func_end);
      fprintf(out, "            return;\n");
      fprintf(out, "        }\n");
      fprintf(out, "    }\n");
-@@ -383,6 +407,8 @@ static const char* emit_cpu_label(DolRecompCPU cpu) {
+@@ -383,6 +425,8 @@ static const char* emit_cpu_label(DolRecompCPU cpu) {
      }
  }
  
@@ -82,7 +139,7 @@ index 4868b4c..6ed8386 100644
  void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
      fprintf(out,
          "// DolRecomp output\n"
-@@ -439,10 +465,79 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
+@@ -439,10 +483,88 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
          "    return dolrecomp_f32_to_bits((f32)value);\n"
          "}\n"
          "\n"
@@ -91,9 +148,17 @@ index 4868b4c..6ed8386 100644
 +        "extern const u8* dolrecomp_chain_stop;\n"
 +        "extern u32 dolrecomp_chain_stop_base;\n"
 +        "extern u32 dolrecomp_chain_stop_count;\n"
++        "/* The branch budget is shared by the chunks one dispatch-loop visit runs\n"
++        " * (a chunk entered at depth 0 refills it), and calls into another chunk nest\n"
++        " * as C calls up to DOLRECOMP_MAX_CALL_DEPTH. */\n"
++        "extern u32 dolrecomp_chain_budget;\n"
++        "extern u32 dolrecomp_call_depth;\n"
 +        "\n"
 +        "#ifndef DOLRECOMP_CHAIN_BUDGET\n"
-+        "#define DOLRECOMP_CHAIN_BUDGET 256u\n"
++        "#define DOLRECOMP_CHAIN_BUDGET 1024u\n"
++        "#endif\n"
++        "#ifndef DOLRECOMP_MAX_CALL_DEPTH\n"
++        "#define DOLRECOMP_MAX_CALL_DEPTH 16u\n"
 +        "#endif\n"
 +        "\n"
 +        "static inline int dolrecomp_can_chain(u32 target) {\n"
@@ -103,7 +168,8 @@ index 4868b4c..6ed8386 100644
 +        "}\n"
 +        "\n"
 +        "#define DOLRECOMP_CHAIN(target) \\\n"
-+        "    (dolrecomp_chain != 0u && (--dolrecomp_chain, dolrecomp_can_chain(target)))\n"
++        "    (dolrecomp_chain_budget != 0u && \\\n"
++        "     (--dolrecomp_chain_budget, dolrecomp_can_chain(target)))\n"
 +        "\n"
          ,
          emit_cpu_label(cpu),
@@ -162,7 +228,7 @@ index 4868b4c..6ed8386 100644
  }
  
  void emit_header(FILE* out) {
-@@ -456,6 +551,7 @@ void emit_footer(FILE* out) {
+@@ -456,6 +578,7 @@ void emit_footer(FILE* out) {
  static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
                                          u32 func_start, u32 func_end) {
      char disasm[64];
@@ -170,7 +236,17 @@ index 4868b4c..6ed8386 100644
      ppc_disasm(disasm, sizeof(disasm), inst);
      fprintf(out, "    // %08X: %s\n", inst->address, disasm);
  
-@@ -937,23 +1033,27 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+@@ -465,7 +588,8 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+     }
+ 
+     if (ppc_op_uses_fpu(inst->op))
+-        fprintf(out, "    if (!ppc_fp_available(ctx, 0x%08Xu)) return;\n", inst->address);
++        fprintf(out, "    if (!(ctx->msr & 0x2000u) && !ppc_fp_available(ctx, 0x%08Xu)) return;\n",
++                inst->address);
+ 
+     switch (inst->op) {
+     case PPC_OP_MULLI:
+@@ -937,23 +1061,27 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
          break;
  
      case PPC_OP_FADDS:
@@ -206,7 +282,7 @@ index 4868b4c..6ed8386 100644
          break;
  
      case PPC_OP_FRES:
-@@ -1047,7 +1147,8 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+@@ -1047,7 +1175,8 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
          break;
  
      case PPC_OP_FRSP:
@@ -216,7 +292,7 @@ index 4868b4c..6ed8386 100644
          break;
  
      case PPC_OP_FSEL:
-@@ -1222,76 +1323,68 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+@@ -1222,76 +1351,68 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
          if (inst->rc) emit_set_cr1_from_fpscr(out);
          break;
  
@@ -327,7 +403,25 @@ index 4868b4c..6ed8386 100644
          break;
  
      case PPC_OP_PS_CMPU0:
-@@ -1554,11 +1647,11 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+@@ -1539,7 +1660,8 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+     case PPC_OP_B:
+         fprintf(out, "    {\n");
+         emit_direct_branch(out, inst,
+-                           branch_target_is_local(func_start, func_end, inst->branch_target));
++                           branch_target_is_local(func_start, func_end, inst->branch_target),
++                           func_start, func_end);
+         fprintf(out, "    }\n");
+         break;
+ 
+@@ -1548,17 +1670,18 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+         emit_branch_condition(out, inst->bo, inst->bi);
+         fprintf(out, "        if (ctr_ok && cr_ok) {\n");
+         emit_direct_branch(out, inst,
+-                           branch_target_is_local(func_start, func_end, inst->branch_target));
++                           branch_target_is_local(func_start, func_end, inst->branch_target),
++                           func_start, func_end);
+         fprintf(out, "        }\n");
+         fprintf(out, "    }\n");
          break;
  
      case PPC_OP_BCLR:
@@ -341,12 +435,11 @@ index 4868b4c..6ed8386 100644
          break;
  
      case PPC_OP_TWI:
-@@ -1916,6 +2009,9 @@ void emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
+@@ -1916,6 +2039,8 @@ void emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
      }
  
      fprintf(out, "void func_%08X(CPUState* ctx) {\n", func_addr);
-+    fprintf(out, "    u32 dolrecomp_chain = DOLRECOMP_CHAIN_BUDGET;\n");
-+    fprintf(out, "    (void)dolrecomp_chain;\n");
++    fprintf(out, "    if (dolrecomp_call_depth == 0u) dolrecomp_chain_budget = DOLRECOMP_CHAIN_BUDGET;\n");
 +    fprintf(out, "dolrecomp_dispatch:\n");
      fprintf(out, "    switch (ctx->pc) {\n");
      for (i = 0; i < count; i++) {

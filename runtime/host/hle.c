@@ -4563,6 +4563,8 @@ static u8 g_chain_stop[HLE_DISPATCH_COUNT];
 const u8* dolrecomp_chain_stop;  // read by the generated code (generated.h)
 u32 dolrecomp_chain_stop_base;
 u32 dolrecomp_chain_stop_count;
+u32 dolrecomp_chain_budget;  // shared by nested chunk calls (generated.h)
+u32 dolrecomp_call_depth;
 
 static void chain_stop_at(u32 address) {
     if (address >= HLE_CODE_BASE && address < HLE_CODE_LIMIT)

@@ -451,7 +451,7 @@ void build_options() {
 
 void build_controls() {
     Row layout{"Layout", "< " + std::string(controls::layout_name(controls::layout())) + " >"};
-    layout.note = "Original: GameCube positions. Modern: aim LT, attack RT, sprint LB.";
+    layout.note = "Original: GameCube positions. Modern: attack RT/A, action B, aim LT, sprint L3, creep R3.";
     layout.change = [](int dir) {
         int l = controls::layout();
         cycle(l, controls::kLayoutCount, dir);
@@ -472,11 +472,11 @@ void build_controls() {
         };
         return r;
     };
-    g_rows.push_back(hold_toggle("Sprint", &g_settings.sprint_toggle,
+    g_rows.push_back(hold_toggle("Sprint", &g_settings.sprint_toggle[controls::layout()],
                                  "Toggle: press to run, press again or stop moving to walk."));
-    g_rows.push_back(hold_toggle("Creep", &g_settings.creep_toggle,
+    g_rows.push_back(hold_toggle("Creep", &g_settings.creep_toggle[controls::layout()],
                                  "Toggle: press to creep, press again (or sprint) to stop."));
-    g_rows.push_back(hold_toggle("Target", &g_settings.target_toggle,
+    g_rows.push_back(hold_toggle("Target", &g_settings.target_toggle[controls::layout()],
                                  "Toggle: press to lock on, press again to release."));
 
     Row deadzone{"Stick deadzone", std::to_string(g_settings.stick_deadzone) + "%"};

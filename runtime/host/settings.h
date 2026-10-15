@@ -18,9 +18,10 @@ typedef struct {
     int effects_volume;   // the game's own mix (effects, voices), 0-100
     int audio_buffer_ms;  // audio queued ahead of the output
     int controls_layout;  // 0 original, 1 modern, 2 custom
-    bool sprint_toggle;   // press to start/stop sprinting (stops when you stop)
-    bool creep_toggle;
-    bool target_toggle;
+    // Hold or toggle, per controls layout (original, modern, custom).
+    bool sprint_toggle[3];  // press to start/stop sprinting (stops when you stop)
+    bool creep_toggle[3];
+    bool target_toggle[3];
     int stick_deadzone;   // percent of the stick's travel ignored, 5-25
     bool vibration;
     char controls_custom[512];  // custom bindings (controls.cpp format)

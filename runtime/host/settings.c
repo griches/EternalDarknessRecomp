@@ -21,9 +21,10 @@ Settings g_settings = {
     .effects_volume = 100,
     .audio_buffer_ms = 40,
     .controls_layout = 0,
-    .sprint_toggle = false,
-    .creep_toggle = false,
-    .target_toggle = false,
+    // Modern: sprint (left stick click) and creep (right stick click) toggle.
+    .sprint_toggle = {false, true, false},
+    .creep_toggle = {false, true, false},
+    .target_toggle = {false, false, false},
     .stick_deadzone = 20,
     .vibration = true,
     .controls_custom = "",
@@ -47,6 +48,21 @@ static char* trim(char* s) {
                        end[-1] == '\r'))
         *--end = '\0';
     return s;
+}
+
+static const char* const kLayoutKeys[3] = {"original", "modern", "custom"};
+
+// "sprint_toggle_modern = 1" into sprint_toggle[1].
+static bool parse_toggle(const char* key, const char* prefix, bool values[3], int n) {
+    const size_t len = strlen(prefix);
+    if (strncmp(key, prefix, len) != 0)
+        return false;
+    for (int i = 0; i < 3; i++)
+        if (strcmp(key + len, kLayoutKeys[i]) == 0) {
+            values[i] = n != 0;
+            return true;
+        }
+    return false;
 }
 
 void settings_load(void) {
@@ -82,12 +98,10 @@ void settings_load(void) {
             g_settings.audio_buffer_ms = clamp_int(n, 20, 500);
         else if (strcmp(key, "controls_layout") == 0)
             g_settings.controls_layout = clamp_int(n, 0, 2);
-        else if (strcmp(key, "sprint_toggle") == 0)
-            g_settings.sprint_toggle = n != 0;
-        else if (strcmp(key, "creep_toggle") == 0)
-            g_settings.creep_toggle = n != 0;
-        else if (strcmp(key, "target_toggle") == 0)
-            g_settings.target_toggle = n != 0;
+        else if (parse_toggle(key, "sprint_toggle_", g_settings.sprint_toggle, n) ||
+                 parse_toggle(key, "creep_toggle_", g_settings.creep_toggle, n) ||
+                 parse_toggle(key, "target_toggle_", g_settings.target_toggle, n))
+            ;
         else if (strcmp(key, "stick_deadzone") == 0)
             g_settings.stick_deadzone = clamp_int(n, 5, 25);
         else if (strcmp(key, "vibration") == 0)
@@ -117,9 +131,11 @@ void settings_save(void) {
     fprintf(f, "effects_volume = %d\n", g_settings.effects_volume);
     fprintf(f, "audio_buffer_ms = %d\n", g_settings.audio_buffer_ms);
     fprintf(f, "controls_layout = %d\n", g_settings.controls_layout);
-    fprintf(f, "sprint_toggle = %d\n", g_settings.sprint_toggle ? 1 : 0);
-    fprintf(f, "creep_toggle = %d\n", g_settings.creep_toggle ? 1 : 0);
-    fprintf(f, "target_toggle = %d\n", g_settings.target_toggle ? 1 : 0);
+    for (int i = 0; i < 3; i++) {
+        fprintf(f, "sprint_toggle_%s = %d\n", kLayoutKeys[i], g_settings.sprint_toggle[i] ? 1 : 0);
+        fprintf(f, "creep_toggle_%s = %d\n", kLayoutKeys[i], g_settings.creep_toggle[i] ? 1 : 0);
+        fprintf(f, "target_toggle_%s = %d\n", kLayoutKeys[i], g_settings.target_toggle[i] ? 1 : 0);
+    }
     fprintf(f, "stick_deadzone = %d\n", g_settings.stick_deadzone);
     fprintf(f, "vibration = %d\n", g_settings.vibration ? 1 : 0);
     fprintf(f, "controls_custom = %s\n", g_settings.controls_custom);

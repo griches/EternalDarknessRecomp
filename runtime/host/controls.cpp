@@ -74,12 +74,12 @@ const int kOriginalPad[kActionCount][2] = {
     {kDUp, kNone},   {kDDown, kNone}, {kDLeft, kNone}, {kDRight, kNone},
 };
 
-// Aim on the left trigger, attack on the right; sprint and creep on the
-// shoulders; reload on the left face button. Attack stays on South too,
-// because the game confirms its menus with the attack button.
+// Modern: attack and confirm on RT and A, action and cancel on B, aim on LT,
+// sprint and creep on the stick clicks (toggles by default), reload X,
+// quickcast Y.
 const int kModernPad[kActionCount][2] = {
-    {kRT, kSouth}, {kEast, kNone}, {kRB, kNone}, {kNorth, kNone},
-    {kWest, kNone}, {kLB, kNone},  {kLT, kNone}, {kStart, kNone},
+    {kRT, kSouth}, {kEast, kNone}, {kR3, kNone},    {kNorth, kNone},
+    {kWest, kNone}, {kL3, kNone},  {kLT, kNone},    {kStart, kNone},
     {kDUp, kNone},  {kDDown, kNone}, {kDLeft, kNone}, {kDRight, kNone},
 };
 
@@ -268,9 +268,16 @@ bool g_was_down[kActionCount];
 Uint64 g_still_since = 0;  // when the main stick last came to rest
 
 bool toggle_mode(int action) {
-    return (action == kSprint && g_settings.sprint_toggle) ||
-           (action == kCreep && g_settings.creep_toggle) ||
-           (action == kTarget && g_settings.target_toggle);
+    return (action == kSprint && g_settings.sprint_toggle[g_layout]) ||
+           (action == kCreep && g_settings.creep_toggle[g_layout]) ||
+           (action == kTarget && g_settings.target_toggle[g_layout]);
+}
+
+// Custom starts from the layout in use: its buttons and hold/toggle choices.
+void custom_from(int layout) {
+    g_settings.sprint_toggle[kCustom] = g_settings.sprint_toggle[layout];
+    g_settings.creep_toggle[kCustom] = g_settings.creep_toggle[layout];
+    g_settings.target_toggle[kCustom] = g_settings.target_toggle[layout];
 }
 
 bool read_pad(DolPadState* state) {
@@ -434,7 +441,8 @@ void set_layout(int layout) {
     if (layout == kCustom) {
         if (g_layout != kCustom && g_settings.controls_custom[0] != '\0')
             parse(g_settings.controls_custom);  // the saved custom layout
-        // else: keep the bindings in use as the starting point
+        else if (g_layout != kCustom)
+            custom_from(g_layout);  // a first Custom starts from the layout in use
     } else {
         load_preset(layout);
     }
@@ -446,7 +454,8 @@ int layout() { return g_layout; }
 
 void begin_capture(int action) {
     if (g_layout != kCustom) {
-        g_layout = kCustom;  // start Custom from what is in use
+        custom_from(g_layout);  // start Custom from what is in use
+        g_layout = kCustom;
     }
     g_capture = action;
     g_capture_armed = false;

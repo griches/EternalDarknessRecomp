@@ -451,7 +451,11 @@ void build_options() {
 
 void build_controls() {
     Row layout{"Layout", "< " + std::string(controls::layout_name(controls::layout())) + " >"};
-    layout.note = "Original: GameCube positions. Modern: attack RT/A, action B, aim LT, sprint L3, creep R3.";
+    static const char* const kLayoutNotes[] = {
+        "The GameCube's button positions.",
+        "Attack RT/A, action B, aim LT, sprint L3, creep R3.",
+        "Your own buttons: change them in Button mapping."};
+    layout.note = kLayoutNotes[controls::layout()];
     layout.change = [](int dir) {
         int l = controls::layout();
         cycle(l, controls::kLayoutCount, dir);

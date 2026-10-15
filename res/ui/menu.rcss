@@ -92,7 +92,10 @@ body.overlay {
 }
 
 #note {
-	min-height: 24dp;
+	/* Always two lines tall, so a longer help text never resizes (and so
+	   re-centres) the panel as the selection moves. */
+	height: 46dp;
+	overflow: hidden;
 	margin-top: 14dp;
 	font-size: 17dp;
 	color: #a08b6a;

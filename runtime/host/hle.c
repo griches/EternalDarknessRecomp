@@ -4720,6 +4720,9 @@ u32 dolrecomp_call_depth;
 #define CHAIN_TABLE_SIZE 0x600000u  // generated.h DOLRECOMP_CHAIN_TABLE_SIZE
 u8 dolrecomp_chain_table[CHAIN_TABLE_SIZE];
 
+// Chain stops are read once, by publish_codegen_options (which also fills
+// dolrecomp_chain_table): an intercept, notify or debug hook installed after
+// it must call it again, or chunks keep chaining past the new hook.
 static void chain_stop_at(u32 address) {
     if (address >= HLE_CODE_BASE && address < HLE_CODE_LIMIT)
         g_chain_stop[(address - HLE_CODE_BASE) / 4u] = 1u;

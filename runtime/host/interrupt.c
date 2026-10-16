@@ -411,7 +411,18 @@ void interrupt_poll(CPUState* cpu) {
         vi_units = wall_vi_rem / 50u;
         wall_vi_rem %= 50u;
         wall_audio_rem += elapsed * audio_chunks_per_second();
+        // The time owed comes out as chunks. When a DMA buffer has ended and
+        // the game has not yet answered its interrupt (with the next
+        // buffer's address), wait for it rather than play on: played on, the
+        // DMA replays the buffer it has, a buzz of repeated 5 ms frames (a
+        // crackle after any pause of the game thread, whose time owed came
+        // out as one run of chunks, and through loads). Up to 120 ms of audio
+        // (more than one step's 100 ms) waits; past that the DMA plays on, as
+        // the hardware would.
+        const u64 hold = 120000000ull * audio_chunks_per_second();
         while (wall_audio_rem >= 1000000000ull) {
+            if (audio_interrupt_pending() && wall_audio_rem < hold)
+                break;
             wall_audio_rem -= 1000000000ull;
             audio_poll(cpu);
         }

@@ -9788,18 +9788,28 @@ index 2e4c762..fb7c6bb 100644
          DolGuestResolvedRange range;
          memset(&range, 0, sizeof(range));
 diff --git a/src/gx_recomp.c b/src/gx_recomp.c
-index 842e0e6..168b12d 100644
+index 842e0e6..ec7e60a 100644
 --- a/src/gx_recomp.c
 +++ b/src/gx_recomp.c
-@@ -41,6 +41,7 @@ static u32 bp_get(u32 value, u32 size, u32 shift) {
+@@ -41,9 +41,16 @@ static u32 bp_get(u32 value, u32 size, u32 shift) {
  static void note_matrix_index_a(DolGxRecompState* gx, u32 value) {
      if (gx == NULL)
          return;
 +    gx->xf_version++;
      gx->matrix_index_a = value;
++    /* PosNormalMtxIdx is a row of the whole XF matrix memory, not only of
++     * GX_PNMTX0..9 (rows 0..29): a draw may use a texture-matrix slot, and
++     * Eternal Darkness draws its fire and smoke with GX_IDENTITY (row 60, the
++     * identity GXInit loads there). The planner reads rows 30..62 from the
++     * texture matrices. Clamped to 0..9 it took matrix 0, whatever was last
++     * loaded there: the flames moved by a 2D overlay's (320, 240). */
      gx->current_pn_matrix = bp_get(value, 6u, 0u) / 3u;
-     if (gx->current_pn_matrix >= DOL_GX_RECOMP_POSITION_MATRIX_COUNT)
-@@ -955,6 +956,7 @@ bool dol_gx_recomp_capture_xf_transform(DolGxRecompState* gx, u16 base, u8 count
+-    if (gx->current_pn_matrix >= DOL_GX_RECOMP_POSITION_MATRIX_COUNT)
++    if (gx->current_pn_matrix * 3u + 2u > 62u)
+         gx->current_pn_matrix = 0u;
+ }
+ 
+@@ -955,6 +962,7 @@ bool dol_gx_recomp_capture_xf_transform(DolGxRecompState* gx, u16 base, u8 count
      if (!touches_pn && !touches_tex && !touches_scalar && !touches_window &&
          !touches_light && !touches_normal && !touches_post)
          return false;

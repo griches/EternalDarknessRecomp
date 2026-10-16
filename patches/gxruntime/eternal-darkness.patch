@@ -9481,7 +9481,7 @@ index 2c0e5ff..be88d3e 100644
      if (ax != NULL)
          ax->log = enabled;
 diff --git a/src/core/cpu.c b/src/core/cpu.c
-index 2f13110..aedd365 100644
+index 2f13110..2424912 100644
 --- a/src/core/cpu.c
 +++ b/src/core/cpu.c
 @@ -168,7 +168,12 @@ static u32 exception_msr(u32 old_msr, u32 exception) {
@@ -9497,12 +9497,14 @@ index 2f13110..aedd365 100644
      u32 avail;
      u8* host = resolve_addr(cpu, addr, &avail);
      if (!host || avail < 8) {
-@@ -180,6 +185,77 @@ u64 mem_read64(CPUState* cpu, u32 addr) {
+@@ -180,6 +185,79 @@ u64 mem_read64(CPUState* cpu, u32 addr) {
      return read_be64(host);
  }
  
 +// ED_STORE_WATCH=addr[:len] (debug): report guest stores into the range with
-+// the storing instruction, to find what overwrites guest memory.
++// the storing instruction, to find what overwrites guest memory. Generated
++// code stores pc at block starts only: generate with DOLRECOMP_EXACT_PC=1 for
++// the instruction itself (also for ED_LOAD_WATCH).
 +static int g_store_watch = -1;
 +static u32 g_store_watch_lo, g_store_watch_len;
 +static unsigned g_store_watch_hits;
@@ -9575,7 +9577,7 @@ index 2f13110..aedd365 100644
  void mem_write64(CPUState* cpu, u32 addr, u64 value) {
      u32 avail;
      u8* host = resolve_addr(cpu, addr, &avail);
-@@ -191,11 +267,15 @@ void mem_write64(CPUState* cpu, u32 addr, u64 value) {
+@@ -191,11 +269,15 @@ void mem_write64(CPUState* cpu, u32 addr, u64 value) {
          fprintf(stderr, "warn: write64 to unmapped 0x%08X\n", addr);
          return;
      }
@@ -9591,7 +9593,7 @@ index 2f13110..aedd365 100644
      u32 avail;
      u8* host = resolve_addr(cpu, addr, &avail);
      if (!host || avail < 4) {
-@@ -218,11 +298,15 @@ void mem_write32(CPUState* cpu, u32 addr, u32 value) {
+@@ -218,11 +300,15 @@ void mem_write32(CPUState* cpu, u32 addr, u32 value) {
          fprintf(stderr, "warn: write32 to unmapped 0x%08X\n", addr);
          return;
      }
@@ -9607,7 +9609,7 @@ index 2f13110..aedd365 100644
      u32 avail;
      u8* host = resolve_addr(cpu, addr, &avail);
      if (!host || avail < 2) {
-@@ -245,11 +329,15 @@ void mem_write16(CPUState* cpu, u32 addr, u16 value) {
+@@ -245,11 +331,15 @@ void mem_write16(CPUState* cpu, u32 addr, u16 value) {
          fprintf(stderr, "warn: write16 to unmapped 0x%08X\n", addr);
          return;
      }
@@ -9623,7 +9625,7 @@ index 2f13110..aedd365 100644
      u32 avail;
      u8* host = resolve_addr(cpu, addr, &avail);
      if (!host) {
-@@ -272,6 +360,8 @@ void mem_write8(CPUState* cpu, u32 addr, u8 value) {
+@@ -272,6 +362,8 @@ void mem_write8(CPUState* cpu, u32 addr, u8 value) {
          fprintf(stderr, "warn: write8 to unmapped 0x%08X\n", addr);
          return;
      }
@@ -9632,7 +9634,7 @@ index 2f13110..aedd365 100644
      clear_matching_reservation(cpu, addr);
      *host = value;
  }
-@@ -562,18 +652,33 @@ static bool psq_access_is_valid(CPUState* cpu, u8 type, u32 ea, u32 cia) {
+@@ -562,18 +654,33 @@ static bool psq_access_is_valid(CPUState* cpu, u8 type, u32 ea, u32 cia) {
      return true;
  }
  
@@ -9670,7 +9672,7 @@ index 2f13110..aedd365 100644
      default:
          return 0.0;
      }
-@@ -585,7 +690,7 @@ static s64 psq_quantize_int(f64 value, s64 min_value, s64 max_value, s32 scale)
+@@ -585,7 +692,7 @@ static s64 psq_quantize_int(f64 value, s64 min_value, s64 max_value, s32 scale)
      if (isinf(value))
          return value < 0.0 ? min_value : max_value;
  

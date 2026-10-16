@@ -128,7 +128,8 @@ static u8 g_wg_line[32];
 static u32 g_wg_fill;
 
 // ED_FIFO_PROFILE=1 (debug): bytes written into buffer FIFO targets (display
-// lists), by the storing instruction, printed when a large fill ends.
+// lists), by the storing instruction (its block start unless the code was
+// generated with DOLRECOMP_EXACT_PC=1), printed when a large fill ends.
 #define FIFO_PROFILE_SLOTS 512u
 static struct { u32 pc, lr; u64 bytes; } g_fifo_profile[FIFO_PROFILE_SLOTS];
 static int g_fifo_profile_on = -1;

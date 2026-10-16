@@ -12,6 +12,9 @@
 // and advanced pc, typically to the link register).
 //
 void hle_install(CPUState* cpu);
+// Skip the intro movies (or not) from the next boot state on: the launcher's
+// New game without restarting the process.
+void hle_set_skip_intro(bool on);
 // Once a game frame, at VIFlush (Aurora builds): FPS in the title and the
 // in-game menu. Needs the window, so with the GX thread the backend calls it on
 // the main thread instead (dol_aurora_set_frame_hook).

@@ -40,6 +40,8 @@
 extern "C" {
 void quickstate_request_save(const char* path);
 void quickstate_request_load(const char* path);
+const char* quickstate_boot_path(void);
+void hle_set_skip_intro(bool on);
 }
 
 namespace {
@@ -271,6 +273,8 @@ int g_disc = 0;
 int g_slot = 1;
 bool g_disc_on_main = true;  // first run, or the chosen disc is missing
 int g_load_slot = 0;         // launcher: boot into this save slot (0: none)
+bool g_in_game = false;      // the game is running (menus open over it)
+std::string g_running_disc;  // the disc this run plays (the launcher's choice)
 int g_argc = 0;
 char** g_argv = nullptr;
 InputState g_input;
@@ -368,9 +372,39 @@ int newest_slot() {
     return best;
 }
 
+// Start this program again from the launcher (another disc, or no boot state
+// to go back to): the window closes and reopens.
+void restart_process() {
+    settings_save();
+    unsetenv("ED_QUICKLOAD");
+    unsetenv("ED_SKIP_INTRO");
+#ifdef _WIN32
+    _execv(g_argv[0], g_argv);
+#else
+    execv(g_argv[0], g_argv);
+#endif
+    std::fprintf(stderr, "[frontend] restart failed\n");
+}
+
 void start_game(int slot) {
     snprintf(g_settings.disc, sizeof g_settings.disc, "%s", g_discs[g_disc].path.c_str());
     settings_save();
+    if (g_in_game) {
+        // The launcher over a running game: load the save, or the machine as
+        // it booted for a new game, in place (the same disc only).
+        if (!g_running_disc.empty() && g_discs[g_disc].path != g_running_disc) {
+            restart_process();
+            return;
+        }
+        if (slot != 0) {
+            quickstate_request_load(slot_path(slot).c_str());
+        } else {
+            hle_set_skip_intro(g_settings.skip_intros);
+            quickstate_request_load(quickstate_boot_path());
+        }
+        g_close = true;
+        return;
+    }
     g_load_slot = slot;
     g_play = true;
     g_close = true;
@@ -418,6 +452,10 @@ void build_launcher() {
     Row quit{"Quit"};
     quit.gap = true;
     quit.activate = [] {
+        if (g_in_game) {
+            settings_save();
+            dol_aurora_request_quit();
+        }
         g_play = false;
         g_close = true;
     };
@@ -718,14 +756,15 @@ void build_in_game() {
     launcher.note = "Unsaved progress is lost.";
     launcher.activate = [] {
         settings_save();
-        unsetenv("ED_QUICKLOAD");
-        unsetenv("ED_SKIP_INTRO");
-#ifdef _WIN32
-        _execv(g_argv[0], g_argv);
-#else
-        execv(g_argv[0], g_argv);
-#endif
-        std::fprintf(stderr, "[frontend] restart failed\n");
+        // The launcher in this window, over the paused game; without a boot
+        // state for New game, start the program again instead.
+        if (quickstate_boot_path() == nullptr) {
+            restart_process();
+            return;
+        }
+        g_screen = Screen::Launcher;
+        g_options_return = Screen::Launcher;
+        g_selected = g_disc_on_main && disc_playable() ? 1 : 0;
     };
     g_rows.push_back(launcher);
 
@@ -1109,6 +1148,7 @@ extern "C" bool frontend_run_launcher(const char* default_iso, char* iso_out,
     if (!run_menu() || !g_play)
         return false;
     snprintf(iso_out, iso_cap, "%s", g_discs[g_disc].path.c_str());
+    g_running_disc = g_discs[g_disc].path;
     if (g_load_slot != 0) {
         // Boot straight into the save (the quick-state load at boot).
         setenv("ED_QUICKLOAD", slot_path(g_load_slot).c_str(), 1);
@@ -1165,6 +1205,7 @@ extern "C" void frontend_frame(void) {
     std::fill(std::begin(g_key_pressed), std::end(g_key_pressed), false);
     if (!press || !ensure_ui())
         return;
+    g_in_game = true;
     g_screen = Screen::InGame;
     g_options_return = Screen::InGame;
     g_selected = 0;

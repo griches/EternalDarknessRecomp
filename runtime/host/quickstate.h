@@ -27,6 +27,10 @@ void quickstate_poll(unsigned long long blocks);
 void quickstate_request_save(const char* path);
 void quickstate_request_load(const char* path);
 
+// The machine as this run booted it (saved before any boot load), for a New
+// game without restarting; NULL until it is saved.
+const char* quickstate_boot_path(void);
+
 // Nonzero while a save or load waits for a safe point.
 extern int g_quickstate_pending;
 

@@ -36,6 +36,10 @@
 #define QS_MAGIC "EDQSTATE"
 #define QS_VERSION 1u
 #define QS_DEFAULT_PATH "build/runs/quick.state"
+// The machine as booted, before any boot load: the launcher's New game in a
+// running process loads it (quickstate_boot_path).
+#define QS_BOOT_PATH "saves/boot.state"
+static bool g_boot_saved;
 #define QS_PAGE_SIZE 4096u
 #define QS_PAGE_END 0xFFFFFFFFu
 #define QS_MAX_SECTIONS 32u
@@ -156,6 +160,10 @@ void quickstate_request_load(const char* path) {
     request(QS_LOAD, path);
 }
 
+const char* quickstate_boot_path(void) {
+    return g_boot_saved ? QS_BOOT_PATH : NULL;
+}
+
 void quickstate_init(void) {
     // Leave SIGUSR1 to the --snapshot-out harness when it claimed it.
 #ifdef SIGUSR1
@@ -171,6 +179,11 @@ void quickstate_init(void) {
     const char* save_at = getenv("ED_QUICKSAVE_AT_BLOCK");
     g_save_at_armed = save_at != NULL && save_at[0] != '\0';
     g_save_at = g_save_at_armed ? strtoull(save_at, NULL, 0) : 0u;
+#ifdef ED_AURORA
+    // First, before a boot load replaces the fresh machine.
+    if (getenv("ED_NO_BOOT_STATE") == NULL)
+        request(QS_SAVE, QS_BOOT_PATH);
+#endif
     const char* load = getenv("ED_QUICKLOAD");
     const char* load_at = getenv("ED_QUICKLOAD_AT_BLOCK");
     g_load_at_armed = false;
@@ -466,6 +479,8 @@ static bool save_state(CPUState* cpu, const char* path) {
     fprintf(stderr, "[quick] saved %s (block %llu, pc=0x%08X, %.1f MB, %.0f ms)\n",
             path, g_blocks, cpu->pc, (double)w.bytes / (1024.0 * 1024.0),
             now_ms() - start);
+    if (strcmp(path, QS_BOOT_PATH) == 0)
+        g_boot_saved = true;
     return true;
 }
 

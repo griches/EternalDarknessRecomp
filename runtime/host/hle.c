@@ -199,6 +199,15 @@ static bool g_skip_intro_done;
 static bool g_skip_intro_armed;
 static unsigned g_skip_intro_memcard_text;
 
+// The launcher's New game in a running process (frontend.cpp): skip the
+// intro movies or not, as at boot (the boot state it loads resets the rest).
+void hle_set_skip_intro(bool on) {
+    g_skip_intro = on;
+    g_skip_intro_done = false;
+    g_skip_intro_armed = false;
+    g_skip_intro_memcard_text = 0;
+}
+
 static void skip_intro_note_open(const CPUState* cpu, const char* path) {
     if (!g_skip_intro || g_skip_intro_done)
         return;

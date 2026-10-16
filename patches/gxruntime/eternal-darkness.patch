@@ -6644,10 +6644,10 @@ index 623f047..554428e 100644
 +
  } // namespace gxruntime::gxcore
 diff --git a/graphics/gxcore/include/gxruntime/gxcore/gxcore.hpp b/graphics/gxcore/include/gxruntime/gxcore/gxcore.hpp
-index 4d14391..92752b2 100644
+index 4d14391..f503d1f 100644
 --- a/graphics/gxcore/include/gxruntime/gxcore/gxcore.hpp
 +++ b/graphics/gxcore/include/gxruntime/gxcore/gxcore.hpp
-@@ -13,9 +13,15 @@
+@@ -13,9 +13,24 @@
  #include "gxruntime/aurora_recomp/render_sink.hpp"
  
  #include <cstdint>
@@ -6660,10 +6660,19 @@ index 4d14391..92752b2 100644
 +extern std::uint64_t g_plan_time_ns;
 +extern std::uint64_t g_state_changed_draws;
 +
++// Dolphin's "Force 24-bit Color" (bForceTrueColor, on by default there and
++// here): an RGBA6_Z24 EFB keeps 8-bit colour and is not dithered. Flipper's
++// 2x2 dither averages one level brighter on odd rows, and drawn at the host
++// resolution through several passes that showed as horizontal stripes in
++// Eternal Darkness's sepia scenes. DOL_GXCORE_TRUE_COLOR=0 or
++// set_force_true_color(false) restores the 6-bit colour and dither.
++void set_force_true_color(bool on);
++bool force_true_color();
++
  // GapCounters now lives in counters.hpp (Program 66 A0) so the coverage gate and
  // the domain files reference the counter taxonomy without the sink header.
  
-@@ -57,12 +63,25 @@ public:
+@@ -57,12 +72,25 @@ public:
    // VertexLoaderManager normal_cache write on m_remaining==0). nullptr in unit
    // tests that don't exercise the fallback (fields stay zero, matching a fresh
    // cache).
@@ -6690,7 +6699,7 @@ index 4d14391..92752b2 100644
    bool bp_valid(std::uint8_t reg) const { return bp_valid_[reg]; }
  
    // U2: BP TX_SETMODE0/1 register addresses for texmap unit 0..7
-@@ -83,6 +102,13 @@ public:
+@@ -83,6 +111,13 @@ public:
    }
  
  private:
@@ -6704,7 +6713,7 @@ index 4d14391..92752b2 100644
    std::uint32_t bp_regs_[256]{};
    bool bp_valid_[256]{};
    // TEV color registers (BP 0xE0-0xE7). Konst and tev-color writes alias the
-@@ -96,8 +122,14 @@ private:
+@@ -96,8 +131,14 @@ private:
    bool vcd_hi_valid_ = false;
    std::uint32_t vat_[8][3]{};
    std::uint8_t vat_valid_[8]{}; // bit per group
@@ -6719,7 +6728,7 @@ index 4d14391..92752b2 100644
  // AuroraRenderSink that owns a ConsumingAuroraRenderSink (streaming mode) and
  // pairs every span-complete draw with the register state that was current at
  // its Draw packet. The observer receives (plan-ready) ConsumedDraws; the
-@@ -110,6 +142,13 @@ public:
+@@ -110,6 +151,13 @@ public:
    // flushed (its geometry is in the pass) — so a GPU observer can resolve the
    // EFB into a texture at the copy's stream position.
    using CopyObserver = void (*)(const EfbCopyCommand& cmd, void* user);
@@ -6733,7 +6742,7 @@ index 4d14391..92752b2 100644
  
    GxCoreSink();
  
-@@ -124,11 +163,42 @@ public:
+@@ -124,11 +172,42 @@ public:
      copy_observer_ = observer;
      copy_observer_user_ = user;
    }
@@ -6776,7 +6785,7 @@ index 4d14391..92752b2 100644
  
    const GapCounters& counters() const { return counters_; }
    GapCounters& counters() { return counters_; }
-@@ -151,6 +221,14 @@ private:
+@@ -151,6 +230,14 @@ private:
    void* plan_observer_user_ = nullptr;
    CopyObserver copy_observer_ = nullptr;
    void* copy_observer_user_ = nullptr;
@@ -7362,14 +7371,16 @@ index 2584cb9..c1bf0b0 100644
    }
    emit(out, "        }\n");
 diff --git a/graphics/gxcore/src/plan.cpp b/graphics/gxcore/src/plan.cpp
-index c3d1557..8b0b290 100644
+index c3d1557..e98d445 100644
 --- a/graphics/gxcore/src/plan.cpp
 +++ b/graphics/gxcore/src/plan.cpp
-@@ -3,8 +3,11 @@
+@@ -3,8 +3,13 @@
  
  #include "gxruntime/gxcore/gxcore.hpp"
  
++#include <atomic>
 +#include <cstddef>
++#include <cstdlib>
  #include <cstring>
 +#include <new>
  #include <limits>
@@ -7377,10 +7388,15 @@ index c3d1557..8b0b290 100644
  
  // DrawPlan construction: vertex layout/decode (Dolphin VertexLoader semantics),
  // matrices, ShaderKey derivation (TEV/texgen/lighting register decode),
-@@ -17,6 +20,28 @@ namespace ar = gxruntime::aurora_recomp;
+@@ -17,6 +22,33 @@ namespace ar = gxruntime::aurora_recomp;
  
  namespace {
  
++std::atomic<bool> g_force_true_color{[] {
++  const char* env = std::getenv("DOL_GXCORE_TRUE_COLOR");
++  return env == nullptr || env[0] != '0';
++}()};
++
 +// --- Plan reset ----------------------------------------------------------------
 +
 +const DrawPlanFields kFreshPlanFields{};
@@ -7406,7 +7422,7 @@ index c3d1557..8b0b290 100644
  // --- Vertex decode (Dolphin VertexLoader semantics) ---------------------------
  
  // One payload element in GC attribute order. attr uses CP array numbering
-@@ -391,14 +416,15 @@ const ar::ConsumedArrayInput* find_array(const ar::ConsumedDraw& draw,
+@@ -391,14 +423,15 @@ const ar::ConsumedArrayInput* find_array(const ar::ConsumedDraw& draw,
  // Matrix-memory row -> 4 floats, from the draw's captured XF matrix state.
  // Rows 0-29 live in position_matrices (3 rows per matrix), rows 30-62 in
  // tex_matrices. Returns false when any word of the row was never written.
@@ -7425,7 +7441,7 @@ index c3d1557..8b0b290 100644
      return (mask & (1u << matrix)) != 0u;
    }
    if (row < 63u) {
-@@ -407,8 +433,8 @@ bool load_matrix_row(const ar::ConsumedDraw& draw, std::uint32_t row,
+@@ -407,8 +440,8 @@ bool load_matrix_row(const ar::ConsumedDraw& draw, std::uint32_t row,
      const std::uint32_t base = (rel % 3u) * 4u;
      bool valid = true;
      for (std::uint32_t w = 0; w < 4; ++w) {
@@ -7436,7 +7452,7 @@ index c3d1557..8b0b290 100644
          valid = false;
      }
      return valid;
-@@ -429,13 +455,24 @@ void identity_rows(float rows[3][4]) {
+@@ -429,13 +462,24 @@ void identity_rows(float rows[3][4]) {
  DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
                                        GapCounters& counters,
                                        CachedVertexAttrs* cached,
@@ -7463,7 +7479,7 @@ index c3d1557..8b0b290 100644
    };
  
    if (draw.cull_all) {
-@@ -472,9 +509,25 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -472,9 +516,25 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
        ++counters.alpha_compare_ignored;
    }
  
@@ -7492,7 +7508,7 @@ index c3d1557..8b0b290 100644
      ++counters.vertex_decode_failures;
      return skip("VCD/VAT walk underivable");
    }
-@@ -489,8 +542,8 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -489,8 +549,8 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
        static_cast<std::uint8_t>(bits(gen_mode, 1, 8) != 0u ? 1u : 0u);
    const std::uint32_t xf_numtexgens_reg = 0x103Fu - 0x1018u;
    std::uint32_t num_tex_gens = 0;
@@ -7503,7 +7519,7 @@ index c3d1557..8b0b290 100644
    else
      num_tex_gens = bits(gen_mode, 4, 0);
    if (num_tex_gens > kMaxTexGens) {
-@@ -518,9 +571,9 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -518,9 +578,9 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
    // lightMask4_7@11. chan_regs slot = xf_addr - 0x1009: [0]=numColorChans,
    // [1..4]=amb0/amb1/mat0/mat1, [5..8]=color0/color1/alpha0/alpha1 ctrl.
    auto lit_chan = [&](std::uint32_t slot, LightChanKey& ch) {
@@ -7515,7 +7531,7 @@ index c3d1557..8b0b290 100644
      ch.matsource = static_cast<std::uint8_t>(bits(v, 1, 0));
      ch.enablelighting = static_cast<std::uint8_t>(bits(v, 1, 1));
      ch.ambsource = static_cast<std::uint8_t>(bits(v, 1, 6));
-@@ -537,10 +590,10 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -537,10 +597,10 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
    // litchan 0..3). A captured channel selecting MatSource::Register drives the
    // material register; an unconfigured channel stays vertex-color passthrough.
    for (std::uint32_t j = 0; j < 4u; ++j)
@@ -7529,7 +7545,7 @@ index c3d1557..8b0b290 100644
      if (n > 2u)
        n = 2u;
      key.num_color_chans = static_cast<std::uint8_t>(n);
-@@ -558,21 +611,21 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -558,21 +618,21 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
    // Only count normals/lighting as ignored when we fall back to passthrough.
    if (walk.has_normal && key.lit_valid == 0u)
      ++counters.normals_ignored;
@@ -7556,7 +7572,7 @@ index c3d1557..8b0b290 100644
        // XFMemory.h TexMtxInfo bitfields.
        tg.projection = static_cast<std::uint8_t>(bits(info, 1, 1));
        tg.inputform = static_cast<std::uint8_t>(bits(info, 1, 2));
-@@ -589,8 +642,8 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -589,8 +649,8 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
      // base post-matrix row) + normalize (bit 8). Applied by the WGSL only for
      // Regular texgens under dualtex_enabled (Dolphin VertexShaderGen).
      const std::uint32_t post_reg = (0x1050u - 0x1018u) + i;
@@ -7567,7 +7583,7 @@ index c3d1557..8b0b290 100644
        tg.postmtx_index = static_cast<std::uint8_t>(bits(pinfo, 6, 0));
        tg.postmtx_normalize = static_cast<std::uint8_t>(bits(pinfo, 1, 8));
      }
-@@ -773,6 +826,18 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -773,6 +833,18 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
      plan.pe_control_valid = pe.valid;
      plan.efb_pixel_format = pe.pixel_format;
      plan.efb_z_format = pe.z_format;
@@ -7586,7 +7602,32 @@ index c3d1557..8b0b290 100644
      plan.early_ztest = pe.early_ztest;
      if (!pe.valid)
        ++counters.efb_format_defaulted;
-@@ -842,9 +907,22 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -780,10 +852,12 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+     const bool zfreeze = bits(gen_mode, 1, 19) != 0u;
+     key.zfreeze = static_cast<std::uint8_t>(zfreeze ? 1u : 0u);
+     key.efb_pixel_format = pe.pixel_format;
++    const bool rgba6_efb =
++        pe.pixel_format == static_cast<std::uint8_t>(PixelFormat::RGBA6_Z24);
++    // Dolphin GetPixelShaderUid: rgba6_format (6-bit colour + dither) only
++    // without Force 24-bit Color; useDstAlpha follows the real EFB format.
+     key.rgba6_format = static_cast<std::uint8_t>(
+-        pe.pixel_format == static_cast<std::uint8_t>(PixelFormat::RGBA6_Z24)
+-            ? 1u
+-            : 0u);
++        rgba6_efb && !force_true_color() ? 1u : 0u);
+     const bool dither_bit = bits(cmode0, 1, 2) != 0u;
+     key.dither = static_cast<std::uint8_t>(
+         (dither_bit && key.rgba6_format != 0u) ? 1u : 0u);
+@@ -795,7 +869,7 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+         bp_valid_[0x42] ? bp_regs_[0x42] : 0u;
+     const bool dst_alpha_en = bits(cmode1, 1, 8) != 0u;
+     const bool use_dst_alpha =
+-        dst_alpha_en && pipe.alpha_update != 0u && key.rgba6_format != 0u;
++        dst_alpha_en && pipe.alpha_update != 0u && rgba6_efb;
+     key.use_dst_alpha = static_cast<std::uint8_t>(use_dst_alpha ? 1u : 0u);
+     // NoOp logic + dst-alpha: alpha write only when dst-alpha active.
+     if (bits(cmode0, 1, 1) != 0u && pipe.blend_enable == 0u &&
+@@ -842,9 +916,22 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
    const bool is_line_point =
        prim_op == 0xA8u || prim_op == 0xB0u || prim_op == 0xB8u;
    if (!is_line_point) {
@@ -7612,7 +7653,7 @@ index c3d1557..8b0b290 100644
      if (index_count == 0u) {
        ++counters.vertex_decode_failures;
        return skip("unknown primitive topology");
-@@ -1006,11 +1084,24 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1006,11 +1093,24 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
  
    // Uniforms.
    VertexShaderConstants& c = plan.constants;
@@ -7640,7 +7681,7 @@ index c3d1557..8b0b290 100644
    // Normal matrix (XF 0x400): matrix M = current_pn_matrix, 3 rows of
    // 3 (Dolphin VertexShaderManager normalMatrices[3*(PosNormalMtxIdx&31)] == our
    // per-matrix [M] slot). Fall back to the position rows when it was never
-@@ -1019,56 +1110,37 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1019,56 +1119,37 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
      const std::uint32_t m = draw.current_pn_matrix;
      const bool nm_valid =
          m < DOL_GX_RECOMP_NORMAL_MATRIX_COUNT &&
@@ -7708,7 +7749,7 @@ index c3d1557..8b0b290 100644
                                      : 0u;
        unpack_rgba8(col, c.materials[m]);
      }
-@@ -1082,10 +1154,10 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1082,10 +1163,10 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
    // MatrixIndexA/B defaults to IDENTITY the same way. Residual is only a
    // non-identity index whose 3 rows were never captured.
    constexpr std::uint32_t kGxIdentityRow = 60u;
@@ -7723,7 +7764,7 @@ index c3d1557..8b0b290 100644
    for (std::uint32_t i = 0; i < key.num_tex_gens; ++i) {
      std::uint32_t row = kGxIdentityRow;
      if (i < 4u && mat_idx_a_valid)
-@@ -1098,7 +1170,7 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1098,7 +1179,7 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
      } else {
        bool resolved = true;
        for (std::uint32_t k = 0; k < 3u; ++k)
@@ -7732,7 +7773,7 @@ index c3d1557..8b0b290 100644
        if (!resolved) {
          identity_rows(rows);
          ++counters.unresolved_tex_matrix;
-@@ -1108,18 +1180,12 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1108,18 +1189,12 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
        std::memcpy(c.texmatrices[3u * i + k], rows[k], sizeof rows[k]);
    }
  
@@ -7756,7 +7797,7 @@ index c3d1557..8b0b290 100644
      for (std::uint32_t i = 0; i < key.num_tex_gens; ++i) {
        if (static_cast<TexGenType>(key.tex_gens[i].texgentype) !=
            TexGenType::Regular)
-@@ -1128,7 +1194,7 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1128,7 +1203,7 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
        bool resolved = true;
        for (std::uint32_t k = 0; k < 3u; ++k) {
          const std::uint32_t row = (base + k) & 0x3fu;
@@ -7765,7 +7806,7 @@ index c3d1557..8b0b290 100644
            resolved = false;
        }
        if (!resolved)
-@@ -1165,7 +1231,10 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1165,7 +1240,10 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
  
    // U4: scissor + scissor-offset (BP 0x20/0x21/0x59). Decode into EFB-space
    // half-open rects (multi-rect wrap cases included). Missing TL/BR counts as
@@ -7777,7 +7818,7 @@ index c3d1557..8b0b290 100644
    {
      const bool tl_valid = bp_valid_[0x20];
      const bool br_valid = bp_valid_[0x21];
-@@ -1174,7 +1243,8 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1174,7 +1252,8 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
        ++counters.scissor_defaulted;
      const std::uint32_t tl = tl_valid ? bp_regs_[0x20] : 0u;
      const std::uint32_t br = br_valid ? bp_regs_[0x21] : 0u;
@@ -7787,7 +7828,7 @@ index c3d1557..8b0b290 100644
      plan.scissor_valid = tl_valid && br_valid;
      const std::uint32_t n = compute_scissor_rects(
          tl, br, off, plan.scissor_rects,
-@@ -1185,22 +1255,41 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1185,22 +1264,41 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
        ++counters.scissor_multi_rect;
    }
    if (key.textured != 0u) {
@@ -7842,7 +7883,7 @@ index c3d1557..8b0b290 100644
      // U2: decode sampler state for every used texmap from TX_SETMODE0/1.
      // Count sampler_defaulted when mode0 was never written for a live texmap
      // (plan falls back to BP-zero defaults: clamp/near/no-mip).
-@@ -1479,10 +1568,12 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1479,10 +1577,12 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
    // object-space value (Dolphin writes the cache on the loader's m_remaining==0
    // vertex). N/B/T are appended in the fixed vertex layout at these float slots.
    if (cached != nullptr) {
@@ -7858,7 +7899,7 @@ index c3d1557..8b0b290 100644
      }
      if (plan.vertex_count > 0u) {
        const float* last =
-@@ -1498,6 +1589,20 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1498,6 +1598,20 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
          }
        }
      }
@@ -7879,7 +7920,7 @@ index c3d1557..8b0b290 100644
    }
  
    // U6: CPU-side line/point expansion into triangle lists (WebGPU has no
-@@ -1509,7 +1614,7 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1509,7 +1623,7 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
      decode_lp_size(bp_valid_[0x22] ? bp_regs_[0x22] : 0u, bp_valid_[0x22],
                     bp_regs_, bp_valid_, key.num_tex_gens, &lp);
      const bool use_pn = key.has_pos_mtx_idx == 0u;
@@ -7888,7 +7929,7 @@ index c3d1557..8b0b290 100644
                                 plan.viewport_valid, key.num_tex_gens,
                                 plan.texcoords, &plan.vertices,
                                 &plan.vertex_count, &plan.indices) ||
-@@ -1559,7 +1664,7 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1559,7 +1673,7 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
          std::uint32_t pos_row = 0;
          std::memcpy(&pos_row, v + 3, sizeof pos_row);
          const bool use_pn = key.has_pos_mtx_idx == 0u;
@@ -7897,7 +7938,7 @@ index c3d1557..8b0b290 100644
                              view_off_y, screen + 3 * k);
        }
        float dfdx = 0.f, dfdy = 0.f, f0 = 0.f;
-@@ -1584,6 +1689,8 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1584,6 +1698,8 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
          plan.pixel_constants.zslope[3] = 0.f;
          plan.pixel_constants.efbscale[0] = 1.f;
          plan.pixel_constants.efbscale[1] = 1.f;
@@ -7906,7 +7947,7 @@ index c3d1557..8b0b290 100644
        } else {
          ++counters.zfreeze_ignored;
          // Can't emit plane depth without a slope — drop per_pixel_depth so
-@@ -1594,6 +1701,14 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1594,6 +1710,14 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
      } else if (zslope != nullptr) {
        // Always recompute on non-frozen draws (Dolphin CalculateZSlope path).
        (void)capture_slope(zslope);
@@ -7921,7 +7962,7 @@ index c3d1557..8b0b290 100644
      }
    }
  
-@@ -1614,7 +1729,72 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1614,7 +1738,80 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
  
    plan.ok = true;
    ++counters.draws_planned;
@@ -7992,6 +8033,14 @@ index c3d1557..8b0b290 100644
 +    zslope.f0 = x.zslope[2];
 +    zslope.valid = true;
 +  }
++}
++
++void set_force_true_color(bool on) {
++  g_force_true_color.store(on, std::memory_order_relaxed);
++}
++
++bool force_true_color() {
++  return g_force_true_color.load(std::memory_order_relaxed);
  }
  
  } // namespace gxruntime::gxcore
@@ -8450,6 +8499,30 @@ index bbefbee..8d581a9 100644
                   "viewpos.xyz);\n",
              i, static_cast<unsigned>(tg.embosslightshift));
        emitf(out, "        o.uv%u = o.uv%u + vec3f(dot(ld%u, tn%u), "
+diff --git a/graphics/gxcore/tests/gxcore_depth_test.cpp b/graphics/gxcore/tests/gxcore_depth_test.cpp
+index 173b851..da52d68 100644
+--- a/graphics/gxcore/tests/gxcore_depth_test.cpp
++++ b/graphics/gxcore/tests/gxcore_depth_test.cpp
+@@ -561,6 +561,7 @@ void test_wgsl_u5_emit() {
+ } // namespace
+ 
+ int main() {
++  gxc::set_force_true_color(false); // these check Flipper's 6-bit path
+   test_pe_control_decode();
+   test_quantize_formats();
+   test_bayer_dither();
+diff --git a/graphics/gxcore/tests/gxcore_logic_dstalpha_test.cpp b/graphics/gxcore/tests/gxcore_logic_dstalpha_test.cpp
+index f09a3c0..268614f 100644
+--- a/graphics/gxcore/tests/gxcore_logic_dstalpha_test.cpp
++++ b/graphics/gxcore/tests/gxcore_logic_dstalpha_test.cpp
+@@ -369,6 +369,7 @@ void test_noop_with_dst_alpha() {
+ } // namespace
+ 
+ int main() {
++  gxc::set_force_true_color(false); // these check Flipper's 6-bit path
+   test_logic_op_table();
+   test_plan_logic_op_exact();
+   test_plan_logic_op_approx();
 diff --git a/include/gxruntime/aram.h b/include/gxruntime/aram.h
 index 9c2f7bb..6dd6411 100644
 --- a/include/gxruntime/aram.h

@@ -3231,7 +3231,7 @@ index 7af8fca..4c14e34 100644
      g_requested.store(false, std::memory_order_release);
    else
 diff --git a/graphics/aurora/lib/gfx/gxcore_draw.cpp b/graphics/aurora/lib/gfx/gxcore_draw.cpp
-index 71136b9..d68719b 100644
+index 71136b9..2cadca2 100644
 --- a/graphics/aurora/lib/gfx/gxcore_draw.cpp
 +++ b/graphics/aurora/lib/gfx/gxcore_draw.cpp
 @@ -1,4 +1,7 @@
@@ -3747,7 +3747,7 @@ index 71136b9..d68719b 100644
    gfx::resolve_pass(it->second, srcRect, do_clear && cmd.color_update,
                      do_clear && cmd.alpha_update,
                      do_clear && cmd.depth_update,
-@@ -723,69 +1033,277 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -723,69 +1033,314 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
                                  static_cast<float>(cmd.clear_a) / 255.f},
                      clearDepthValue, fmt, &filter);
  
@@ -3989,8 +3989,41 @@ index 71136b9..d68719b 100644
 +    gxc::PlanScissorRect scissor{};
 +    gxc::PlanTexture textures[8]{};
 +    gxc::PlanSampler samplers[8]{};
++    // The single-texmap texture (texmap_mask 0 keeps it outside textures[]):
++    // without it a quad of one texture joined the quad of another drawn just
++    // before (the photo on the book's first page drew with the page's texture
++    // on the Steam Deck, whose 4:3 HUD lets flat quads take this path).
++    struct Single {
++      bool has = false;
++      uint32_t address = 0, size = 0, format = 0, width = 0, height = 0, available = 0;
++      const void* data = nullptr;
++      bool hasTlut = false;
++      uint32_t tlutAddress = 0, tlutFormat = 0, tlutEntries = 0;
++      const void* tlutData = nullptr;
++      bool operator==(const Single&) const = default;
++    } single;
++    gxc::PlanSampler sampler{};
 +  };
 +  static LastSubmit s_last;
++  const auto single_texture = [&] {
++    LastSubmit::Single t;
++    if (!plan.has_texture)
++      return t;
++    t.has = true;
++    t.address = plan.tex_address;
++    t.size = plan.tex_size;
++    t.format = plan.tex_format;
++    t.width = plan.tex_width;
++    t.height = plan.tex_height;
++    t.available = plan.tex_available;
++    t.data = plan.tex_data;
++    t.hasTlut = plan.has_tlut;
++    t.tlutAddress = plan.tlut_address;
++    t.tlutFormat = plan.tlut_format;
++    t.tlutEntries = plan.tlut_entries;
++    t.tlutData = plan.tlut_data;
++    return t;
++  };
 +  static const bool s_fastMerge = [] {
 +    const char* env = std::getenv("AURORA_GXCORE_MERGE");
 +    return env == nullptr || std::strcmp(env, "0") != 0;
@@ -4011,7 +4044,9 @@ index 71136b9..d68719b 100644
 +           (s_last.scissorCount == 0u ||
 +            std::memcmp(&plan.scissor_rects[0], &s_last.scissor, sizeof s_last.scissor) == 0) &&
 +           std::memcmp(plan.textures, s_last.textures, sizeof s_last.textures) == 0 &&
-+           std::memcmp(plan.samplers, s_last.samplers, sizeof s_last.samplers) == 0;
++           std::memcmp(plan.samplers, s_last.samplers, sizeof s_last.samplers) == 0 &&
++           single_texture() == s_last.single &&
++           std::memcmp(&plan.sampler, &s_last.sampler, sizeof s_last.sampler) == 0;
 +  };
 +  if (plan_matches_last()) {
 +    DrawData* last = get_last_draw_command<DrawData>();
@@ -4076,11 +4111,13 @@ index 71136b9..d68719b 100644
 +      s_last.scissor = plan.scissor_rects[0];
 +    std::memcpy(s_last.textures, plan.textures, sizeof s_last.textures);
 +    std::memcpy(s_last.samplers, plan.samplers, sizeof s_last.samplers);
++    s_last.single = single_texture();
++    std::memcpy(&s_last.sampler, &plan.sampler, sizeof s_last.sampler);
 +  };
  
    if (plan.viewport_valid) {
      // Raw XF viewport -> logical viewport, the raw path's own formula
-@@ -839,23 +1357,149 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -839,23 +1394,149 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      const uint32_t size = std::min(tsize, available);
      // Hash the actual source texels (+ TLUT for CI) so a content change under an
      // unchanged guest identity is a distinct cache entry — see TextureKey.
@@ -4235,7 +4272,7 @@ index 71136b9..d68719b 100644
      // gxcore owns the decode for every format: produce tightly-packed RGBA8 and
      // upload it as a pre-decoded PC texture (no substrate re-conversion).
      std::vector<uint8_t> decoded;
-@@ -868,8 +1512,33 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -868,8 +1549,33 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      } else {
        decoded = gxc::decode_texture(format, width, height, bytes, size);
      }
@@ -4270,7 +4307,7 @@ index 71136b9..d68719b 100644
        handle = new_static_texture_2d(
            width, height, 1, GX_TF_RGBA8_PC,
            ArrayRef<uint8_t>{decoded.data(), decoded.size()}, false,
-@@ -892,7 +1561,98 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -892,7 +1598,98 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    };
  
    BindGroupRef textureBindGroup = 0;
@@ -4369,7 +4406,7 @@ index 71136b9..d68719b 100644
      if (plan.texmap_mask == 0u) {
        // Single-texmap fast path: primary texture + plan.sampler at binding 0/1.
        if (plan.has_texture) {
-@@ -903,7 +1663,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -903,7 +1700,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
              plan.tlut_data, plan.tlut_available);
          if (bound) {
            const auto sampler =
@@ -4378,7 +4415,7 @@ index 71136b9..d68719b 100644
            const std::array entries{
                WGPUBindGroupEntry{.binding = 0,
                                   .textureView =
-@@ -919,6 +1679,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -919,6 +1716,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            textureBindGroup = bind_group_ref(descriptor);
          }
        }
@@ -4386,7 +4423,7 @@ index 71136b9..d68719b 100644
      } else {
        // Multi-texmap: bind each used texmap at 2t (texture) / 2t+1 (sampler),
        // matching the WGSL declarations. Per-texmap PlanSampler from
-@@ -945,14 +1706,16 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -945,14 +1743,16 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
          held.push_back(bound);
          const gxc::PlanSampler& ps =
              pt.sampler.valid ? pt.sampler : plan.samplers[t];
@@ -4405,7 +4442,7 @@ index 71136b9..d68719b 100644
        const WGPUBindGroupDescriptor descriptor{
            .label = {"GXCore Texture Bind Group", WGPU_STRLEN},
            .layout = texture_bind_group_layout(plan.texmap_mask).Get(),
-@@ -960,6 +1723,239 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -960,6 +1760,239 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            .entries = entries.data(),
        };
        textureBindGroup = bind_group_ref(descriptor);
@@ -4645,7 +4682,7 @@ index 71136b9..d68719b 100644
      }
    }
  
-@@ -969,27 +1965,13 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -969,27 +2002,13 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    const auto idxRange = push_indices(
        reinterpret_cast<const uint8_t*>(plan.indices.data()),
        plan.indices.size() * sizeof(uint16_t), 4);
@@ -4675,7 +4712,7 @@ index 71136b9..d68719b 100644
          .pixelUniformRange = pixelUniformRange,
          .indexCount = static_cast<uint32_t>(plan.indices.size()),
          .textureBindGroup = textureBindGroup,
-@@ -1006,6 +1988,8 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -1006,6 +2025,8 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      }
    } else {
      issue_draw();

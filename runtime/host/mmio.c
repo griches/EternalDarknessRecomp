@@ -570,6 +570,12 @@ static u64 mmio_read(CPUState* cpu, u32 ea, u8 size) {
 }
 
 static void mmio_write(CPUState* cpu, u32 ea, u64 value, u8 size) {
+#ifdef ED_AURORA
+    // The GX write-gather pipe takes most writes (every vertex value): go
+    // straight to it rather than search the bus for it.
+    if (ea - WGPIPE_BASE < WGPIPE_SIZE && gx_fifo_write_cb(NULL, cpu, ea, size, value))
+        return;
+#endif
     if (dol_mmio_bus_write(&g_mmio_bus, cpu, ea, size, value))
         return;
     if (g_log)

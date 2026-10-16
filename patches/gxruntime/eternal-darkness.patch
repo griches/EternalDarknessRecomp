@@ -1,5 +1,5 @@
 diff --git a/backends/aurora/aurora_backend.cpp b/backends/aurora/aurora_backend.cpp
-index d94f811..b41ff55 100644
+index d94f811..73ecc78 100644
 --- a/backends/aurora/aurora_backend.cpp
 +++ b/backends/aurora/aurora_backend.cpp
 @@ -19,9 +19,22 @@
@@ -628,7 +628,7 @@ index d94f811..b41ff55 100644
          return;
      }
      if (!g_shadow_frontend.write_fifo(fragment) ||
-@@ -842,8 +1264,969 @@ void shadow_transform_observer(
+@@ -842,8 +1264,1012 @@ void shadow_transform_observer(
      }
  }
  #endif
@@ -952,7 +952,11 @@ index d94f811..b41ff55 100644
 +// Each slot is ~14 KB and the decode thread writes every slot it fills, so a
 +// ring that outgrows the cache turns those writes into misses
 +// (DOL_GX_RING_SLOTS to experiment).
-+std::uint64_t kRingSlots = 64u;
++// 1024 (GXRuntime recomp patch; was 64): a scene of 15,000 draws a frame
++// (Eternal Darkness's nightmare) kept a 64-slot ring full, so the decoder and
++// the main thread ran in lockstep and each one's stalls stopped the other;
++// the PC held 60 fps there only with the deeper ring (17-19 ms at 64).
++std::uint64_t kRingSlots = 1024u;
 +std::unique_ptr<RenderItem[]> g_ring;
 +// Each on its own cache line: the decode thread writes the tail per draw
 +// while the others poll, and sharing a line would stall those writes.
@@ -970,6 +974,13 @@ index d94f811..b41ff55 100644
 +gxruntime::gxcore::CachedZSlope g_plan_zslope{};
 +std::uint64_t g_calls_forwarded = 0;  // decode thread
 +std::atomic<std::uint64_t> g_decode_full_ns{0};  // decode waiting on a full ring
++// Main thread (DOL_GX_TIME): time and count per item kind (draw, EFB copy,
++// present, other) since the last [gx-time] line.
++std::uint64_t g_item_ns[4] = {};
++std::uint64_t g_item_count[4] = {};
++std::uint64_t g_main_next_ns = 0;     // in ring_next (waiting for the decoder)
++std::uint64_t g_main_pre_ns = 0;      // claim, own planning, plan wait
++std::uint64_t g_main_release_ns = 0;  // ring_release
 +
 +// Plan workers: build draw plans ahead of the main thread, in parallel, each
 +// leaving what the cross-draw caches need for the main thread to finish in
@@ -1031,10 +1042,16 @@ index d94f811..b41ff55 100644
 +            g_decode_full_ns += SDL_GetTicksNS() - t0;
 +            return g_ring[tail % kRingSlots];
 +        }
++        // Asleep, wait for a quarter of the ring rather than one slot: woken
++        // for every slot freed, the decoder refilled one and slept again, a
++        // wake-up per draw (5 ms a frame of the main thread on Windows in a
++        // scene of 15,000 draws).
++        const std::uint64_t room = std::max<std::uint64_t>(1u, kRingSlots / 4u);
 +        std::unique_lock<std::mutex> lock(g_ring_mutex);
-+        g_decode_waiting.store(true);
-+        while (tail - g_ring_head.load() >= kRingSlots)
++        while (tail - g_ring_head.load() > kRingSlots - room) {
++            g_decode_waiting.store(true);
 +            g_cv_ring_decode.wait_for(lock, std::chrono::milliseconds(2));
++        }
 +        g_decode_waiting.store(false);
 +        g_decode_full_ns += SDL_GetTicksNS() - t0;
 +    }
@@ -1183,8 +1200,13 @@ index d94f811..b41ff55 100644
 +}
 +
 +void ring_release() {
-+    g_ring_head.store(g_ring_head.load(std::memory_order_relaxed) + 1u);
-+    if (g_decode_waiting.load()) {
++    const std::uint64_t head = g_ring_head.load(std::memory_order_relaxed) + 1u;
++    g_ring_head.store(head);
++    // The decoder sleeps until a quarter of the ring is free (ring_begin):
++    // wake it once then, not for every slot.
++    if (g_decode_waiting.load() &&
++        g_ring_tail.load() - head <= kRingSlots - std::max<std::uint64_t>(1u, kRingSlots / 4u) &&
++        g_decode_waiting.exchange(false)) {
 +        std::lock_guard<std::mutex> lock(g_ring_mutex);
 +        g_cv_ring_decode.notify_one();
 +    }
@@ -1381,7 +1403,9 @@ index d94f811..b41ff55 100644
 +    prefer_performance_cores();
 +#endif
 +    for (;;) {
++        const std::uint64_t t_loop0 = g_gx_time_log ? SDL_GetTicksNS() : 0u;
 +        RenderItem& item = ring_next();
++        const std::uint64_t t_loop1 = g_gx_time_log ? SDL_GetTicksNS() : 0u;
 +        const bool live = !g_should_quit.load();
 +        // Plan the draw here unless a worker got to it first; then wait for
 +        // the worker before the slot is reused.
@@ -1406,6 +1430,14 @@ index d94f811..b41ff55 100644
 +                    std::this_thread::yield();
 +            g_plan_wait_ns += SDL_GetTicksNS() - t0;
 +        }
++        // DOL_GX_TIME: the main thread's time by kind of item (draw, EFB copy,
++        // other), and how many of each, per frame.
++        const std::uint64_t t_item = g_gx_time_log ? SDL_GetTicksNS() : 0u;
++        if (g_gx_time_log) {
++            g_main_next_ns += t_loop1 - t_loop0;
++            g_main_pre_ns += t_item - t_loop1;
++        }
++        const Item kind = item.kind;
 +        switch (item.kind) {
 +        case Item::Draw:
 +            if (live) {
@@ -1468,7 +1500,18 @@ index d94f811..b41ff55 100644
 +            ring_release();
 +            return;
 +        }
++        if (g_gx_time_log) {
++            const int k = kind == Item::Draw      ? 0
++                          : kind == Item::EfbCopy ? 1
++                          : kind == Item::Present ? 2
++                                                  : 3;
++            g_item_ns[k] += SDL_GetTicksNS() - t_item;
++            ++g_item_count[k];
++        }
++        const std::uint64_t t_rel = g_gx_time_log ? SDL_GetTicksNS() : 0u;
 +        ring_release();
++        if (g_gx_time_log)
++            g_main_release_ns += SDL_GetTicksNS() - t_rel;
 +    }
 +}
 +
@@ -1598,7 +1641,7 @@ index d94f811..b41ff55 100644
  extern "C" {
  
  void aurora_backend_set_array_guest(u32 attr, u32 guest_address,
-@@ -937,7 +2320,7 @@ bool dol_aurora_initialize(int argc, char** argv,
+@@ -937,7 +2363,7 @@ bool dol_aurora_initialize(int argc, char** argv,
      g_trace_present_scope_frame = 0ull;
      g_trace_frame_begun = false;
      g_trace_frames_recorded = 0ull;
@@ -1607,7 +1650,7 @@ index d94f811..b41ff55 100644
      const char* trace_out = std::getenv("DOL_AURORA_RECOMP_TRACE_OUT");
      if (trace_out != nullptr && trace_out[0] != '\0') {
          g_trace_path = trace_out;
-@@ -1069,7 +2452,11 @@ static void flush_gxcore_gap_counters() {
+@@ -1069,7 +2495,11 @@ static void flush_gxcore_gap_counters() {
  #if GXRUNTIME_HAS_AURORA_RECOMP
      if (!g_gx_core_enabled)
          return;
@@ -1620,7 +1663,7 @@ index d94f811..b41ff55 100644
      struct {
          const char* name;
          unsigned long long value;
-@@ -1114,10 +2501,178 @@ void dol_aurora_flush_gap_report(void) {
+@@ -1114,10 +2544,178 @@ void dol_aurora_flush_gap_report(void) {
      flush_gxcore_gap_counters();
  }
  
@@ -1800,7 +1843,7 @@ index d94f811..b41ff55 100644
          aurora::gfx::efb_readback::set_continuous(true);
          aurora_request_framebuffer_readback();
      }
-@@ -1169,7 +2724,8 @@ void aurora_backend_present(void) {
+@@ -1169,7 +2767,8 @@ void aurora_backend_present(void) {
      // gxcore accumulates the frame's draws as their spans complete; the final
      // pending draw is only planned at the frame boundary. Submit it into the
      // still-open Aurora frame before end_frame flushes the command list.
@@ -1810,7 +1853,7 @@ index d94f811..b41ff55 100644
          g_core_sink.flush_frame();
      // TEMP DIAG: per-frame gxcore gap-counter deltas so a live
      // goal celebration reveals which skip reason dominates (missing_vcd /
-@@ -1201,8 +2757,11 @@ void aurora_backend_present(void) {
+@@ -1201,8 +2800,11 @@ void aurora_backend_present(void) {
          g_frame_open = false;
      }
      // Host EFB fill: push latest present-source snapshot into software backing
@@ -1824,7 +1867,7 @@ index d94f811..b41ff55 100644
          const std::uint8_t* rgba = nullptr;
          std::uint32_t w = 0;
          std::uint32_t h = 0;
-@@ -1212,6 +2771,88 @@ void aurora_backend_present(void) {
+@@ -1212,6 +2814,109 @@ void aurora_backend_present(void) {
          }
      }
      ++g_present_count;
@@ -1880,6 +1923,27 @@ index d94f811..b41ff55 100644
 +        // wait: the game thread held at the present for the main thread;
 +        // idle: the main thread waiting for the game's next commands.
 +        // plan/submit: the parts of gx in build_draw_plan / submit_draw_plan.
++        const AuroraStats* gpu_stats = aurora_get_stats();
++        std::fprintf(stderr, "[gx-items] frame=%llu draws=%llu %.2fms copies=%llu %.2fms present=%.2fms other=%llu %.2fms gpu_draws=%u merged=%u\n",
++                     g_present_count, gxq::g_item_count[0], gxq::g_item_ns[0] / 1e6,
++                     gxq::g_item_count[1], gxq::g_item_ns[1] / 1e6, gxq::g_item_ns[2] / 1e6,
++                     gxq::g_item_count[3], gxq::g_item_ns[3] / 1e6,
++                     gpu_stats != nullptr ? gpu_stats->drawCallCount : 0u,
++                     gpu_stats != nullptr ? gpu_stats->mergedDrawCallCount : 0u);
++        if (gpu_stats != nullptr)
++            std::fprintf(stderr, "[gx-upload] frame=%llu verts=%.0fKB uniforms=%.0fKB indices=%.0fKB storage=%.0fKB textures=%.0fKB\n",
++                         g_present_count, gpu_stats->lastVertSize / 1024.0,
++                         gpu_stats->lastUniformSize / 1024.0, gpu_stats->lastIndexSize / 1024.0,
++                         gpu_stats->lastStorageSize / 1024.0, gpu_stats->lastTextureUploadSize / 1024.0);
++        std::fprintf(stderr, "[gx-main] frame=%llu next=%.2fms pre=%.2fms items=%.2fms release=%.2fms\n",
++                     g_present_count, gxq::g_main_next_ns / 1e6, gxq::g_main_pre_ns / 1e6,
++                     (gxq::g_item_ns[0] + gxq::g_item_ns[1] + gxq::g_item_ns[2] + gxq::g_item_ns[3]) / 1e6,
++                     gxq::g_main_release_ns / 1e6);
++        gxq::g_main_next_ns = gxq::g_main_pre_ns = gxq::g_main_release_ns = 0;
++        for (int k = 0; k < 4; ++k) {
++            gxq::g_item_ns[k] = 0;
++            gxq::g_item_count[k] = 0;
++        }
 +        std::fprintf(stderr, "[gx-time] frame=%llu gx=%.2fms frame=%.2fms wait=%.2fms idle=%.2fms plan=%.2fms wplan=%.2fms submit=%.2fms full=%.2fms pwait=%.2fms present=%.2fms pace=%.2fms lat=%.2fms xfblocks=%llu statechg=%llu\n",
 +                     g_present_count, g_gx_time_ns / 1e6,
 +                     last_present_ns ? (now - last_present_ns) / 1e6 : 0.0,
@@ -1913,7 +1977,7 @@ index d94f811..b41ff55 100644
      if (g_frame_pacing_log &&
          (g_present_count <= 10 || (g_present_count % 60) == 0)) {
          const AuroraStats* stats = aurora_get_stats();
-@@ -1432,6 +3073,7 @@ void aurora_backend_present(void) {
+@@ -1432,6 +3137,7 @@ void aurora_backend_present(void) {
      const unsigned long long present_fifo = g_fifo_bytes;
      g_fifo_bytes = 0;
      poll_events();
@@ -1921,7 +1985,7 @@ index d94f811..b41ff55 100644
      if (!g_should_quit) {
          g_frame_open = aurora_begin_frame();
  #if GXRUNTIME_HAS_AURORA_RECOMP
-@@ -1482,7 +3124,13 @@ void aurora_backend_gx_write(u64 value, u8 size) {
+@@ -1482,7 +3188,13 @@ void aurora_backend_gx_write(u64 value, u8 size) {
          return;
      g_fifo_bytes += size;
  #if GXRUNTIME_HAS_AURORA_RECOMP
@@ -1936,7 +2000,7 @@ index d94f811..b41ff55 100644
      // Record AFTER the shadow write so MEM_UPDATEs its resolves emitted
      // precede this GX_WRITE in the trace (replay reads them first), and
      // BEFORE the live-Aurora forwarding below so the pristine value is
-@@ -1737,6 +3385,7 @@ void aurora_backend_set_xfb_black(bool black) {
+@@ -1737,6 +3449,7 @@ void aurora_backend_set_xfb_black(bool black) {
  }
  
  bool aurora_backend_pad_init(void) {
@@ -1944,7 +2008,7 @@ index d94f811..b41ff55 100644
      if (PADInit() == FALSE)
          return false;
  
-@@ -1780,6 +3429,7 @@ bool aurora_backend_pad_init(void) {
+@@ -1780,6 +3493,7 @@ bool aurora_backend_pad_init(void) {
  }
  
  u32 aurora_backend_pad_read(DolPadState state[4]) {
@@ -1952,7 +2016,7 @@ index d94f811..b41ff55 100644
      PADStatus status[4]{};
      const u32 motor_mask = PADRead(status);
      for (u32 i = 0; i < 4; i++) {
-@@ -1796,22 +3446,41 @@ u32 aurora_backend_pad_read(DolPadState state[4]) {
+@@ -1796,22 +3510,41 @@ u32 aurora_backend_pad_read(DolPadState state[4]) {
              .error = status[i].err,
          };
      }
@@ -1994,7 +2058,7 @@ index d94f811..b41ff55 100644
      PADSetSpec(spec);
  }
  
-@@ -1841,13 +3510,16 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1841,13 +3574,16 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
          return;
      const int bytes_per_second =
          static_cast<int>(g_audio_sample_rate) * 2 * static_cast<int>(sizeof(s16));
@@ -2013,7 +2077,7 @@ index d94f811..b41ff55 100644
      while (queued > max_queued_bytes && waited_ms < 20u) {
          g_audio_throttle_count++;
          if (g_audio_queue_log &&
-@@ -1860,11 +3532,51 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1860,11 +3596,51 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
                           max_queued_bytes);
          SDL_Delay(1);
          waited_ms++;
@@ -2065,7 +2129,7 @@ index d94f811..b41ff55 100644
      if (g_audio_queue_log &&
          (g_audio_push_count <= 16 || (g_audio_push_count % 4000) == 0 ||
           (low_queue && g_audio_push_count - g_audio_low_log_push >= 4000))) {
-@@ -1876,6 +3588,21 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1876,6 +3652,21 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
                       g_audio_push_count, queued, queued + bytes,
                       g_audio_playing ? 1u : 0u, g_audio_throttle_count);
      }
@@ -2087,7 +2151,7 @@ index d94f811..b41ff55 100644
      if (!SDL_PutAudioStreamData(g_audio_stream, samples, bytes))
          std::fprintf(stderr, "[audio] failed to queue samples: %s\n", SDL_GetError());
      else if (!g_audio_playing && queued + bytes >= prebuffer_bytes) {
-@@ -1886,10 +3613,377 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1886,10 +3677,377 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
      }
  }
  
@@ -2465,7 +2529,7 @@ index d94f811..b41ff55 100644
      const DolPlatformOps ops = {
          .should_quit = aurora_backend_should_quit,
          .present = aurora_backend_present,
-@@ -1918,6 +4012,7 @@ void install_platform_ops() {
+@@ -1918,6 +4076,7 @@ void install_platform_ops() {
          .audio_set_sample_rate = aurora_backend_audio_set_sample_rate,
          .audio_push = aurora_backend_audio_push,
      };
@@ -2504,10 +2568,11 @@ index a13ce39..8cc350b 100644
  
  void aurora_enable_vsync(bool enabled);
 diff --git a/graphics/aurora/lib/aurora.cpp b/graphics/aurora/lib/aurora.cpp
-index b09ef4d..3c1eba9 100644
+index b09ef4d..618f4bc 100644
 --- a/graphics/aurora/lib/aurora.cpp
 +++ b/graphics/aurora/lib/aurora.cpp
-@@ -1,5 +1,14 @@
+@@ -1,5 +1,15 @@
++#include <chrono>
 +#include <algorithm>
 +#include <vector>
 +#include <thread>
@@ -2522,7 +2587,7 @@ index b09ef4d..3c1eba9 100644
  #ifdef AURORA_ENABLE_GX
  #include "gfx/common.hpp"
  #include "gfx/render_worker.hpp"
-@@ -41,6 +50,231 @@ using webgpu::g_device;
+@@ -41,6 +51,231 @@ using webgpu::g_device;
  using webgpu::g_queue;
  using webgpu::g_surface;
  
@@ -2754,7 +2819,7 @@ index b09ef4d..3c1eba9 100644
  uint32_t clamp_scissor_coord(double value, uint32_t maximum) noexcept {
    if (!std::isfinite(value)) {
      return 0;
-@@ -258,9 +492,31 @@ void end_frame() noexcept {
+@@ -258,9 +493,31 @@ void end_frame() noexcept {
    // E7 present-from-XFB: VI current → GPU Virtual-XFB, else YUYV-from-RAM
    // decode, else EFB-direct (Strikers when no RAM XFB / match fails).
    const std::uint32_t xfbAddr = vi::xfb_black() ? 0u : vi::current_xfb();
@@ -2787,7 +2852,7 @@ index b09ef4d..3c1eba9 100644
    const uint32_t contentW =
        xfbTex && *xfbTex ? (*xfbTex)->size.width : efbSource.size.width;
    const uint32_t contentH =
-@@ -282,8 +538,9 @@ void end_frame() noexcept {
+@@ -282,8 +539,9 @@ void end_frame() noexcept {
    // Capture XFB handle by value for the worker lambda (shared_ptr).
    gfx::TextureHandle xfbHandle = (xfbTex && *xfbTex) ? *xfbTex : nullptr;
  
@@ -2798,7 +2863,7 @@ index b09ef4d..3c1eba9 100644
                    xfbHandle = std::move(xfbHandle)](wgpu::CommandEncoder& encoder) {
      wgpu::Texture currentTexture;
      wgpu::TextureView currentView;
-@@ -373,6 +630,22 @@ void end_frame() noexcept {
+@@ -373,6 +631,22 @@ void end_frame() noexcept {
      } else {
        Log.info("Skipping present; window not presentable");
      }
@@ -2821,16 +2886,47 @@ index b09ef4d..3c1eba9 100644
      webgpu::gpu_prof::frame_end(encoder);
      const wgpu::CommandBufferDescriptor cmdBufDescriptor{.label = "Redraw command buffer"};
      const auto buffer = encoder.Finish(&cmdBufDescriptor);
-@@ -380,6 +653,8 @@ void end_frame() noexcept {
+@@ -380,6 +654,39 @@ void end_frame() noexcept {
        ZoneScopedN("Queue Submit");
        g_queue.Submit(1, &buffer);
      }
 +    frame_dump::map(dumpSlot);
 +    xfb_ram::map(xfbRamSlot);
++    // GXRuntime recomp patch: AURORA_GPU_TIME_LOG, once a second: how long the
++    // GPU took to finish each frame after its submit, and the gap between
++    // frames finishing (the GPU's pace when it is the bottleneck).
++    {
++      static const bool log = std::getenv("AURORA_GPU_TIME_LOG") != nullptr;
++      if (log) {
++        const auto submitted = std::chrono::steady_clock::now();
++        g_queue.OnSubmittedWorkDone(wgpu::CallbackMode::AllowSpontaneous,
++                                    [submitted](wgpu::QueueWorkDoneStatus, wgpu::StringView) {
++                                      static double latSum = 0.0, gapSum = 0.0, latWorst = 0.0;
++                                      static unsigned n = 0;
++                                      static std::chrono::steady_clock::time_point lastDone{};
++                                      const auto done = std::chrono::steady_clock::now();
++                                      const double lat =
++                                          std::chrono::duration<double, std::milli>(done - submitted).count();
++                                      latSum += lat;
++                                      latWorst = std::max(latWorst, lat);
++                                      if (lastDone.time_since_epoch().count() != 0)
++                                        gapSum += std::chrono::duration<double, std::milli>(done - lastDone).count();
++                                      lastDone = done;
++                                      if (++n == 60) {
++                                        std::fprintf(stderr,
++                                                     "[gpu-time] submit-to-done=%.2fms worst=%.2fms "
++                                                     "done-to-done=%.2fms\n",
++                                                     latSum / n, latWorst, gapSum / n);
++                                        latSum = gapSum = latWorst = 0.0;
++                                        n = 0;
++                                      }
++                                    });
++      }
++    }
      webgpu::gpu_prof::after_submit();
      if (canPresent && g_surface) {
        ZoneScopedN("Present");
-@@ -478,3 +753,17 @@ void aurora_set_resampler(AuroraSampler sampler) {
+@@ -478,3 +785,17 @@ void aurora_set_resampler(AuroraSampler sampler) {
  void aurora_set_efb_fixed_size(uint32_t width, uint32_t height) {
    aurora::window::set_fixed_efb_size(width, height);
  }
@@ -2848,6 +2944,37 @@ index b09ef4d..3c1eba9 100644
 +    }
 +  }
 +}
+diff --git a/graphics/aurora/lib/gfx/common.cpp b/graphics/aurora/lib/gfx/common.cpp
+index a64dd2d..6e67988 100644
+--- a/graphics/aurora/lib/gfx/common.cpp
++++ b/graphics/aurora/lib/gfx/common.cpp
+@@ -652,6 +652,26 @@ gx::DrawData* get_last_draw_command() {
+   return &last.data.draw.gx;
+ }
+ 
++#ifdef AURORA_ENABLE_GXCORE
++// GXRuntime recomp patch: the draw a gxcore draw may merge into (the current
++// render pass's last command, when that is a gxcore draw).
++template <>
++gxcore::DrawData* get_last_draw_command() {
++  if (g_currentRenderPass >= current_render_passes().size()) {
++    return nullptr;
++  }
++  auto& commands = current_render_passes()[g_currentRenderPass].commands;
++  if (commands.empty()) {
++    return nullptr;
++  }
++  auto& last = commands.back();
++  if (last.type != CommandType::Draw || last.data.draw.type != ShaderType::GXCore) {
++    return nullptr;
++  }
++  return &last.data.draw.gxcore;
++}
++#endif
++
+ static void push_draw_command(ShaderDrawCommand data) {
+   push_command(CommandType::Draw, Command::Data{.draw = data});
+   ++g_drawCallCount;
 diff --git a/graphics/aurora/lib/gfx/efb_readback.cpp b/graphics/aurora/lib/gfx/efb_readback.cpp
 index 7af8fca..4c14e34 100644
 --- a/graphics/aurora/lib/gfx/efb_readback.cpp
@@ -2886,7 +3013,7 @@ index 7af8fca..4c14e34 100644
      g_requested.store(false, std::memory_order_release);
    else
 diff --git a/graphics/aurora/lib/gfx/gxcore_draw.cpp b/graphics/aurora/lib/gfx/gxcore_draw.cpp
-index 71136b9..5f53eea 100644
+index 71136b9..fda6a30 100644
 --- a/graphics/aurora/lib/gfx/gxcore_draw.cpp
 +++ b/graphics/aurora/lib/gfx/gxcore_draw.cpp
 @@ -1,4 +1,5 @@
@@ -3752,21 +3879,14 @@ index 71136b9..5f53eea 100644
        const WGPUBindGroupDescriptor descriptor{
            .label = {"GXCore Texture Bind Group", WGPU_STRLEN},
            .layout = texture_bind_group_layout(plan.texmap_mask).Get(),
-@@ -960,6 +1442,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -960,6 +1442,237 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            .entries = entries.data(),
        };
        textureBindGroup = bind_group_ref(descriptor);
 +      remember(textureBindGroup, true);
-     }
-   }
- 
-@@ -969,27 +1452,125 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
-   const auto idxRange = push_indices(
-       reinterpret_cast<const uint8_t*>(plan.indices.data()),
-       plan.indices.size() * sizeof(uint16_t), 4);
--  const auto uniformRange = push_uniform(
--      reinterpret_cast<const uint8_t*>(&plan.constants),
--      sizeof(plan.constants));
++    }
++  }
++
 +  // Consecutive draws usually carry identical constants (several KB of
 +  // matrices and lights): reuse the previous upload within the same frame.
 +  // With a planner's fingerprint (hash != 0) the repeat check compares
@@ -3841,12 +3961,9 @@ index 71136b9..5f53eea 100644
 +    }
 +    sharedUniformRange = up.range;
 +  }
-   const bool tev = plan.pipeline.shader.tev_valid != 0;
-   Range pixelUniformRange{};
-   if (tev) {
--    pixelUniformRange = push_uniform(
--        reinterpret_cast<const uint8_t*>(&plan.pixel_constants),
--        sizeof(plan.pixel_constants));
++  const bool tev = plan.pipeline.shader.tev_valid != 0;
++  Range pixelUniformRange{};
++  if (tev) {
 +    pixelUniformRange = push_uniform_memo(
 +        s_pixelUniforms, &plan.pixel_constants, sizeof(plan.pixel_constants),
 +        plan.pixel_constants_hash);
@@ -3879,9 +3996,142 @@ index 71136b9..5f53eea 100644
 +    s_lastPipelineConfig = pipelineConfig;
 +    s_lastPipelineHash = pipelineHash;
 +    s_havePipeline = true;
-   }
++  }
 +  const PipelineRef pipeline = s_lastPipeline;
++
++  // GXRuntime recomp patch: a draw identical to the previous one in all but
++  // its vertices (same pipeline, constants, textures, viewport and scissor,
++  // nothing recorded in between) joins it as one GPU draw. Games often draw
++  // one triangle at a time (Eternal Darkness's nightmare: 10,000 of its
++  // 15,000 draws a frame are single triangles in a few states), and each GPU
++  // draw costs the main thread, the render worker and the driver. Order is
++  // kept: a draw's triangles are rasterized in order. AURORA_GXCORE_MERGE=0
++  // keeps every draw separate.
++  static const bool s_merge = [] {
++    const char* env = std::getenv("AURORA_GXCORE_MERGE");
++    return env == nullptr || std::strcmp(env, "0") != 0;
++  }();
++  if (scissor_count <= 1u && s_merge) {
++    DrawData* last = get_last_draw_command<DrawData>();
++    const uint32_t base = last != nullptr ? last->vertRange.size / gxc::kVertexStrideBytes : 0u;
++    // AURORA_GXCORE_MERGE_LOG: why draws did not merge, per frame.
++    static const bool s_mergeLog = std::getenv("AURORA_GXCORE_MERGE_LOG") != nullptr;
++    if (s_mergeLog) {
++      static uint32_t s_frame = UINT32_MAX;
++      static uint32_t s_why[9];
++      if (s_frame != current_frame()) {
++        if (s_frame != UINT32_MAX && s_frame % 60u == 0u)
++          std::fprintf(stderr,
++                       "[merge] frame=%u no-last=%u pipeline=%u tev=%u textures=%u vs=%u shared=%u ps=%u size=%u ok=%u\n",
++                       s_frame, s_why[0], s_why[1], s_why[2], s_why[3], s_why[4], s_why[5], s_why[6],
++                       s_why[7], s_why[8]);
++        std::fill(std::begin(s_why), std::end(s_why), 0u);
++        s_frame = current_frame();
++      }
++      const int why = last == nullptr                                    ? 0
++                      : last->pipeline != pipeline                       ? 1
++                      : last->tev != tev                                 ? 2
++                      : last->textureBindGroup != textureBindGroup       ? 3
++                      : last->uniformRange.offset != uniformRange.offset ? 4
++                      : last->sharedUniformRange.offset != sharedUniformRange.offset ? 5
++                      : tev && last->pixelUniformRange.offset != pixelUniformRange.offset ? 6
++                      : base + plan.vertex_count > 0xFFFFu               ? 7
++                                                                         : 8;
++      ++s_why[why];
++      // Which part of the vertex constants changed from the previous draw.
++      static gxc::VertexShaderConstants s_prev{};
++      static uint32_t s_field[7];
++      static uint32_t s_fieldFrame = UINT32_MAX;
++      if (s_fieldFrame != current_frame()) {
++        if (s_fieldFrame != UINT32_MAX && s_fieldFrame % 60u == 0u)
++          std::fprintf(stderr, "[merge] vs fields: posnormal=%u projection=%u texmtx=%u materials=%u cached=%u pcc=%u viewport=%u\n",
++                       s_field[0], s_field[1], s_field[2], s_field[3], s_field[4], s_field[5], s_field[6]);
++        std::fill(std::begin(s_field), std::end(s_field), 0u);
++        s_fieldFrame = current_frame();
++      }
++      if (why == 4) {
++        const auto& c = plan.constants;
++        if (std::memcmp(c.posnormalmatrix, s_prev.posnormalmatrix, sizeof c.posnormalmatrix)) ++s_field[0];
++        if (std::memcmp(c.projection, s_prev.projection, sizeof c.projection)) ++s_field[1];
++        if (std::memcmp(c.texmatrices, s_prev.texmatrices, sizeof c.texmatrices)) ++s_field[2];
++        if (std::memcmp(c.materials, s_prev.materials, sizeof c.materials)) ++s_field[3];
++        if (std::memcmp(c.cached_normal, s_prev.cached_normal, sizeof c.cached_normal * 3)) ++s_field[4];
++        if (std::memcmp(c.pixelcentercorrection, s_prev.pixelcentercorrection, sizeof c.pixelcentercorrection)) ++s_field[5];
++        if (std::memcmp(c.viewport_size, s_prev.viewport_size, sizeof c.viewport_size)) ++s_field[6];
++      }
++      s_prev = plan.constants;
++    }
++    if (last != nullptr && last->pipeline == pipeline && last->tev == tev &&
++        last->textureBindGroup == textureBindGroup &&
++        last->uniformRange.offset == uniformRange.offset &&
++        last->sharedUniformRange.offset == sharedUniformRange.offset &&
++        (!tev || last->pixelUniformRange.offset == pixelUniformRange.offset) &&
++        last->vertRange.size % gxc::kVertexStrideBytes == 0u &&
++        base + plan.vertex_count <= 0xFFFFu) {
++      const auto moreVerts = push_verts(reinterpret_cast<const uint8_t*>(plan.vertices.data()),
++                                        plan.vertices.size() * sizeof(float), 4);
++      if (moreVerts.offset == last->vertRange.offset + last->vertRange.size) {
++        static std::vector<uint16_t> s_rebased;
++        s_rebased.resize(plan.indices.size());
++        for (size_t i = 0; i < plan.indices.size(); ++i)
++          s_rebased[i] = static_cast<uint16_t>(plan.indices[i] + base);
++        // 2-byte aligned: right after the previous draw's indices.
++        const auto moreIdx = push_indices(reinterpret_cast<const uint8_t*>(s_rebased.data()),
++                                          s_rebased.size() * sizeof(uint16_t), 2);
++        if (moreIdx.offset == last->idxRange.offset + last->idxRange.size) {
++          last->vertRange.size += moreVerts.size;
++          last->idxRange.size += moreIdx.size;
++          last->indexCount += static_cast<uint32_t>(plan.indices.size());
++          ++g_mergedDrawCallCount;
++          return true;
++        }
++        // Not contiguous after all: draw these indices on their own.
++        push_draw_command(DrawData{
++            .pipeline = pipeline,
++            .vertRange = moreVerts,
++            .idxRange = push_indices(reinterpret_cast<const uint8_t*>(plan.indices.data()),
++                                     plan.indices.size() * sizeof(uint16_t), 4),
++            .uniformRange = uniformRange,
++            .sharedUniformRange = sharedUniformRange,
++            .pixelUniformRange = pixelUniformRange,
++            .indexCount = static_cast<uint32_t>(plan.indices.size()),
++            .textureBindGroup = textureBindGroup,
++            .tev = tev,
++        });
++        return true;
++      }
++      // Vertices landed elsewhere: draw them on their own.
++      push_draw_command(DrawData{
++          .pipeline = pipeline,
++          .vertRange = moreVerts,
++          .idxRange = push_indices(reinterpret_cast<const uint8_t*>(plan.indices.data()),
++                                   plan.indices.size() * sizeof(uint16_t), 4),
++          .uniformRange = uniformRange,
++          .sharedUniformRange = sharedUniformRange,
++          .pixelUniformRange = pixelUniformRange,
++          .indexCount = static_cast<uint32_t>(plan.indices.size()),
++          .textureBindGroup = textureBindGroup,
++          .tev = tev,
++      });
++      return true;
+     }
+   }
  
+@@ -969,27 +1682,13 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+   const auto idxRange = push_indices(
+       reinterpret_cast<const uint8_t*>(plan.indices.data()),
+       plan.indices.size() * sizeof(uint16_t), 4);
+-  const auto uniformRange = push_uniform(
+-      reinterpret_cast<const uint8_t*>(&plan.constants),
+-      sizeof(plan.constants));
+-  const bool tev = plan.pipeline.shader.tev_valid != 0;
+-  Range pixelUniformRange{};
+-  if (tev) {
+-    pixelUniformRange = push_uniform(
+-        reinterpret_cast<const uint8_t*>(&plan.pixel_constants),
+-        sizeof(plan.pixel_constants));
+-  }
+-
    auto issue_draw = [&]() {
      push_draw_command(DrawData{
 -        .pipeline = pipeline_ref(PipelineConfig{
@@ -4162,7 +4412,7 @@ index b205cfa..72d0351 100644
  
  } // namespace aurora::gfx::gxcore
 diff --git a/graphics/aurora/lib/webgpu/gpu.cpp b/graphics/aurora/lib/webgpu/gpu.cpp
-index 7aff76e..b9f2693 100644
+index 7aff76e..7c19543 100644
 --- a/graphics/aurora/lib/webgpu/gpu.cpp
 +++ b/graphics/aurora/lib/webgpu/gpu.cpp
 @@ -1,3 +1,4 @@
@@ -4170,7 +4420,19 @@ index 7aff76e..b9f2693 100644
  #include "gpu.hpp"
  
  #include <algorithm>
-@@ -1051,7 +1052,11 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+@@ -932,6 +933,11 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+       if (feature == wgpu::FeatureName::TimestampQuery) {
+         requiredFeatures.push_back(feature);
+       }
++#else
++      // GXRuntime recomp patch: AURORA_GPU_TIME_LOG times each pass (gpu_prof).
++      if (feature == wgpu::FeatureName::TimestampQuery && std::getenv("AURORA_GPU_TIME_LOG") != nullptr) {
++        requiredFeatures.push_back(feature);
++      }
+ #endif
+     }
+     // Stash for GraphicsConfig fill after device create (device request below).
+@@ -1051,7 +1057,11 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
        .surfaceConfiguration =
            wgpu::SurfaceConfiguration{
                .format = surfaceFormat,
@@ -4183,6 +4445,124 @@ index 7aff76e..b9f2693 100644
                .width = size.native_fb_width,
                .height = size.native_fb_height,
                .presentMode = presentMode,
+diff --git a/graphics/aurora/lib/webgpu/gpu_prof.cpp b/graphics/aurora/lib/webgpu/gpu_prof.cpp
+index c8c9549..6c5eab0 100644
+--- a/graphics/aurora/lib/webgpu/gpu_prof.cpp
++++ b/graphics/aurora/lib/webgpu/gpu_prof.cpp
+@@ -5,9 +5,13 @@
+ 
+ #include <tracy/Tracy.hpp>
+ 
++// GXRuntime recomp patch: the profiler also runs without Tracy when
++// AURORA_GPU_TIME_LOG is set, logging each pass's GPU time once a second.
+ #ifdef TRACY_ENABLE
+-
+ #include <tracy/TracyC.h>
++#endif
++#include <cstdio>
++#include <cstdlib>
+ 
+ #include <algorithm>
+ #include <array>
+@@ -107,6 +111,40 @@ const char* intern_name(std::string_view name) {
+   return stable;
+ }
+ 
++#ifndef TRACY_ENABLE
++// Without Tracy: zone times summed by name, printed every 60 frames.
++std::vector<std::pair<const char*, uint64_t>> g_aggStack;
++std::vector<std::pair<const char*, double>> g_aggTotals;
++unsigned g_aggFrames = 0;
++void emit_context(const struct Slot&, uint64_t) {}
++void emit_zone_begin(const char* name, uint64_t gpuNs) { g_aggStack.emplace_back(name, gpuNs); }
++void emit_zone_end(uint64_t gpuNs) {
++  if (g_aggStack.empty())
++    return;
++  const auto [name, begin] = g_aggStack.back();
++  g_aggStack.pop_back();
++  const double ms = gpuNs > begin ? double(gpuNs - begin) * 1e-6 : 0.0;
++  for (auto& [n, total] : g_aggTotals)
++    if (n == name) {
++      total += ms;
++      return;
++    }
++  g_aggTotals.emplace_back(name, ms);
++}
++void emit_frame_summary() {
++  if (++g_aggFrames < 60)
++    return;
++  std::sort(g_aggTotals.begin(), g_aggTotals.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
++  std::string line;
++  for (size_t i = 0; i < g_aggTotals.size() && i < 10; ++i)
++    line += fmt::format(" {}={:.2f}", g_aggTotals[i].first, g_aggTotals[i].second / g_aggFrames);
++  std::fprintf(stderr, "[gpu-pass] ms/frame:%s\n", line.c_str());
++  g_aggTotals.clear();
++  g_aggFrames = 0;
++}
++#endif
++
++#ifdef TRACY_ENABLE
+ // tracy::GpuContextType not exposed through TracyC.h
+ uint8_t tracy_context_type(wgpu::BackendType backend) {
+   switch (backend) {
+@@ -161,6 +199,7 @@ void emit_zone_end(uint64_t gpuNs) {
+   ___tracy_emit_gpu_zone_end_serial({.queryId = queryId, .context = ContextId});
+   ___tracy_emit_gpu_time_serial({.gpuTime = int64_t(gpuNs), .queryId = queryId, .context = ContextId});
+ }
++#endif
+ 
+ TimestampBounds event_bounds(const Slot& slot, const uint64_t* ts) {
+   TimestampBounds bounds;
+@@ -214,9 +253,11 @@ void emit_frame(Slot& slot) {
+     }
+   }
+ 
++#ifdef TRACY_ENABLE
+   if (!TracyIsConnected) {
+     return;
+   }
++#endif
+ 
+   if (!g_contextEmitted) {
+     if (lastFrameEnd == 0) {
+@@ -277,6 +318,9 @@ void emit_frame(Slot& slot) {
+   TracyPlot("aurora: gpuFrameMs", double(frameEnd - frameBegin) * 1e-6);
+   TracyPlot("aurora: gpuIdleMs", double(idleNs) * 1e-6);
+   TracyPlot("aurora: gpuPasses", int64_t(slot.passCount));
++#ifndef TRACY_ENABLE
++  emit_frame_summary();
++#endif
+ }
+ 
+ Slot& record_slot() { return g_slots[g_recordSlot]; }
+@@ -291,6 +335,9 @@ uint32_t alloc_zone() {
+ 
+ void initialize() {
+   g_enabled = g_device.HasFeature(wgpu::FeatureName::TimestampQuery);
++#ifndef TRACY_ENABLE
++  g_enabled = g_enabled && std::getenv("AURORA_GPU_TIME_LOG") != nullptr;
++#endif
+   if (!g_enabled) {
+     Log.info("Timestamp queries unsupported; GPU profiling disabled");
+     return;
+@@ -458,17 +505,4 @@ Zone::~Zone() {
+ 
+ } // namespace aurora::webgpu::gpu_prof
+ 
+-#else
+ 
+-namespace aurora::webgpu::gpu_prof {
+-void initialize() {}
+-void shutdown() {}
+-void frame_begin(const wgpu::CommandEncoder&) {}
+-void frame_end(const wgpu::CommandEncoder&) {}
+-void after_submit() {}
+-const wgpu::PassTimestampWrites* pass_writes(std::string_view) { return nullptr; }
+-Zone::Zone(const wgpu::CommandEncoder&, std::string_view) {}
+-Zone::~Zone() = default;
+-} // namespace aurora::webgpu::gpu_prof
+-
+-#endif
 diff --git a/graphics/aurora/lib/window.cpp b/graphics/aurora/lib/window.cpp
 index 74864c3..b3edc87 100644
 --- a/graphics/aurora/lib/window.cpp
@@ -5918,7 +6298,7 @@ index 4d14391..c141b7d 100644
  };
  
 diff --git a/graphics/gxcore/include/gxruntime/gxcore/shader.hpp b/graphics/gxcore/include/gxruntime/gxcore/shader.hpp
-index b9bfd5d..b6d834f 100644
+index b9bfd5d..091bfb6 100644
 --- a/graphics/gxcore/include/gxruntime/gxcore/shader.hpp
 +++ b/graphics/gxcore/include/gxruntime/gxcore/shader.hpp
 @@ -12,6 +12,10 @@
@@ -6091,6 +6471,16 @@ index b9bfd5d..b6d834f 100644
  
  // --- EFB copy-to-texture (S16) ------------------------------------------------
  
+@@ -838,6 +883,9 @@ struct EfbCopyFilterUniforms {
+ // reversed-Z (graphics/aurora lib/gx/gx.hpp UseReversedZ); bind groups are
+ // group(1)=dynamic uniform, group(2)=texture+sampler.
+ std::string generate_wgsl(const ShaderKey& key);
++// The cached vertex attributes (VertexShaderConstants cached_*) the shader for
++// key reads: bit 0 normal, 1 tangent, 2 binormal (GXRuntime recomp patch).
++std::uint32_t cached_attrs_read(const ShaderKey& key);
+ 
+ // U8: EFB copy 7-tap vertical filter + gamma + intensity (TextureConverter
+ // ShaderGen). Separate module from draw shaders; group(0) = samp + tex + UBO.
 diff --git a/graphics/gxcore/include/gxruntime/gxcore/texture_decode.hpp b/graphics/gxcore/include/gxruntime/gxcore/texture_decode.hpp
 index bc926a1..d626cc7 100644
 --- a/graphics/gxcore/include/gxruntime/gxcore/texture_decode.hpp
@@ -6465,7 +6855,7 @@ index 2584cb9..c1bf0b0 100644
    }
    emit(out, "        }\n");
 diff --git a/graphics/gxcore/src/plan.cpp b/graphics/gxcore/src/plan.cpp
-index c3d1557..c6a7552 100644
+index c3d1557..505ef3f 100644
 --- a/graphics/gxcore/src/plan.cpp
 +++ b/graphics/gxcore/src/plan.cpp
 @@ -3,8 +3,11 @@
@@ -6919,7 +7309,23 @@ index c3d1557..c6a7552 100644
      // U2: decode sampler state for every used texmap from TX_SETMODE0/1.
      // Count sampler_defaulted when mode0 was never written for a live texmap
      // (plan falls back to BP-zero defaults: clamp/near/no-mip).
-@@ -1498,6 +1574,20 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1479,10 +1555,12 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+   // object-space value (Dolphin writes the cache on the loader's m_remaining==0
+   // vertex). N/B/T are appended in the fixed vertex layout at these float slots.
+   if (cached != nullptr) {
++    // Only what the shader reads (cached_attrs_read): the rest stays zero.
++    const std::uint32_t reads = cached_attrs_read(plan.pipeline.shader);
+     for (std::uint32_t k = 0; k < 3u; ++k) {
+-      c.cached_normal[k] = cached->normal[k];
+-      c.cached_tangent[k] = cached->tangent[k];
+-      c.cached_binormal[k] = cached->binormal[k];
++      c.cached_normal[k] = (reads & 1u) != 0u ? cached->normal[k] : 0.f;
++      c.cached_tangent[k] = (reads & 2u) != 0u ? cached->tangent[k] : 0.f;
++      c.cached_binormal[k] = (reads & 4u) != 0u ? cached->binormal[k] : 0.f;
+     }
+     if (plan.vertex_count > 0u) {
+       const float* last =
+@@ -1498,6 +1576,20 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
          }
        }
      }
@@ -6940,7 +7346,7 @@ index c3d1557..c6a7552 100644
    }
  
    // U6: CPU-side line/point expansion into triangle lists (WebGPU has no
-@@ -1509,7 +1599,7 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1509,7 +1601,7 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
      decode_lp_size(bp_valid_[0x22] ? bp_regs_[0x22] : 0u, bp_valid_[0x22],
                     bp_regs_, bp_valid_, key.num_tex_gens, &lp);
      const bool use_pn = key.has_pos_mtx_idx == 0u;
@@ -6949,7 +7355,7 @@ index c3d1557..c6a7552 100644
                                 plan.viewport_valid, key.num_tex_gens,
                                 plan.texcoords, &plan.vertices,
                                 &plan.vertex_count, &plan.indices) ||
-@@ -1559,7 +1649,7 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1559,7 +1651,7 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
          std::uint32_t pos_row = 0;
          std::memcpy(&pos_row, v + 3, sizeof pos_row);
          const bool use_pn = key.has_pos_mtx_idx == 0u;
@@ -6958,7 +7364,7 @@ index c3d1557..c6a7552 100644
                              view_off_y, screen + 3 * k);
        }
        float dfdx = 0.f, dfdy = 0.f, f0 = 0.f;
-@@ -1584,6 +1674,8 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1584,6 +1676,8 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
          plan.pixel_constants.zslope[3] = 0.f;
          plan.pixel_constants.efbscale[0] = 1.f;
          plan.pixel_constants.efbscale[1] = 1.f;
@@ -6967,7 +7373,7 @@ index c3d1557..c6a7552 100644
        } else {
          ++counters.zfreeze_ignored;
          // Can't emit plane depth without a slope — drop per_pixel_depth so
-@@ -1594,6 +1686,14 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1594,6 +1688,14 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
      } else if (zslope != nullptr) {
        // Always recompute on non-frozen draws (Dolphin CalculateZSlope path).
        (void)capture_slope(zslope);
@@ -6982,7 +7388,7 @@ index c3d1557..c6a7552 100644
      }
    }
  
-@@ -1614,7 +1714,70 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1614,7 +1716,72 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
  
    plan.ok = true;
    ++counters.draws_planned;
@@ -7014,10 +7420,12 @@ index c3d1557..c6a7552 100644
 +  const PlanCrossDraw& x = plan.cross;
 +  if (x.recorded) {
 +    VertexShaderConstants& c = plan.constants;
++    // Only what the shader reads (cached_attrs_read): the rest stays zero.
++    const std::uint32_t reads = cached_attrs_read(plan.pipeline.shader);
 +    for (std::uint32_t k = 0; k < 3u; ++k) {
-+      c.cached_normal[k] = cached.normal[k];
-+      c.cached_tangent[k] = cached.tangent[k];
-+      c.cached_binormal[k] = cached.binormal[k];
++      c.cached_normal[k] = (reads & 1u) != 0u ? cached.normal[k] : 0.f;
++      c.cached_tangent[k] = (reads & 2u) != 0u ? cached.tangent[k] : 0.f;
++      c.cached_binormal[k] = (reads & 4u) != 0u ? cached.binormal[k] : 0.f;
 +    }
 +    if (x.has_normal)
 +      for (std::uint32_t k = 0; k < 3u; ++k)
@@ -7217,10 +7625,48 @@ index 2c074d7..bc31d92 100644
    // U5/U8: emit zCoord before fog when per_pixel_depth or ztex-for-fog so
    // fog reuses it (Dolphin order). Fog alone still owns the classic body.
 diff --git a/graphics/gxcore/src/wgsl.cpp b/graphics/gxcore/src/wgsl.cpp
-index bbefbee..4b38f7b 100644
+index bbefbee..8d581a9 100644
 --- a/graphics/gxcore/src/wgsl.cpp
 +++ b/graphics/gxcore/src/wgsl.cpp
-@@ -45,6 +45,11 @@ std::string generate_wgsl(const ShaderKey& key) {
+@@ -13,6 +13,37 @@
+ 
+ namespace gxruntime::gxcore {
+ 
++// GXRuntime recomp patch: the cached vertex attributes the shader for key
++// reads (bit 0 normal, 1 tangent, 2 binormal), by the same rules as the
++// shader below. A draw that reads none must not carry them in its
++// constants: they change with every draw (the last vertex of the one
++// before), which kept identical draws from sharing constants or merging.
++std::uint32_t cached_attrs_read(const ShaderKey& key) {
++  const bool tev = key.tev_valid != 0;
++  const bool lit = key.lit_valid != 0;
++  bool needs_color1 = false;
++  bool has_emboss = false;
++  for (std::uint32_t i = 0; i < key.num_tex_gens; ++i) {
++    const auto t = static_cast<TexGenType>(key.tex_gens[i].texgentype);
++    if (t == TexGenType::Color1)
++      needs_color1 = true;
++    else if (t == TexGenType::EmbossMap)
++      has_emboss = true;
++  }
++  const bool emit_color1 = tev || needs_color1;
++  const bool chan0_lit = channel_lit_path(key, 0u);
++  const bool chan1_lit = emit_color1 && channel_lit_path(key, 1u);
++  std::uint32_t bits = 0;
++  if ((((chan0_lit || chan1_lit) && lit) || texgen_reads_row(key, TexSourceRow::Normal)) &&
++      key.has_vertex_normal == 0)
++    bits |= 1u;
++  if ((has_emboss || texgen_reads_row(key, TexSourceRow::BinormalT)) && key.has_vertex_tangent == 0)
++    bits |= 2u;
++  if ((has_emboss || texgen_reads_row(key, TexSourceRow::BinormalB)) && key.has_vertex_binormal == 0)
++    bits |= 4u;
++  return bits;
++}
++
+ std::string generate_wgsl(const ShaderKey& key) {
+   std::string out;
+   out.reserve(4096);
+@@ -45,6 +76,11 @@ std::string generate_wgsl(const ShaderKey& key) {
    // the NBT binormal/tangent vertex attrs must be present even on an unlit draw.
    const bool emit_lights = lit || has_emboss;
    const bool emit_nbt = has_emboss; // binormal/tangent vertex inputs required
@@ -7232,7 +7678,7 @@ index bbefbee..4b38f7b 100644
    // color1 occupies @location(1) whenever it is emitted; texcoords shift up one.
    const bool emit_color1 = tev || needs_color1;
    const std::uint32_t uv_loc_base = emit_color1 ? 2u : 1u;
-@@ -53,7 +58,7 @@ std::string generate_wgsl(const ShaderKey& key) {
+@@ -53,7 +89,7 @@ std::string generate_wgsl(const ShaderKey& key) {
    const bool chan0_lit = channel_lit_path(key, 0u);
    const bool chan1_lit = emit_color1 && channel_lit_path(key, 1u);
    // The lit path reads vsc.materials (register material/ambient) and, when a
@@ -7241,7 +7687,7 @@ index bbefbee..4b38f7b 100644
    // register-material channel is active we must expose the full uniform view
    // (both fields, in the fixed C struct order) so offsets line up.
    const bool needs_uniform_full =
-@@ -70,16 +75,22 @@ std::string generate_wgsl(const ShaderKey& key) {
+@@ -70,16 +106,22 @@ std::string generate_wgsl(const ShaderKey& key) {
        has_tangent ? "in.rawtangent" : "vsc.cached_tangent.xyz";
    const char* binormal_in =
        has_binormal ? "in.rawbinormal" : "vsc.cached_binormal.xyz";
@@ -7269,7 +7715,7 @@ index bbefbee..4b38f7b 100644
  
    emit(out, "// gxcore generated shader (Dolphin VertexShaderGen shape)\n");
    if (needs_uniform_full)
-@@ -90,36 +101,40 @@ std::string generate_wgsl(const ShaderKey& key) {
+@@ -90,36 +132,40 @@ std::string generate_wgsl(const ShaderKey& key) {
                "    pos: vec4f,\n"
                "    dir: vec4f,\n"
                "};\n");
@@ -7330,7 +7776,7 @@ index bbefbee..4b38f7b 100644
    if (tev) {
      // PixelShaderConstants (Dolphin I_COLORS/I_KCOLORS/I_ALPHA). Integer TEV.
      // group(2) here (texture shifts to group(3)) so an untextured TEV draw
-@@ -202,13 +217,13 @@ std::string generate_wgsl(const ShaderKey& key) {
+@@ -202,13 +248,13 @@ std::string generate_wgsl(const ShaderKey& key) {
              "    @location(9) rawtex5: vec2f,\n"
              "    @location(10) rawtex6: vec2f,\n"
              "    @location(11) rawtex7: vec2f,\n");
@@ -7347,7 +7793,7 @@ index bbefbee..4b38f7b 100644
      emit(out, "    @location(15) rawtangent: vec3f,\n");
    emit(out, "};\n");
  
-@@ -216,8 +231,11 @@ std::string generate_wgsl(const ShaderKey& key) {
+@@ -216,8 +262,11 @@ std::string generate_wgsl(const ShaderKey& key) {
    // indices so WebGPU's first-vertex convention matches GC last-vertex.
    const char* color_interp =
        key.flat_shading != 0u ? " @interpolate(flat)" : "";
@@ -7360,7 +7806,7 @@ index bbefbee..4b38f7b 100644
    emitf(out, "    @location(0)%s color0: vec4f,\n", color_interp);
    if (emit_color1)
      emitf(out, "    @location(1)%s color1: vec4f,\n", color_interp);
-@@ -236,9 +254,9 @@ std::string generate_wgsl(const ShaderKey& key) {
+@@ -236,9 +285,9 @@ std::string generate_wgsl(const ShaderKey& key) {
              "    var o: VertexOut;\n");
    if (key.has_pos_mtx_idx != 0) {
      emit(out, "    let posidx = i32(in.posmtx);\n"
@@ -7373,7 +7819,7 @@ index bbefbee..4b38f7b 100644
    } else {
      emit(out, "    let p0 = vsc.posnormalmatrix[0];\n"
                "    let p1 = vsc.posnormalmatrix[1];\n"
-@@ -253,20 +271,30 @@ std::string generate_wgsl(const ShaderKey& key) {
+@@ -253,20 +302,30 @@ std::string generate_wgsl(const ShaderKey& key) {
    // U9.2: Dolphin VertexShaderGen depth remap + pixel-center correction.
    // Default pcc.zw=(1,0) ⇒ clip.z = -clip.z (reversed-Z). Full formula only
    // when the VSC tail is declared (dual-tex forces full middle + pcc/viewport).
@@ -7418,7 +7864,7 @@ index bbefbee..4b38f7b 100644
    emit(out, "    o.pos = clip;\n");
    // Vertex colors (Dolphin VertexShaderGen WriteVertexBody). First select each
    // channel's vertex color with the GX presence rules: channel 0 prefers
-@@ -333,8 +361,14 @@ std::string generate_wgsl(const ShaderKey& key) {
+@@ -333,8 +392,14 @@ std::string generate_wgsl(const ShaderKey& key) {
                "1.0);\n",
                texnum, texnum);
        }
@@ -7434,7 +7880,7 @@ index bbefbee..4b38f7b 100644
      if (tg.inputform == 0u) // AB11
        emit(out, "        coord.z = 1.0;\n");
      const auto tgtype = static_cast<TexGenType>(tg.texgentype);
-@@ -350,9 +384,9 @@ std::string generate_wgsl(const ShaderKey& key) {
+@@ -350,9 +415,9 @@ std::string generate_wgsl(const ShaderKey& key) {
          emitf(out,
                "        let ti%u = (in.texmtxidx.%c >> (8u * %uu)) & 0xFFu;\n", i,
                i < 4u ? 'x' : 'y', i % 4u);
@@ -7447,7 +7893,7 @@ index bbefbee..4b38f7b 100644
          if (tg.projection != 0u)
            emitf(out, "        var uv = vec3f(dot(coord, m%u0), dot(coord, m%u1), "
                       "dot(coord, m%u2));\n",
-@@ -379,11 +413,11 @@ std::string generate_wgsl(const ShaderKey& key) {
+@@ -379,11 +444,11 @@ std::string generate_wgsl(const ShaderKey& key) {
        // normalize are compile-time constants from postMtxInfo[i].
        if (key.dualtex_enabled != 0) {
          const std::uint32_t base = tg.postmtx_index & 0x3fu;
@@ -7462,7 +7908,7 @@ index bbefbee..4b38f7b 100644
                (base + 2u) & 0x3fu);
          if (tg.postmtx_normalize != 0u)
            emit(out, "        uv = normalize(uv);\n");
-@@ -416,7 +450,7 @@ std::string generate_wgsl(const ShaderKey& key) {
+@@ -416,7 +481,7 @@ std::string generate_wgsl(const ShaderKey& key) {
                   "dot(vsc.posnormalmatrix[4].xyz, %s), "
                   "dot(vsc.posnormalmatrix[5].xyz, %s));\n",
              i, binormal_in, binormal_in, binormal_in);
@@ -7782,7 +8228,7 @@ index 2c0e5ff..424acdb 100644
      if (ax != NULL)
          ax->log = enabled;
 diff --git a/src/core/cpu.c b/src/core/cpu.c
-index 2f13110..d041156 100644
+index 2f13110..6251c6b 100644
 --- a/src/core/cpu.c
 +++ b/src/core/cpu.c
 @@ -180,6 +180,37 @@ u64 mem_read64(CPUState* cpu, u32 addr) {
@@ -7859,6 +8305,53 @@ index 2f13110..d041156 100644
      clear_matching_reservation(cpu, addr);
      *host = value;
  }
+@@ -562,18 +601,33 @@ static bool psq_access_is_valid(CPUState* cpu, u8 type, u32 ea, u32 cia) {
+     return true;
+ }
+ 
++// GXRuntime recomp patch: 2^n for the GQR scales (6-bit signed, so n in
++// -32..32 either way). Multiplying by a power of two is exact, as ldexp is,
++// and much cheaper on the paired-single loads and stores the game makes
++// for every vertex.
++static f64 pow2_of(s32 n) {
++    static f64 table[129];
++    static bool ready = false;
++    if (!ready) {
++        for (int i = 0; i < 129; i++)
++            table[i] = ldexp(1.0, i - 64);
++        ready = true;
++    }
++    return n >= -64 && n <= 64 ? table[n + 64] : ldexp(1.0, n);
++}
++
+ static f64 psq_load_value(CPUState* cpu, u32 ea, u8 type, s32 scale) {
+     switch (type) {
+     case 0:
+         return (f64)f32_value(mem_read32(cpu, ea));
+     case 4:
+-        return (f64)(f32)ldexp((f64)mem_read8(cpu, ea), -scale);
++        return (f64)(f32)((f64)mem_read8(cpu, ea) * pow2_of(-scale));
+     case 5:
+-        return (f64)(f32)ldexp((f64)mem_read16(cpu, ea), -scale);
++        return (f64)(f32)((f64)mem_read16(cpu, ea) * pow2_of(-scale));
+     case 6:
+-        return (f64)(f32)ldexp((f64)(s8)mem_read8(cpu, ea), -scale);
++        return (f64)(f32)((f64)(s8)mem_read8(cpu, ea) * pow2_of(-scale));
+     case 7:
+-        return (f64)(f32)ldexp((f64)(s16)mem_read16(cpu, ea), -scale);
++        return (f64)(f32)((f64)(s16)mem_read16(cpu, ea) * pow2_of(-scale));
+     default:
+         return 0.0;
+     }
+@@ -585,7 +639,7 @@ static s64 psq_quantize_int(f64 value, s64 min_value, s64 max_value, s32 scale)
+     if (isinf(value))
+         return value < 0.0 ? min_value : max_value;
+ 
+-    f64 scaled = trunc(ldexp(value, scale));
++    f64 scaled = trunc(value * pow2_of(scale));
+     if (scaled <= (f64)min_value)
+         return min_value;
+     if (scaled >= (f64)max_value)
 diff --git a/src/dvd.c b/src/dvd.c
 index a817073..4ab8926 100644
 --- a/src/dvd.c

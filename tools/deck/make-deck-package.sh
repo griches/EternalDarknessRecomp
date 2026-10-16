@@ -100,6 +100,10 @@ for d in "$Z"/libc/include/*; do
   esac
 done
 cp -r "$SRC/res" "$OUT/res"
+# The Deck's built shaders (Dawn cache made on a Steam Deck with SteamOS's Mesa):
+# merged into the player's cache on the first start, 2.7 s of pipeline builds
+# down to about 1 s there. On another GPU or driver its rows are simply unused.
+cp "$SRC/seeds/dawn_cache_seed-deck.db" "$OUT/res/dawn_cache_seed.db"
 cp "$HERE/play.sh" "$OUT/play.sh"; chmod +x "$OUT/play.sh"
 cp "$HERE/README.txt" "$OUT/README.txt"
 mkdir -p "$OUT/licenses"

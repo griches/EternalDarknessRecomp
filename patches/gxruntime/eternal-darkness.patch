@@ -2504,10 +2504,15 @@ index a13ce39..8cc350b 100644
  
  void aurora_enable_vsync(bool enabled);
 diff --git a/graphics/aurora/lib/aurora.cpp b/graphics/aurora/lib/aurora.cpp
-index b09ef4d..c293c6d 100644
+index b09ef4d..a4e3246 100644
 --- a/graphics/aurora/lib/aurora.cpp
 +++ b/graphics/aurora/lib/aurora.cpp
-@@ -1,5 +1,9 @@
+@@ -1,5 +1,14 @@
++#include <algorithm>
++#include <vector>
++#include <thread>
++#include <string>
++#include <atomic>
 +#include <cstdio>
 +#include <cstdlib>
  #include <aurora/aurora.h>
@@ -2517,7 +2522,235 @@ index b09ef4d..c293c6d 100644
  #ifdef AURORA_ENABLE_GX
  #include "gfx/common.hpp"
  #include "gfx/render_worker.hpp"
-@@ -258,9 +262,31 @@ void end_frame() noexcept {
+@@ -41,6 +50,227 @@ using webgpu::g_device;
+ using webgpu::g_queue;
+ using webgpu::g_surface;
+ 
++// GXRuntime recomp patch (testing): AURORA_FRAME_DUMP=<folder> writes every
++// shown frame, shrunk to about 320 pixels wide, as <folder>/frame-<n>.ppm,
++// from frame AURORA_FRAME_DUMP_FIRST (0) for AURORA_FRAME_DUMP_COUNT (600),
++// to catch a one-frame glitch on a machine without screen capture. Frames
++// whose copy finds every readback buffer busy are skipped (and logged).
++namespace frame_dump {
++const char* dir() {
++  static const char* d = [] {
++    const char* e = std::getenv("AURORA_FRAME_DUMP");
++    return e != nullptr && e[0] != '\0' ? e : nullptr;
++  }();
++  return d;
++}
++struct Slot {
++  wgpu::Buffer buffer;
++  uint64_t size = 0;
++  uint32_t width = 0, height = 0, bytesPerRow = 0, frame = 0;
++  bool bgra = false;
++  std::atomic<bool> busy{false};
++};
++Slot g_slots[8];
++uint32_t g_frame = 0;
++
++void write_ppm(std::string path, std::vector<uint8_t> rgb, uint32_t w, uint32_t h) {
++  if (FILE* f = std::fopen(path.c_str(), "wb")) {
++    std::fprintf(f, "P6\n%u %u\n255\n", w, h);
++    std::fwrite(rgb.data(), 1, rgb.size(), f);
++    std::fclose(f);
++  }
++}
++
++// After the frame's passes: copy the surface texture for a later map.
++Slot* copy(wgpu::CommandEncoder& encoder, const wgpu::Texture& texture) {
++  const uint32_t frame = g_frame++;
++  static const uint32_t first = [] {
++    const char* e = std::getenv("AURORA_FRAME_DUMP_FIRST");
++    return e != nullptr ? static_cast<uint32_t>(std::atoi(e)) : 0u;
++  }();
++  static const uint32_t count = [] {
++    const char* e = std::getenv("AURORA_FRAME_DUMP_COUNT");
++    return e != nullptr ? static_cast<uint32_t>(std::atoi(e)) : 600u;
++  }();
++  if (dir() == nullptr || frame < first || frame >= first + count) {
++    return nullptr;
++  }
++  Slot* slot = nullptr;
++  for (auto& s : g_slots) {
++    if (!s.busy.load(std::memory_order_acquire)) {
++      slot = &s;
++      break;
++    }
++  }
++  if (slot == nullptr) {
++    std::fprintf(stderr, "[frame-dump] frame %u skipped (readbacks busy)\n", frame);
++    return nullptr;
++  }
++  const uint32_t width = texture.GetWidth(), height = texture.GetHeight();
++  const uint32_t bytesPerRow = (width * 4u + 255u) & ~255u;
++  const uint64_t size = static_cast<uint64_t>(bytesPerRow) * height;
++  if (!slot->buffer || slot->size != size) {
++    const wgpu::BufferDescriptor desc{
++        .label = "Frame dump buffer",
++        .usage = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst,
++        .size = size,
++    };
++    slot->buffer = g_device.CreateBuffer(&desc);
++    slot->size = size;
++  }
++  const auto format = texture.GetFormat();
++  slot->bgra = format == wgpu::TextureFormat::BGRA8Unorm || format == wgpu::TextureFormat::BGRA8UnormSrgb;
++  slot->width = width;
++  slot->height = height;
++  slot->bytesPerRow = bytesPerRow;
++  slot->frame = frame;
++  slot->busy.store(true, std::memory_order_release);
++  const wgpu::TexelCopyTextureInfo src{.texture = texture};
++  const wgpu::TexelCopyBufferInfo dst{
++      .layout = {.offset = 0, .bytesPerRow = bytesPerRow, .rowsPerImage = height},
++      .buffer = slot->buffer,
++  };
++  const wgpu::Extent3D extent{.width = width, .height = height, .depthOrArrayLayers = 1};
++  encoder.CopyTextureToBuffer(&src, &dst, &extent);
++  return slot;
++}
++
++// After the submit: map, shrink, write on a thread of its own.
++void map(Slot* slot) {
++  if (slot == nullptr) {
++    return;
++  }
++  slot->buffer.MapAsync(
++      wgpu::MapMode::Read, 0, slot->size, wgpu::CallbackMode::AllowSpontaneous,
++      [slot](wgpu::MapAsyncStatus status, wgpu::StringView) {
++        if (status == wgpu::MapAsyncStatus::Success) {
++          const auto* data = static_cast<const uint8_t*>(slot->buffer.GetConstMappedRange(0, slot->size));
++          const uint32_t step = std::max(1u, slot->width / 320u);
++          const uint32_t w = slot->width / step, h = slot->height / step;
++          std::vector<uint8_t> rgb(static_cast<size_t>(w) * h * 3u);
++          for (uint32_t y = 0; y < h; y++) {
++            const uint8_t* row = data + static_cast<size_t>(y) * step * slot->bytesPerRow;
++            for (uint32_t x = 0; x < w; x++) {
++              const uint8_t* p = row + static_cast<size_t>(x) * step * 4u;
++              uint8_t* o = &rgb[(static_cast<size_t>(y) * w + x) * 3u];
++              o[0] = slot->bgra ? p[2] : p[0];
++              o[1] = p[1];
++              o[2] = slot->bgra ? p[0] : p[2];
++            }
++          }
++          slot->buffer.Unmap();
++          char name[64];
++          std::snprintf(name, sizeof name, "/frame-%05u.ppm", slot->frame);
++          std::thread(write_ppm, std::string(dir()) + name, std::move(rgb), w, h).detach();
++        }
++        slot->busy.store(false, std::memory_order_release);
++      });
++}
++} // namespace frame_dump
++
++// GXRuntime recomp patch: the XFB in guest RAM (gfx/xfb_present.hpp). Each
++// frame the shown frame is drawn at the display copy's own size (640x528 for
++// a full-screen copy, not the render resolution) and read back, a few hundred
++// KB; once mapped it is encoded and kept for the next display copy to write.
++namespace xfb_ram {
++struct Slot {
++  wgpu::Buffer buffer;
++  uint64_t size = 0;
++  uint32_t bytesPerRow = 0;
++  bool bgra = false;
++  gfx::gxcore::XfbRamTarget target;
++  std::atomic<bool> busy{false};
++};
++Slot g_slots[3];
++wgpu::Texture g_texture;  // render worker only
++wgpu::TextureView g_view;
++
++Slot* encode(wgpu::CommandEncoder& encoder, const webgpu::TextureWithSampler& source,
++             const gfx::gxcore::XfbRamTarget& target) {
++  if (target.width == 0 || !source.view || !webgpu::g_CopyPipeline) {
++    return nullptr;
++  }
++  Slot* slot = nullptr;
++  for (auto& s : g_slots) {
++    if (!s.busy.load(std::memory_order_acquire)) {
++      slot = &s;
++      break;
++    }
++  }
++  if (slot == nullptr) {
++    return nullptr;  // the earlier readbacks are still mapping: next frame
++  }
++  const uint32_t width = target.srcX + target.width, height = target.srcY + target.height;
++  const auto format = webgpu::g_graphicsConfig.surfaceConfiguration.format;
++  if (!g_texture || g_texture.GetWidth() != width || g_texture.GetHeight() != height ||
++      g_texture.GetFormat() != format) {
++    const wgpu::TextureDescriptor desc{
++        .label = "XFB RAM readback texture",
++        .usage = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc,
++        .size = {.width = width, .height = height, .depthOrArrayLayers = 1},
++        .format = format,
++    };
++    g_texture = g_device.CreateTexture(&desc);
++    g_view = g_texture.CreateView();
++  }
++  const std::array attachments{wgpu::RenderPassColorAttachment{
++      .view = g_view,
++      .loadOp = wgpu::LoadOp::Clear,
++      .storeOp = wgpu::StoreOp::Store,
++  }};
++  const wgpu::RenderPassDescriptor passDesc{
++      .label = "XFB RAM readback pass",
++      .colorAttachmentCount = attachments.size(),
++      .colorAttachments = attachments.data(),
++  };
++  const auto pass = encoder.BeginRenderPass(&passDesc);
++  pass.SetPipeline(webgpu::g_CopyPipeline);
++  pass.SetBindGroup(0, webgpu::create_copy_bind_group(source), 0, nullptr);
++  pass.SetViewport(0.f, 0.f, static_cast<float>(width), static_cast<float>(height), 0.f, 1.f);
++  pass.Draw(3);
++  pass.End();
++  const uint32_t bytesPerRow = (width * 4u + 255u) & ~255u;
++  const uint64_t size = static_cast<uint64_t>(bytesPerRow) * height;
++  if (!slot->buffer || slot->size != size) {
++    const wgpu::BufferDescriptor desc{
++        .label = "XFB RAM readback buffer",
++        .usage = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst,
++        .size = size,
++    };
++    slot->buffer = g_device.CreateBuffer(&desc);
++    slot->size = size;
++  }
++  slot->bytesPerRow = bytesPerRow;
++  slot->bgra = format == wgpu::TextureFormat::BGRA8Unorm || format == wgpu::TextureFormat::BGRA8UnormSrgb;
++  slot->target = target;
++  slot->busy.store(true, std::memory_order_release);
++  const wgpu::TexelCopyTextureInfo src{.texture = g_texture};
++  const wgpu::TexelCopyBufferInfo dst{
++      .layout = {.offset = 0, .bytesPerRow = bytesPerRow, .rowsPerImage = height},
++      .buffer = slot->buffer,
++  };
++  const wgpu::Extent3D extent{.width = width, .height = height, .depthOrArrayLayers = 1};
++  encoder.CopyTextureToBuffer(&src, &dst, &extent);
++  return slot;
++}
++
++void map(Slot* slot) {
++  if (slot == nullptr) {
++    return;
++  }
++  slot->buffer.MapAsync(wgpu::MapMode::Read, 0, slot->size, wgpu::CallbackMode::AllowSpontaneous,
++                        [slot](wgpu::MapAsyncStatus status, wgpu::StringView) {
++                          if (status == wgpu::MapAsyncStatus::Success) {
++                            const auto* data =
++                                static_cast<const uint8_t*>(slot->buffer.GetConstMappedRange(0, slot->size));
++                            gfx::gxcore::xfb_ram_store(data, slot->bytesPerRow, slot->bgra, slot->target);
++                            slot->buffer.Unmap();
++                          }
++                          slot->busy.store(false, std::memory_order_release);
++                        });
++}
++} // namespace xfb_ram
++
+ uint32_t clamp_scissor_coord(double value, uint32_t maximum) noexcept {
+   if (!std::isfinite(value)) {
+     return 0;
+@@ -258,9 +488,31 @@ void end_frame() noexcept {
    // E7 present-from-XFB: VI current → GPU Virtual-XFB, else YUYV-from-RAM
    // decode, else EFB-direct (Strikers when no RAM XFB / match fails).
    const std::uint32_t xfbAddr = vi::xfb_black() ? 0u : vi::current_xfb();
@@ -2550,7 +2783,50 @@ index b09ef4d..c293c6d 100644
    const uint32_t contentW =
        xfbTex && *xfbTex ? (*xfbTex)->size.width : efbSource.size.width;
    const uint32_t contentH =
-@@ -478,3 +504,17 @@ void aurora_set_resampler(AuroraSampler sampler) {
+@@ -282,8 +534,9 @@ void end_frame() noexcept {
+   // Capture XFB handle by value for the worker lambda (shared_ptr).
+   gfx::TextureHandle xfbHandle = (xfbTex && *xfbTex) ? *xfbTex : nullptr;
+ 
++  const gfx::gxcore::XfbRamTarget xfbRamTarget = gfx::gxcore::xfb_ram_target();
+   gfx::end_frame([rmlBindGroup = std::move(rmlBindGroup), rmlOverlay, viewport,
+-                  imguiDrawData = std::move(imguiDrawData),
++                  imguiDrawData = std::move(imguiDrawData), xfbRamTarget,
+                   xfbHandle = std::move(xfbHandle)](wgpu::CommandEncoder& encoder) {
+     wgpu::Texture currentTexture;
+     wgpu::TextureView currentView;
+@@ -373,6 +626,22 @@ void end_frame() noexcept {
+     } else {
+       Log.info("Skipping present; window not presentable");
+     }
++    // The frame the game copied for display (the EFB-direct present's
++    // source), for the XFB in guest RAM.
++    xfb_ram::Slot* xfbRamSlot = nullptr;
++    if (xfbRamTarget.width != 0) {
++      const webgpu::TextureWithSampler xfbSource =
++          xfbHandle ? webgpu::TextureWithSampler{.texture = xfbHandle->texture,
++                                                 .view = xfbHandle->sampleTextureView,
++                                                 .size = xfbHandle->size,
++                                                 .format = xfbHandle->format,
++                                                 .sampler = webgpu::present_source().sampler}
++                    : webgpu::present_source();
++      xfbRamSlot = xfb_ram::encode(encoder, xfbSource, xfbRamTarget);
++    }
++    frame_dump::Slot* dumpSlot = canPresent && frame_dump::dir() != nullptr
++                                     ? frame_dump::copy(encoder, currentTexture)
++                                     : nullptr;
+     webgpu::gpu_prof::frame_end(encoder);
+     const wgpu::CommandBufferDescriptor cmdBufDescriptor{.label = "Redraw command buffer"};
+     const auto buffer = encoder.Finish(&cmdBufDescriptor);
+@@ -380,6 +649,8 @@ void end_frame() noexcept {
+       ZoneScopedN("Queue Submit");
+       g_queue.Submit(1, &buffer);
+     }
++    frame_dump::map(dumpSlot);
++    xfb_ram::map(xfbRamSlot);
+     webgpu::gpu_prof::after_submit();
+     if (canPresent && g_surface) {
+       ZoneScopedN("Present");
+@@ -478,3 +749,17 @@ void aurora_set_resampler(AuroraSampler sampler) {
  void aurora_set_efb_fixed_size(uint32_t width, uint32_t height) {
    aurora::window::set_fixed_efb_size(width, height);
  }
@@ -2606,7 +2882,7 @@ index 7af8fca..4c14e34 100644
      g_requested.store(false, std::memory_order_release);
    else
 diff --git a/graphics/aurora/lib/gfx/gxcore_draw.cpp b/graphics/aurora/lib/gfx/gxcore_draw.cpp
-index 71136b9..9b36e46 100644
+index 71136b9..d1a1a1c 100644
 --- a/graphics/aurora/lib/gfx/gxcore_draw.cpp
 +++ b/graphics/aurora/lib/gfx/gxcore_draw.cpp
 @@ -1,4 +1,5 @@
@@ -2615,7 +2891,7 @@ index 71136b9..9b36e46 100644
  #include "xfb_present.hpp"
  #include "efb_readback.hpp"
  #include "plane_capture.hpp"
-@@ -19,6 +20,10 @@
+@@ -19,7 +20,12 @@
  #include <absl/container/flat_hash_map.h>
  
  #include <algorithm>
@@ -2624,9 +2900,11 @@ index 71136b9..9b36e46 100644
 +#include <cstdio>
 +#include <cstdlib>
  #include <cstring>
++#include <mutex>
  #include <vector>
  
-@@ -40,6 +45,22 @@ namespace {
+ namespace aurora::gfx::gxcore {
+@@ -40,6 +46,22 @@ namespace {
  // LOD bias has no WebGPU sampler field — residual stays shader-side if needed.
  // maxAnisotropy>1 is clamped to device capability (textureAnisotropy); WebGPU
  // linear min/mag/mip when aniso is already applied in decode_sampler.
@@ -2649,7 +2927,7 @@ index 71136b9..9b36e46 100644
  wgpu::SamplerDescriptor sampler_from_plan(const gxc::PlanSampler& s) {
    auto address = [](std::uint8_t a) -> wgpu::AddressMode {
      switch (a) {
-@@ -158,6 +179,64 @@ wgpu::BlendFactor to_blend_factor_dst(gxc::DstBlendFactor factor, bool dual_src)
+@@ -158,6 +180,64 @@ wgpu::BlendFactor to_blend_factor_dst(gxc::DstBlendFactor factor, bool dual_src)
    }
  }
  
@@ -2714,7 +2992,7 @@ index 71136b9..9b36e46 100644
  // Texture bind group layout for a used-texmap set (63/Mfin multi-texmap): texmap
  // t occupies binding 2t (texture) + 2t+1 (sampler), matching the WGSL. Cached per
  // mask; used_mask=1 (texmap 0 only) reproduces the pre-Mfin single-texmap layout.
-@@ -228,11 +307,43 @@ struct TextureKey {
+@@ -228,11 +308,43 @@ struct TextureKey {
  };
  
  absl::flat_hash_map<TextureKey, TextureHandle> g_textureCache;
@@ -2758,7 +3036,7 @@ index 71136b9..9b36e46 100644
  TextureCacheStats g_textureCacheStats;
  
  // EFB copy-to-texture destinations (63/S16): dest guest address -> resolved EFB
-@@ -242,6 +353,13 @@ TextureCacheStats g_textureCacheStats;
+@@ -242,6 +354,13 @@ TextureCacheStats g_textureCacheStats;
  // (a re-copy to the same address updates in place, matching the live path).
  // E7: format-0xF display copies also land here (Virtual XFB GPU texture).
  absl::flat_hash_map<uint32_t, TextureHandle> g_efbCopyTextures;
@@ -2772,7 +3050,52 @@ index 71136b9..9b36e46 100644
  
  // E7 present-from-RAM: YUYV decoded from guest MEM1 when no GPU copy exists
  // (software/external XFB writers). Keyed by physical address; re-upload when
-@@ -281,13 +399,17 @@ unsigned long long xfb_ram_present_count() noexcept {
+@@ -261,6 +380,13 @@ static uint32_t g_last_xfb_dest_stride = 0;
+ // E7: last display-copy XFB height after BP 0x4E y_scale (0 = use VI height).
+ static uint32_t g_last_xfb_height = 0;
+ 
++// The XFB in guest RAM (xfb_present.hpp): the latest copy's shape, and the
++// latest frame encoded for it.
++std::mutex g_xfbRamMutex;
++XfbRamTarget g_xfbRamTarget;
++std::vector<uint8_t> g_xfbRamYuyv;
++XfbRamTarget g_xfbRamYuyvTarget;
++
+ static unsigned long long g_xfb_display_copy_count = 0;
+ static unsigned long long g_xfb_ram_present_count = 0;
+ 
+@@ -277,17 +403,48 @@ unsigned long long xfb_display_copy_count() noexcept {
+   return g_xfb_display_copy_count;
+ }
+ 
++XfbRamTarget xfb_ram_target() noexcept {
++  std::lock_guard lock{g_xfbRamMutex};
++  return g_xfbRamTarget;
++}
++
++void xfb_ram_store(const uint8_t* rgba, uint32_t bytesPerRow, bool bgra, const XfbRamTarget& target) noexcept {
++  const uint32_t w = target.srcX + target.width, h = target.srcY + target.height;
++  std::vector<uint8_t> tight(static_cast<size_t>(w) * h * 4u);
++  for (uint32_t y = 0; y < h; y++) {
++    const uint8_t* in = rgba + static_cast<size_t>(y) * bytesPerRow;
++    uint8_t* out = tight.data() + static_cast<size_t>(y) * w * 4u;
++    for (uint32_t x = 0; x < w; x++, in += 4, out += 4) {
++      out[0] = bgra ? in[2] : in[0];
++      out[1] = in[1];
++      out[2] = bgra ? in[0] : in[2];
++      out[3] = 255;
++    }
++  }
++  std::vector<uint8_t> yuyv(static_cast<size_t>(target.stride) * target.xfbHeight);
++  if (!dol_yuyv_encode_rgba8_rect_yscale(tight.data(), w, h, target.srcX, target.srcY, target.width,
++                                         target.height, target.xfbHeight, yuyv.data(), target.stride))
++    return;
++  std::lock_guard lock{g_xfbRamMutex};
++  g_xfbRamYuyv = std::move(yuyv);
++  g_xfbRamYuyvTarget = target;
++}
++
+ unsigned long long xfb_ram_present_count() noexcept {
    return g_xfb_ram_present_count;
  }
  
@@ -2792,7 +3115,7 @@ index 71136b9..9b36e46 100644
      return &it->second;
  
    const auto dims = aurora::vi::configured_xfb_size();
-@@ -368,7 +490,7 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -368,7 +525,7 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
    const uint32_t tex_mask = textured ? gxc::used_texmap_mask(key.shader) : 1u;
    std::array<wgpu::BindGroupLayout, 4> bindGroupLayouts{
        g_staticBindGroupLayout,
@@ -2801,7 +3124,7 @@ index 71136b9..9b36e46 100644
        tev ? g_uniformBindGroupLayout : texture_bind_group_layout(tex_mask),
        texture_bind_group_layout(tex_mask),
    };
-@@ -427,7 +549,13 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -427,7 +584,13 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
    // vertex FORMAT carries that attribute. A lit/emboss draw whose format omits
    // it reads the cached fallback from the uniform instead (I_CACHED_NORMAL), so
    // the shader does not declare the input and the layout must not provide it.
@@ -2816,7 +3139,7 @@ index 71136b9..9b36e46 100644
        key.shader.has_vertex_normal != 0) {
      attributes.push_back(wgpu::VertexAttribute{
          .format = wgpu::VertexFormat::Float32x3,
-@@ -442,14 +570,14 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -442,14 +605,14 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
          .shaderLocation = 13,
      });
    }
@@ -2833,7 +3156,7 @@ index 71136b9..9b36e46 100644
      attributes.push_back(wgpu::VertexAttribute{
          .format = wgpu::VertexFormat::Float32x3,
          .offset = gxc::kVertexTangentOffset,
-@@ -536,6 +664,10 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -536,6 +699,10 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
    default:
      break; // None here; All was skipped at plan time
    }
@@ -2844,7 +3167,7 @@ index 71136b9..9b36e46 100644
  
    const wgpu::RenderPipelineDescriptor descriptor{
        .label = "GXCore Pipeline",
-@@ -566,10 +698,22 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -566,10 +733,22 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
  
  void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
    if (!bind_pipeline(data.pipeline, pass)) {
@@ -2869,7 +3192,7 @@ index 71136b9..9b36e46 100644
    if (data.tev) {
      // group 2 = PS uniform (same dynamic-uniform bind group, its own offset);
      // group 3 = texture.
-@@ -591,8 +735,13 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
+@@ -591,8 +770,13 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
  
  void reset_texture_cache() {
    g_textureCache.clear();
@@ -2883,7 +3206,7 @@ index 71136b9..9b36e46 100644
    g_ramXfbTextures.clear();
    g_last_xfb_dest_stride = 0;
    g_last_xfb_height = 0;
-@@ -612,6 +761,8 @@ const TextureCacheStats& texture_cache_stats() { return g_textureCacheStats; }
+@@ -612,6 +796,8 @@ const TextureCacheStats& texture_cache_stats() { return g_textureCacheStats; }
  // color/Z afterwards. The bound draw's geometry is already in the pass (the
  // sink flushed the pending draw before firing this).
  void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
@@ -2892,7 +3215,7 @@ index 71136b9..9b36e46 100644
    // Mirror the copy-clear color/Z (BP 0x4F-0x51 at this copy) into the gx
    // state GXSetCopyClear would have written: begin_frame's pass-0 EFB clear
    // reads g_gxState.clearColor/clearDepth, and in gxcore mode the live gx
-@@ -660,8 +811,9 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -660,8 +846,9 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
        dstHeight = xfb_h;
    }
  
@@ -2904,7 +3227,7 @@ index 71136b9..9b36e46 100644
        it->second->size.width != dstWidth || it->second->size.height != dstHeight) {
      TextureHandle handle;
      if (!is_xfb && gfx::tex_copy_conv::needs_conversion(fmt)) {
-@@ -670,7 +822,7 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -670,7 +857,7 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
        handle = gfx::new_render_texture(dstWidth, dstHeight, GX_TF_RGBA8,
                                         is_xfb ? "GXCore XFB" : "GXCore Copy");
      }
@@ -2913,17 +3236,12 @@ index 71136b9..9b36e46 100644
    }
    if (!it->second) {
      return;
-@@ -709,11 +861,30 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -709,11 +896,25 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
    // XFB YUYV into guest RAM from this readback on every display copy, so it
    // must stay armed in product runs too (cost: one EFB readback per display
    // copy, ~1-2/frame).
 -  if (plane_capture::enabled() || is_xfb) {
-+  // Display copies stay GPU-only unless DOL_XFB_RAM=1 (Dolphin's default,
-+  // "XFB to texture only"): writing them to RAM needs a whole-frame readback
-+  // every frame, several ms at high resolutions, for a copy games rarely
-+  // read (Eternal Darkness presents the EFB and never does).
-+  static const bool xfb_ram = std::getenv("DOL_XFB_RAM") != nullptr;
-+  if (plane_capture::enabled() || (is_xfb && xfb_ram)) {
++  if (plane_capture::enabled()) {
      if (!efb_readback::continuous())
        efb_readback::set_continuous(true);
      efb_readback::request();
@@ -2945,16 +3263,105 @@ index 71136b9..9b36e46 100644
    gfx::resolve_pass(it->second, srcRect, do_clear && cmd.color_update,
                      do_clear && cmd.alpha_update,
                      do_clear && cmd.depth_update,
-@@ -730,7 +901,7 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
-   // never read XFB RAM stay safe.
-   // dest_stride_bytes = BP 0x4D << 5 when set; else tight width*2.
-   // XFB dest height from y_scale (byte_size/stride or cmd.xfb_height).
+@@ -723,69 +924,147 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+                                 static_cast<float>(cmd.clear_a) / 255.f},
+                     clearDepthValue, fmt, &filter);
+ 
+-  // E7 YUYV→RAM: when display-copy dest is programmed, also encode the EFB
+-  // source rect into guest MEM1 as YUYV 4:2:2 (Dolphin copy_to_ram XFB path).
+-  // Source pixels: latest present-source readback when available; skip if no
+-  // snapshot yet (async map) so GPU Virtual XFB still presents. Strikers that
+-  // never read XFB RAM stay safe.
+-  // dest_stride_bytes = BP 0x4D << 5 when set; else tight width*2.
+-  // XFB dest height from y_scale (byte_size/stride or cmd.xfb_height).
 -  if (is_xfb && cmd.dest_address != 0u && cmd.width >= 2u &&
-+  if (is_xfb && xfb_ram && cmd.dest_address != 0u && cmd.width >= 2u &&
-       (cmd.width & 1u) == 0u) {
-     if (!efb_readback::continuous()) {
-       efb_readback::set_continuous(true);
-@@ -782,10 +953,103 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+-      (cmd.width & 1u) == 0u) {
+-    if (!efb_readback::continuous()) {
+-      efb_readback::set_continuous(true);
+-      efb_readback::request();
+-    }
+-    const std::uint8_t* rgba = nullptr;
+-    std::uint32_t rw = 0;
+-    std::uint32_t rh = 0;
+-    if (efb_readback::peek(&rgba, &rw, &rh) && rgba != nullptr && rw > 0u &&
+-        rh > 0u) {
+-      const std::uint32_t sx = cmd.src_x;
+-      const std::uint32_t sy = cmd.src_y;
+-      const std::uint32_t cw = cmd.width;
+-      const std::uint32_t ch = cmd.height; // EFB source height
+-      if (sx + cw <= rw && sy + ch <= rh) {
+-        std::uint32_t dest_stride = cw * 2u;
+-        if (cmd.dest_stride_bytes >= dest_stride)
+-          dest_stride = cmd.dest_stride_bytes;
+-        if ((dest_stride & 1u) != 0u)
+-          dest_stride += 1u;
+-        g_last_xfb_dest_stride = dest_stride;
+-        std::uint32_t xfb_h = cmd.xfb_height;
+-        if (xfb_h == 0u && dest_stride > 0u && cmd.byte_size >= dest_stride)
+-          xfb_h = cmd.byte_size / dest_stride;
+-        if (xfb_h == 0u)
+-          xfb_h = ch;
+-        g_last_xfb_height = xfb_h;
+-        const std::uint32_t yuyv_bytes = dest_stride * xfb_h;
+-        const void* dest_c = nullptr;
+-        std::uint32_t available = 0;
+-        if (aurora::gx::recomp::resolve_guest_address(
+-                cmd.dest_address, yuyv_bytes,
+-                aurora::gx::recomp::AddressSpace::Physical,
+-                aurora::gx::recomp::ResourceKind::CopyDestination, &dest_c,
+-                &available) &&
+-            dest_c != nullptr && available >= yuyv_bytes) {
+-          auto* dest_bytes = const_cast<std::uint8_t*>(
+-              static_cast<const std::uint8_t*>(dest_c));
+-          (void)dol_yuyv_encode_rgba8_rect_yscale(
+-              rgba, rw, rh, sx, sy, cw, ch, xfb_h, dest_bytes, dest_stride);
+-          // GPNF copy-bytes: exact YUYV written to guest RAM (pre-overwrite).
+-          plane_capture::Key pk{};
+-          if (plane_capture::last_taken_key(&pk)) {
+-            plane_capture::record_copy_bytes(pk, dest_bytes, yuyv_bytes);
+-          }
+-        }
++  // The XFB in guest RAM (xfb_present.hpp): note this copy's shape for the
++  // render worker's readback, and write the latest frame it encoded (a frame
++  // or two old: the readback is asynchronous) where this copy goes, as the
++  // GameCube's copy would. DOL_XFB_RAM=0 leaves RAM alone.
++  static const bool xfb_ram = [] {
++    const char* env = std::getenv("DOL_XFB_RAM");
++    return env == nullptr || std::strcmp(env, "0") != 0;
++  }();
++  if (is_xfb && xfb_ram && cmd.dest_address != 0u && cmd.width >= 2u && (cmd.width & 1u) == 0u &&
++      cmd.height != 0u) {
++    uint32_t dest_stride = cmd.width * 2u;
++    if (cmd.dest_stride_bytes >= dest_stride)
++      dest_stride = cmd.dest_stride_bytes;
++    if ((dest_stride & 1u) != 0u)
++      dest_stride += 1u;
++    uint32_t xfb_h = cmd.xfb_height;
++    if (xfb_h == 0u && cmd.byte_size >= dest_stride)
++      xfb_h = cmd.byte_size / dest_stride;
++    if (xfb_h == 0u)
++      xfb_h = cmd.height;
++    g_last_xfb_dest_stride = dest_stride;
++    g_last_xfb_height = xfb_h;
++    const XfbRamTarget target{cmd.src_x, cmd.src_y, cmd.width, cmd.height, xfb_h, dest_stride};
++    std::lock_guard lock{g_xfbRamMutex};
++    g_xfbRamTarget = target;
++    if (!g_xfbRamYuyv.empty() && g_xfbRamYuyvTarget == target) {
++      const uint32_t bytes = dest_stride * xfb_h;
++      const void* dest_c = nullptr;
++      uint32_t available = 0;
++      if (aurora::gx::recomp::resolve_guest_address(cmd.dest_address, bytes,
++                                                    aurora::gx::recomp::AddressSpace::Physical,
++                                                    aurora::gx::recomp::ResourceKind::CopyDestination,
++                                                    &dest_c, &available) &&
++          dest_c != nullptr && available >= bytes && g_xfbRamYuyv.size() >= bytes) {
++        std::memcpy(const_cast<void*>(dest_c), g_xfbRamYuyv.data(), bytes);
++        // GPNF copy-bytes: exact YUYV written to guest RAM.
++        plane_capture::Key pk{};
++        if (plane_capture::last_taken_key(&pk))
++          plane_capture::record_copy_bytes(pk, static_cast<const uint8_t*>(dest_c), bytes);
+       }
+     }
    }
  }
  
@@ -3058,7 +3465,7 @@ index 71136b9..9b36e46 100644
  
    if (plan.viewport_valid) {
      // Raw XF viewport -> logical viewport, the raw path's own formula
-@@ -839,23 +1103,108 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -839,23 +1118,108 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      const uint32_t size = std::min(tsize, available);
      // Hash the actual source texels (+ TLUT for CI) so a content change under an
      // unchanged guest identity is a distinct cache entry — see TextureKey.
@@ -3172,7 +3579,7 @@ index 71136b9..9b36e46 100644
      // gxcore owns the decode for every format: produce tightly-packed RGBA8 and
      // upload it as a pre-decoded PC texture (no substrate re-conversion).
      std::vector<uint8_t> decoded;
-@@ -868,8 +1217,32 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -868,8 +1232,32 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      } else {
        decoded = gxc::decode_texture(format, width, height, bytes, size);
      }
@@ -3206,7 +3613,7 @@ index 71136b9..9b36e46 100644
        handle = new_static_texture_2d(
            width, height, 1, GX_TF_RGBA8_PC,
            ArrayRef<uint8_t>{decoded.data(), decoded.size()}, false,
-@@ -892,7 +1265,96 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -892,7 +1280,96 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    };
  
    BindGroupRef textureBindGroup = 0;
@@ -3303,7 +3710,7 @@ index 71136b9..9b36e46 100644
      if (plan.texmap_mask == 0u) {
        // Single-texmap fast path: primary texture + plan.sampler at binding 0/1.
        if (plan.has_texture) {
-@@ -903,7 +1365,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -903,7 +1380,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
              plan.tlut_data, plan.tlut_available);
          if (bound) {
            const auto sampler =
@@ -3312,7 +3719,7 @@ index 71136b9..9b36e46 100644
            const std::array entries{
                WGPUBindGroupEntry{.binding = 0,
                                   .textureView =
-@@ -919,6 +1381,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -919,6 +1396,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            textureBindGroup = bind_group_ref(descriptor);
          }
        }
@@ -3320,7 +3727,7 @@ index 71136b9..9b36e46 100644
      } else {
        // Multi-texmap: bind each used texmap at 2t (texture) / 2t+1 (sampler),
        // matching the WGSL declarations. Per-texmap PlanSampler from
-@@ -945,14 +1408,16 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -945,14 +1423,16 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
          held.push_back(bound);
          const gxc::PlanSampler& ps =
              pt.sampler.valid ? pt.sampler : plan.samplers[t];
@@ -3339,7 +3746,7 @@ index 71136b9..9b36e46 100644
        const WGPUBindGroupDescriptor descriptor{
            .label = {"GXCore Texture Bind Group", WGPU_STRLEN},
            .layout = texture_bind_group_layout(plan.texmap_mask).Get(),
-@@ -960,6 +1425,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -960,6 +1440,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            .entries = entries.data(),
        };
        textureBindGroup = bind_group_ref(descriptor);
@@ -3347,7 +3754,7 @@ index 71136b9..9b36e46 100644
      }
    }
  
-@@ -969,27 +1435,125 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -969,27 +1450,125 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    const auto idxRange = push_indices(
        reinterpret_cast<const uint8_t*>(plan.indices.data()),
        plan.indices.size() * sizeof(uint16_t), 4);
@@ -3704,11 +4111,24 @@ index f51a682..11a455a 100644
  
    std::string json = "[\n";
    bool first = true;
+diff --git a/graphics/aurora/lib/gfx/xfb_present.cpp b/graphics/aurora/lib/gfx/xfb_present.cpp
+index 91696d9..9a4bf23 100644
+--- a/graphics/aurora/lib/gfx/xfb_present.cpp
++++ b/graphics/aurora/lib/gfx/xfb_present.cpp
+@@ -9,6 +9,8 @@ namespace aurora::gfx::gxcore {
+ const TextureHandle* lookup_xfb_texture(std::uint32_t) noexcept { return nullptr; }
+ unsigned long long xfb_display_copy_count() noexcept { return 0; }
+ unsigned long long xfb_ram_present_count() noexcept { return 0; }
++XfbRamTarget xfb_ram_target() noexcept { return {}; }
++void xfb_ram_store(const uint8_t*, uint32_t, bool, const XfbRamTarget&) noexcept {}
+ #endif
+ 
+ } // namespace aurora::gfx::gxcore
 diff --git a/graphics/aurora/lib/gfx/xfb_present.hpp b/graphics/aurora/lib/gfx/xfb_present.hpp
-index b205cfa..ee13954 100644
+index b205cfa..72d0351 100644
 --- a/graphics/aurora/lib/gfx/xfb_present.hpp
 +++ b/graphics/aurora/lib/gfx/xfb_present.hpp
-@@ -16,5 +16,9 @@ const TextureHandle* lookup_xfb_texture(std::uint32_t physical_address) noexcept
+@@ -16,5 +16,26 @@ const TextureHandle* lookup_xfb_texture(std::uint32_t physical_address) noexcept
  unsigned long long xfb_display_copy_count() noexcept;
  // Times present fell through to YUYV→RGBA RAM decode (no GPU copy hit).
  unsigned long long xfb_ram_present_count() noexcept;
@@ -3716,8 +4136,47 @@ index b205cfa..ee13954 100644
 +// before the first display copy. The EFB-direct present shows this, not the
 +// live EFB, so passes after the copy cannot change what reaches the screen.
 +const TextureHandle* last_display_copy() noexcept;
++
++// The XFB in guest RAM (GXRuntime recomp patch). A GameCube display copy
++// writes the frame to RAM as YUYV, and some games read it back (Eternal
++// Darkness fades from it into the prologue's book; left unwritten, the zeros
++// read as green). The display copy notes the copy's shape here; the render
++// worker reads the shown frame back at that size each frame and stores it,
++// encoded, for the next display copy to write. width 0: nothing to do (no
++// display copy yet, or DOL_XFB_RAM=0).
++struct XfbRamTarget {
++  uint32_t srcX = 0, srcY = 0, width = 0, height = 0;  // EFB rectangle
++  uint32_t xfbHeight = 0, stride = 0;                   // in RAM
++  bool operator==(const XfbRamTarget&) const = default;
++};
++XfbRamTarget xfb_ram_target() noexcept;
++// rgba: the frame scaled to srcX+width x srcY+height, rows bytesPerRow apart,
++// BGRA when bgra.
++void xfb_ram_store(const uint8_t* rgba, uint32_t bytesPerRow, bool bgra, const XfbRamTarget& target) noexcept;
  
  } // namespace aurora::gfx::gxcore
+diff --git a/graphics/aurora/lib/webgpu/gpu.cpp b/graphics/aurora/lib/webgpu/gpu.cpp
+index 7aff76e..b9f2693 100644
+--- a/graphics/aurora/lib/webgpu/gpu.cpp
++++ b/graphics/aurora/lib/webgpu/gpu.cpp
+@@ -1,3 +1,4 @@
++#include <cstdlib>
+ #include "gpu.hpp"
+ 
+ #include <algorithm>
+@@ -1051,7 +1052,11 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+       .surfaceConfiguration =
+           wgpu::SurfaceConfiguration{
+               .format = surfaceFormat,
+-              .usage = wgpu::TextureUsage::RenderAttachment,
++              // GXRuntime recomp patch: AURORA_FRAME_DUMP copies the shown
++              // frame (aurora.cpp frame_dump).
++              .usage = std::getenv("AURORA_FRAME_DUMP") != nullptr
++                           ? wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc
++                           : wgpu::TextureUsage::RenderAttachment,
+               .width = size.native_fb_width,
+               .height = size.native_fb_height,
+               .presentMode = presentMode,
 diff --git a/graphics/aurora/lib/window.cpp b/graphics/aurora/lib/window.cpp
 index 74864c3..b3edc87 100644
 --- a/graphics/aurora/lib/window.cpp

@@ -4411,6 +4411,21 @@ index b205cfa..72d0351 100644
 +void xfb_ram_store(const uint8_t* rgba, uint32_t bytesPerRow, bool bgra, const XfbRamTarget& target) noexcept;
  
  } // namespace aurora::gfx::gxcore
+diff --git a/graphics/aurora/lib/imgui.cpp b/graphics/aurora/lib/imgui.cpp
+index 02adbe1..bcc38f3 100644
+--- a/graphics/aurora/lib/imgui.cpp
++++ b/graphics/aurora/lib/imgui.cpp
+@@ -44,6 +44,10 @@ void create_context() noexcept {
+   g_imguiSettings = std::string{g_config.userPath} + "/imgui.ini";
+   g_imguiLog = std::string{g_config.cachePath} + "/imgui.log";
+   io.IniFilename = g_imguiSettings.c_str();
++  // GXRuntime recomp patch: leave the OS pointer to the host (which hides it
++  // when idle). Without this the SDL3 backend calls SDL_ShowCursor every
++  // frame, undoing the hide (the pointer stayed on screen on Windows).
++  io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
+   io.LogFilename = g_imguiLog.c_str();
+ }
+ 
 diff --git a/graphics/aurora/lib/webgpu/gpu.cpp b/graphics/aurora/lib/webgpu/gpu.cpp
 index 7aff76e..7c19543 100644
 --- a/graphics/aurora/lib/webgpu/gpu.cpp

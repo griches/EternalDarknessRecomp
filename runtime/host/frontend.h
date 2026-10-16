@@ -21,6 +21,9 @@ bool frontend_run_launcher(const char* default_iso, char* iso_out,
 // the game paused until the player resumes.
 void frontend_frame(void);
 
+// The disc id this build runs ("GEDE01" or "GEDP01"; main.c).
+const char* ed_game_id(void);
+
 #ifdef __cplusplus
 }
 #include <string>

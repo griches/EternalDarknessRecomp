@@ -339,6 +339,10 @@ static int run_loop(void* user) {
     return 0;
 }
 
+// The disc this build was translated from, for the launcher (frontend.cpp,
+// which is built once for every disc).
+const char* ed_game_id(void) { return ED_GAME_ID; }
+
 int main(int argc, char** argv) {
     // Keep stdout/stderr unbuffered so diagnostics are not lost when a worker
     // thread calls abort() (e.g. an Aurora FATAL) before buffered output is

@@ -302,7 +302,7 @@ bool slot_used(int slot) {
 }
 
 bool disc_playable() {
-    return !g_discs.empty() && g_discs[g_disc].id == ED_GAME_ID;
+    return !g_discs.empty() && g_discs[g_disc].id == ed_game_id();
 }
 
 void build_rows();
@@ -328,8 +328,8 @@ Row disc_row() {
     if (g_discs.size() > 1)
         disc.value = "\u2039 " + disc.value + " \u203a";
     disc.note = d.path + "  |  " + d.id;
-    if (d.id != ED_GAME_ID)
-        disc.note = d.id + ": this build runs " ED_GAME_ID " only.";
+    if (d.id != ed_game_id())
+        disc.note = d.id + ": this build runs " + std::string(ed_game_id()) + " only.";
     disc.change = [](int dir) {
         if (g_discs.size() > 1)
             cycle(g_disc, static_cast<int>(g_discs.size()), dir);
@@ -1128,12 +1128,12 @@ extern "C" bool frontend_run_launcher(const char* default_iso, char* iso_out,
     g_disc = 0;
     bool found = false;
     for (size_t i = 0; i < g_discs.size() && !found; i++)
-        if (g_discs[i].path == g_settings.disc && g_discs[i].id == ED_GAME_ID) {
+        if (g_discs[i].path == g_settings.disc && g_discs[i].id == ed_game_id()) {
             g_disc = static_cast<int>(i);
             found = true;
         }
     for (size_t i = 0; i < g_discs.size() && !found; i++)
-        if (g_discs[i].id == ED_GAME_ID) {
+        if (g_discs[i].id == ed_game_id()) {
             g_disc = static_cast<int>(i);
             found = true;
         }

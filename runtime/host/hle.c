@@ -3598,6 +3598,16 @@ static const HleAddrEntry kAddrHandlers[] = {
     { 0u, hle_salInitDsp,                "salInitDsp" },
     { 0u, hle_ARQPostRequest,            "ARQPostRequest" },
     { 0u, hle_return_zero,                "DSPCheckMailToDSP" },
+    // Cache maintenance: this host has no dcache/icache model, so the SDK range
+    // helpers would only loop dcbf/dcbi/dcbst/icbi (each a no-op through the
+    // instruction fallback and a return to run_loop) over every 32-byte line:
+    // ~0.6 MB a frame, 4.5 M round trips in 7 s at the "rats" cutscene. Skip them.
+    { 0u, hle_noop,                     "DCInvalidateRange" },
+    { 0u, hle_noop,                     "DCFlushRange" },
+    { 0u, hle_noop,                     "DCStoreRange" },
+    { 0u, hle_noop,                     "DCFlushRangeNoSync" },
+    { 0u, hle_noop,                     "DCStoreRangeNoSync" },
+    { 0u, hle_noop,                     "ICInvalidateRange" },
     // DVD: host serves the disc file system from the ISO (see DVD handlers).
     { 0u, hle_DVDInit,                  "DVDInit" },
     { 0u, hle_DVDConvertPathToEntrynum, "DVDConvertPathToEntrynum" },
@@ -4626,6 +4636,113 @@ static void publish_codegen_options(void) {
     dolrecomp_chain_stop = g_chain_stop;
 }
 
+// MSL's memcpy, memset and a forward byte copy sit at the start of text in this
+// game and copy one byte per loop pass (lbzu/stbu: four guest instructions a
+// byte, ~4 M passes a second in the cutscene that follows the "rats" quote, where
+// the main thread then starves the Vorbis speech decoder). Done natively when the
+// whole range is in MEM1; anywhere else, byte by byte through the bus as before.
+// Found by their instructions, so either disc's DOL works.
+static bool mem1_span(const CPUState* cpu, u32 address, u32 size) {
+    return guest_ram_range_valid(cpu, address, size);
+}
+
+// memcpy(dst, src, n): copies backwards when src < dst, else forwards (memmove).
+static void hle_msl_memcpy(CPUState* cpu) {
+    const u32 dst = hle_arg_u32(cpu, 0);
+    const u32 src = hle_arg_u32(cpu, 1);
+    const u32 n = hle_arg_u32(cpu, 2);
+    if (n != 0u) {
+        if (mem1_span(cpu, dst, n) && mem1_span(cpu, src, n))
+            memmove(cpu->ram + (dst - GC_RAM_BASE), cpu->ram + (src - GC_RAM_BASE), n);
+        else if (src < dst)
+            for (u32 i = n; i-- > 0u;)
+                mem_write8(cpu, dst + i, mem_read8(cpu, src + i));
+        else
+            for (u32 i = 0; i < n; i++)
+                mem_write8(cpu, dst + i, mem_read8(cpu, src + i));
+    }
+    hle_set_u32(cpu, dst);
+}
+
+// The forward-only copy: a byte loop, so an overlapping dst inside the source
+// repeats the leading bytes; keep that.
+static void hle_msl_copy_forward(CPUState* cpu) {
+    const u32 dst = hle_arg_u32(cpu, 0);
+    const u32 src = hle_arg_u32(cpu, 1);
+    const u32 n = hle_arg_u32(cpu, 2);
+    if (n != 0u) {
+        if (mem1_span(cpu, dst, n) && mem1_span(cpu, src, n) &&
+            (dst <= src || dst - src >= n))
+            memmove(cpu->ram + (dst - GC_RAM_BASE), cpu->ram + (src - GC_RAM_BASE), n);
+        else
+            for (u32 i = 0; i < n; i++)
+                mem_write8(cpu, dst + i, mem_read8(cpu, src + i));
+    }
+}
+
+// memset(dst, c, n) (the wrapper around __fill_mem): returns dst.
+static void hle_msl_memset(CPUState* cpu) {
+    const u32 dst = hle_arg_u32(cpu, 0);
+    const u8 c = (u8)hle_arg_u32(cpu, 1);
+    const u32 n = hle_arg_u32(cpu, 2);
+    if (n != 0u) {
+        if (mem1_span(cpu, dst, n))
+            memset(cpu->ram + (dst - GC_RAM_BASE), c, n);
+        else
+            for (u32 i = 0; i < n; i++)
+                mem_write8(cpu, dst + i, c);
+    }
+    hle_set_u32(cpu, dst);
+}
+
+static bool code_matches(CPUState* cpu, u32 address, const u32* words, size_t count) {
+    for (size_t i = 0; i < count; i++)
+        if (mem_read32(cpu, address + (u32)i * 4u) != words[i])
+            return false;
+    return true;
+}
+
+static void install_msl_memory_hle(CPUState* cpu) {
+    if (getenv("ED_NO_MEM_HLE") != NULL)
+        return;
+    static const u32 kCopyForward[] = {0x3884FFFFu, 0x38C3FFFFu, 0x38A50001u, 0x4800000Cu,
+                                       0x8C040001u, 0x9C060001u, 0x34A5FFFFu, 0x4082FFF4u,
+                                       0x4E800020u};
+    static const u32 kMemcpyHead[] = {0x7C041840u, 0x41800028u};
+    static const u32 kMemcpyTail[] = {0x7C842A14u, 0x7CC32A14u, 0x38A50001u, 0x4800000Cu,
+                                      0x8C04FFFFu, 0x9C06FFFFu, 0x34A5FFFFu, 0x4082FFF4u,
+                                      0x4E800020u};
+    static const u32 kMemsetWrapper[] = {0x9421FFF0u, 0x7C0802A6u, 0x90010014u, 0x93E1000Cu,
+                                         0x7C7F1B78u, 0x4800001Du};
+    static const u32 kFillMemHead[] = {0x28050020u, 0x5484063Eu, 0x38C3FFFFu};
+    u32 found_memcpy = 0, found_memset = 0, found_forward = 0;
+    for (u32 a = HLE_CODE_BASE; a < HLE_CODE_BASE + 0x2000u; a += 4u) {
+        if (!found_memcpy && code_matches(cpu, a, kMemcpyHead, 2) &&
+            code_matches(cpu, a + 8u, kCopyForward, 9) &&
+            code_matches(cpu, a + 0x2Cu, kMemcpyTail, 9))
+            found_memcpy = a;
+        else if (!found_memset && code_matches(cpu, a, kMemsetWrapper, 6) &&
+                 code_matches(cpu, a + 0x30u, kFillMemHead, 3))
+            found_memset = a;
+        else if (!found_forward && mem_read32(cpu, a - 4u) == 0x4E800020u &&
+                 code_matches(cpu, a, kCopyForward, 9) &&
+                 (found_memcpy == 0u || a != found_memcpy + 8u))
+            found_forward = a;
+    }
+    struct { u32 address; HleHandler fn; } found[] = {
+        {found_memcpy, hle_msl_memcpy},
+        {found_memset, hle_msl_memset},
+        {found_forward, hle_msl_copy_forward},
+    };
+    for (size_t i = 0; i < sizeof found / sizeof found[0]; i++) {
+        HleDispatchEntry* entry = hle_dispatch_entry(found[i].address);
+        if (found[i].address != 0u && entry != NULL && entry->intercept == NULL)
+            entry->intercept = found[i].fn;
+    }
+    fprintf(stderr, "[hle] native memcpy 0x%08X memset 0x%08X forward copy 0x%08X\n",
+            found_memcpy, found_memset, found_forward);
+}
+
 void hle_install(CPUState* cpu) {
     g_hle_log = getenv("ED_HLE_LOG") != NULL;
     g_dvd_log = g_hle_log || getenv("ED_DVD_LOG") != NULL;
@@ -4716,6 +4833,7 @@ void hle_install(CPUState* cpu) {
     g_movie_cadence_started = false;
 #endif
     cpu->host_call = hle_dispatch;
+    install_msl_memory_hle(cpu);
     publish_codegen_options();
 }
 

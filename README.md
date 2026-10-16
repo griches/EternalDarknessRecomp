@@ -1,26 +1,40 @@
-# Eternal Darkness: Sanity's Requiem (static recompilation)
+# Eternal Darkness Recomp
 
-A native build of the GameCube game made from **your own disc**: the game's
-PowerPC code is translated to C by [DolRecomp](https://github.com/ExpansionPak/DolRecomp)
+A static recompilation of **Eternal Darkness: Sanity's Requiem** (GameCube):
+a native game built from **your own disc**. The game's PowerPC code is
+translated to C by [DolRecomp](https://github.com/ExpansionPak/DolRecomp)
 and runs on [GXRuntime](https://github.com/aharonahdoot/GXRuntime) with the
-Aurora renderer. The Mac build comes first; a PS5 build is planned.
+Aurora renderer.
 
 No game data is in this repository. `generated/` (code translated from your
 disc) and `dump/` (your disc image) stay on your machine.
 
-Status: boots, plays the Edgar Allan Poe opening with its streamed music and
-moves on to the intro movie, which is still black and slow. Supported discs:
-Europe `GEDP01` (tested) and USA `GEDE01`.
+Platforms: Mac (Apple silicon), Windows and Linux / Steam Deck, all from this
+repository. Supported discs: Europe `GEDP01` and USA `GEDE01`. The game plays
+through with its music, voices, movies and effects; widescreen, higher
+resolutions, HD texture packs and remappable controls are in the launcher's
+Options. The PS5 port is a separate repository.
 
-## Build (Mac)
+## Build
+
+All platforms start the same way:
 
 ```sh
-tools/setup-deps.sh                       # pinned DolRecomp + GXRuntime, plus our GXRuntime patch
+tools/setup-deps.sh                           # pinned DolRecomp + GXRuntime, plus our patches
 python3 tools/generate.py /path/to/disc.iso   # ISO or CISO; writes generated/
-cmake -S . -B build-mac -G Ninja && ninja -C build-mac EternalDarkness
-cp /path/to/disc.iso dump/GEDP01.iso      # or GEDE01.iso for the USA disc
-./play.sh
+cp /path/to/disc.iso dump/GEDP01.iso          # or GEDE01.iso for the USA disc
 ```
+
+- **Mac**: `cmake -S . -B build-mac -G Ninja && ninja -C build-mac EternalDarkness`,
+  then `./play.sh`. `tools/mac/make-mac-app.sh` builds a self-contained
+  `Eternal Darkness.app` (beta) that asks for your disc and builds the game
+  from it on first start (`tools/mac/README.txt`).
+- **Windows**: configure with clang-cl and Ninja (`build-win`), build
+  `EternalDarkness`, copy the DLLs from the build tree next to the exe, then
+  `play.bat`.
+- **Linux / Steam Deck**: build with clang and Ninja (`build-linux`);
+  `tools/deck/make-deck-package.sh` makes a folder that builds the game from
+  your disc on first start (`tools/deck/README.txt`).
 
 Keyboard: arrows = d-pad, J = A, K = B, U = X, I = Y, Q = Z, E/R = L/R,
 Enter = Start. Controllers work through SDL.

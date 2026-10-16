@@ -7211,7 +7211,7 @@ index 2c074d7..bc31d92 100644
    // U5/U8: emit zCoord before fog when per_pixel_depth or ztex-for-fog so
    // fog reuses it (Dolphin order). Fog alone still owns the classic body.
 diff --git a/graphics/gxcore/src/wgsl.cpp b/graphics/gxcore/src/wgsl.cpp
-index bbefbee..cde5e88 100644
+index bbefbee..4b38f7b 100644
 --- a/graphics/gxcore/src/wgsl.cpp
 +++ b/graphics/gxcore/src/wgsl.cpp
 @@ -45,6 +45,11 @@ std::string generate_wgsl(const ShaderKey& key) {
@@ -7235,7 +7235,7 @@ index bbefbee..cde5e88 100644
    // register-material channel is active we must expose the full uniform view
    // (both fields, in the fixed C struct order) so offsets line up.
    const bool needs_uniform_full =
-@@ -70,9 +75,11 @@ std::string generate_wgsl(const ShaderKey& key) {
+@@ -70,16 +75,22 @@ std::string generate_wgsl(const ShaderKey& key) {
        has_tangent ? "in.rawtangent" : "vsc.cached_tangent.xyz";
    const char* binormal_in =
        has_binormal ? "in.rawbinormal" : "vsc.cached_binormal.xyz";
@@ -7250,7 +7250,20 @@ index bbefbee..cde5e88 100644
    // Declare all three cached fields together when any is referenced so the WGSL
    // struct offsets stay aligned with the C VertexShaderConstants tail (they are
    // laid out normal, tangent, binormal — skipping one mid-run would misplace a
-@@ -90,36 +97,41 @@ std::string generate_wgsl(const ShaderKey& key) {
+   // later one). Only emitted when actually used, so formats that carry the
+   // attribute keep byte-identical goldens.
+-  const bool uses_cached = uses_cached_normal || uses_cached_tangent ||
+-                           uses_cached_binormal || emit_posttransform;
++  // GXRuntime recomp patch: every draw takes Dolphin's pixel-center and
++  // depth-range step (below), whose constants follow the cached fields.
++  const bool uses_cached = true;
++  (void)uses_cached_normal;
++  (void)uses_cached_tangent;
++  (void)uses_cached_binormal;
+ 
+   emit(out, "// gxcore generated shader (Dolphin VertexShaderGen shape)\n");
+   if (needs_uniform_full)
+@@ -90,36 +101,40 @@ std::string generate_wgsl(const ShaderKey& key) {
                "    pos: vec4f,\n"
                "    dir: vec4f,\n"
                "};\n");
@@ -7282,20 +7295,13 @@ index bbefbee..cde5e88 100644
 -  // Dual-texture post-transform matrices (U1): the uniform tail, declared only
 -  // when a Regular texgen applies the post-transform. uses_cached is forced true
 -  // above so the cached fields precede it and the offsets stay aligned.
--  if (emit_posttransform)
--    emit(out, "    posttransformmatrices: array<vec4f, 64>,\n");
--  // U9.2 VSM tail: I_PIXELCENTERCORRECTION + I_VIEWPORT_SIZE. Only declared
--  // when the dual-tex path already forced the full middle (lights/materials/
--  // cached/posttransform) so C offsets match. Default pcc.zw=(1,0) makes
--  // clip.z = w*0 - z*1 = -z — same as the plain-path hardcoded flip below.
 +  // U9.2 VSM tail: I_PIXELCENTERCORRECTION + I_VIEWPORT_SIZE, only declared on
 +  // the dual-tex path. Default pcc.zw=(1,0) makes clip.z = w*0 - z*1 = -z —
 +  // same as the plain-path hardcoded flip below.
-   if (emit_posttransform)
-     emit(out, "    pixelcentercorrection: vec4f,\n"
-               "    viewport_size: vec4f,\n");
-   emit(out, "};\n"
-             "@group(1) @binding(0) var<uniform> vsc: VertexShaderConstants;\n");
++  emit(out, "    pixelcentercorrection: vec4f,\n"
++            "    viewport_size: vec4f,\n");
++  emit(out, "};\n"
++            "@group(1) @binding(0) var<uniform> vsc: VertexShaderConstants;\n");
 +  // The XF-memory part every draw of an XF block shares (group 1 binding 1):
 +  // matrix rows, then lights (lit/emboss/register-material path), then the
 +  // dual-texture post-transform rows, again as a prefix of the C struct.
@@ -7303,14 +7309,22 @@ index bbefbee..cde5e88 100644
 +            "    transformmatrices: array<vec4f, 64>,\n");
 +  if (needs_uniform_full)
 +    emit(out, "    lights: array<Light, 8>,\n");
-+  if (emit_posttransform)
-+    emit(out, "    posttransformmatrices: array<vec4f, 64>,\n");
-+  emit(out, "};\n"
+   if (emit_posttransform)
+     emit(out, "    posttransformmatrices: array<vec4f, 64>,\n");
+-  // U9.2 VSM tail: I_PIXELCENTERCORRECTION + I_VIEWPORT_SIZE. Only declared
+-  // when the dual-tex path already forced the full middle (lights/materials/
+-  // cached/posttransform) so C offsets match. Default pcc.zw=(1,0) makes
+-  // clip.z = w*0 - z*1 = -z — same as the plain-path hardcoded flip below.
+-  if (emit_posttransform)
+-    emit(out, "    pixelcentercorrection: vec4f,\n"
+-              "    viewport_size: vec4f,\n");
+   emit(out, "};\n"
+-            "@group(1) @binding(0) var<uniform> vsc: VertexShaderConstants;\n");
 +            "@group(1) @binding(1) var<uniform> vxf: VertexSharedConstants;\n");
    if (tev) {
      // PixelShaderConstants (Dolphin I_COLORS/I_KCOLORS/I_ALPHA). Integer TEV.
      // group(2) here (texture shifts to group(3)) so an untextured TEV draw
-@@ -202,13 +214,13 @@ std::string generate_wgsl(const ShaderKey& key) {
+@@ -202,13 +217,13 @@ std::string generate_wgsl(const ShaderKey& key) {
              "    @location(9) rawtex5: vec2f,\n"
              "    @location(10) rawtex6: vec2f,\n"
              "    @location(11) rawtex7: vec2f,\n");
@@ -7327,7 +7341,20 @@ index bbefbee..cde5e88 100644
      emit(out, "    @location(15) rawtangent: vec3f,\n");
    emit(out, "};\n");
  
-@@ -236,9 +248,9 @@ std::string generate_wgsl(const ShaderKey& key) {
+@@ -216,8 +231,11 @@ std::string generate_wgsl(const ShaderKey& key) {
+   // indices so WebGPU's first-vertex convention matches GC last-vertex.
+   const char* color_interp =
+       key.flat_shading != 0u ? " @interpolate(flat)" : "";
++  // @invariant: a model drawn again by another pipeline (a highlight, a shine
++  // pass) lands on exactly the same depth, as on the GameCube, not a rounding
++  // apart (z-fighting: patchy triangles, flicker).
+   emit(out, "struct VertexOut {\n"
+-            "    @builtin(position) pos: vec4f,\n");
++            "    @invariant @builtin(position) pos: vec4f,\n");
+   emitf(out, "    @location(0)%s color0: vec4f,\n", color_interp);
+   if (emit_color1)
+     emitf(out, "    @location(1)%s color1: vec4f,\n", color_interp);
+@@ -236,9 +254,9 @@ std::string generate_wgsl(const ShaderKey& key) {
              "    var o: VertexOut;\n");
    if (key.has_pos_mtx_idx != 0) {
      emit(out, "    let posidx = i32(in.posmtx);\n"
@@ -7340,10 +7367,40 @@ index bbefbee..cde5e88 100644
    } else {
      emit(out, "    let p0 = vsc.posnormalmatrix[0];\n"
                "    let p1 = vsc.posnormalmatrix[1];\n"
-@@ -267,6 +279,14 @@ std::string generate_wgsl(const ShaderKey& key) {
-     // Plain path: equivalent to pcc.zw=(1,0) without reading the tail.
-     emit(out, "    clip.z = -clip.z;\n");
-   }
+@@ -253,20 +271,30 @@ std::string generate_wgsl(const ShaderKey& key) {
+   // U9.2: Dolphin VertexShaderGen depth remap + pixel-center correction.
+   // Default pcc.zw=(1,0) ⇒ clip.z = -clip.z (reversed-Z). Full formula only
+   // when the VSC tail is declared (dual-tex forces full middle + pcc/viewport).
+-  if (emit_posttransform) {
+-    // Dawn WGSL rejects compound-assign on swizzles (`clip.xy *=`); expand.
+-    emit(out,
+-         "    clip.z = clip.w * vsc.pixelcentercorrection.w - "
+-         "clip.z * vsc.pixelcentercorrection.z;\n"
+-         "    let pcc_sign = sign(vsc.pixelcentercorrection.xy * "
+-         "vec2f(1.0, -1.0));\n"
+-         "    clip = vec4f(clip.xy * pcc_sign, clip.z, clip.w);\n"
+-         "    clip = vec4f(clip.xy - clip.w * vsc.pixelcentercorrection.xy, "
+-         "clip.z, clip.w);\n");
+-  } else {
+-    // Plain path: equivalent to pcc.zw=(1,0) without reading the tail.
+-    emit(out, "    clip.z = -clip.z;\n");
+-  }
++  // GXRuntime recomp patch: on every draw, as Dolphin does. Only the dual-
++  // texture path took it, so a model drawn plainly and then again by such a
++  // pass (Eternal Darkness's shine on the gun, its target highlight) sat
++  // 1/12 pixel and, with a vertex depth range, a depth remap apart: the
++  // second pass z-fought the first. A draw with no viewport captured has
++  // pcc.xy 0: keep its sign 1 rather than collapse it.
++  // Dawn WGSL rejects compound-assign on swizzles (`clip.xy *=`); expand.
++  emit(out,
++       "    clip.z = clip.w * vsc.pixelcentercorrection.w - "
++       "clip.z * vsc.pixelcentercorrection.z;\n"
++       "    let pcc_raw = sign(vsc.pixelcentercorrection.xy * "
++       "vec2f(1.0, -1.0));\n"
++       "    let pcc_sign = select(vec2f(1.0), pcc_raw, pcc_raw != vec2f(0.0));\n"
++       "    clip = vec4f(clip.xy * pcc_sign, clip.z, clip.w);\n"
++       "    clip = vec4f(clip.xy - clip.w * vsc.pixelcentercorrection.xy, "
++       "clip.z, clip.w);\n");
 +  // Geometry placed exactly on a clip plane (an orthographic quad at the near
 +  // distance, as Eternal Darkness draws its title screens) lands a rounding
 +  // error outside [0, w] here and is clipped away; GX hardware draws it. Snap
@@ -7355,7 +7412,7 @@ index bbefbee..cde5e88 100644
    emit(out, "    o.pos = clip;\n");
    // Vertex colors (Dolphin VertexShaderGen WriteVertexBody). First select each
    // channel's vertex color with the GX presence rules: channel 0 prefers
-@@ -333,8 +353,14 @@ std::string generate_wgsl(const ShaderKey& key) {
+@@ -333,8 +361,14 @@ std::string generate_wgsl(const ShaderKey& key) {
                "1.0);\n",
                texnum, texnum);
        }
@@ -7371,7 +7428,7 @@ index bbefbee..cde5e88 100644
      if (tg.inputform == 0u) // AB11
        emit(out, "        coord.z = 1.0;\n");
      const auto tgtype = static_cast<TexGenType>(tg.texgentype);
-@@ -350,9 +376,9 @@ std::string generate_wgsl(const ShaderKey& key) {
+@@ -350,9 +384,9 @@ std::string generate_wgsl(const ShaderKey& key) {
          emitf(out,
                "        let ti%u = (in.texmtxidx.%c >> (8u * %uu)) & 0xFFu;\n", i,
                i < 4u ? 'x' : 'y', i % 4u);
@@ -7384,7 +7441,7 @@ index bbefbee..cde5e88 100644
          if (tg.projection != 0u)
            emitf(out, "        var uv = vec3f(dot(coord, m%u0), dot(coord, m%u1), "
                       "dot(coord, m%u2));\n",
-@@ -379,11 +405,11 @@ std::string generate_wgsl(const ShaderKey& key) {
+@@ -379,11 +413,11 @@ std::string generate_wgsl(const ShaderKey& key) {
        // normalize are compile-time constants from postMtxInfo[i].
        if (key.dualtex_enabled != 0) {
          const std::uint32_t base = tg.postmtx_index & 0x3fu;
@@ -7399,7 +7456,7 @@ index bbefbee..cde5e88 100644
                (base + 2u) & 0x3fu);
          if (tg.postmtx_normalize != 0u)
            emit(out, "        uv = normalize(uv);\n");
-@@ -416,7 +442,7 @@ std::string generate_wgsl(const ShaderKey& key) {
+@@ -416,7 +450,7 @@ std::string generate_wgsl(const ShaderKey& key) {
                   "dot(vsc.posnormalmatrix[4].xyz, %s), "
                   "dot(vsc.posnormalmatrix[5].xyz, %s));\n",
              i, binormal_in, binormal_in, binormal_in);

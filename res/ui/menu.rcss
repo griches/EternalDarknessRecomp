@@ -200,8 +200,9 @@ body.overlay #hint {
 	color: #d2bf98;
 }
 
-/* Button and key icons (Kenney Input Prompts, CC0) in their ink versions
-   (res/ui/glyphs/ink), drawn straight on the parchment. */
+/* Button and key icons (Kenney Input Prompts, CC0) in their menu versions
+   (res/ui/glyphs/ink: white keys with an ink rim, coloured buttons as they
+   are), drawn straight on the parchment. */
 img.glyph {
 	width: 32dp;
 	height: 32dp;

@@ -141,10 +141,10 @@ bool claims(uint32_t format, uint32_t width, uint32_t height) {
     return format == kCmpr && width == kSheetW && height == kSheetH;
 }
 
-bool apply(const uint8_t* rgba, uint32_t width, uint32_t height, uint8_t** out_rgba,
-           uint32_t* out_width, uint32_t* out_height) {
+int apply(const uint8_t* rgba, uint32_t width, uint32_t height, uint8_t** out_rgba,
+          uint32_t* out_width, uint32_t* out_height) {
     if (width != kSheetW || height != kSheetH || !is_button_sheet(rgba))
-        return false;
+        return 0;
     const uint32_t ow = width * kScale, oh = height * kScale;
     std::vector<uint8_t> out(static_cast<size_t>(ow) * oh * 4);
     // The original, doubled (runes and markers stay as they were).
@@ -167,11 +167,11 @@ bool apply(const uint8_t* rgba, uint32_t width, uint32_t height, uint8_t** out_r
     }
     *out_rgba = static_cast<uint8_t*>(std::malloc(out.size()));
     if (*out_rgba == nullptr)
-        return false;
+        return 0;
     std::memcpy(*out_rgba, out.data(), out.size());
     *out_width = ow;
     *out_height = oh;
-    return true;
+    return 1;
 }
 
 uint64_t generation() { return controls::glyph_signature(); }
@@ -201,8 +201,8 @@ bool claims_any(uint32_t format, uint32_t width, uint32_t height) {
     return claims(format, width, height) || fonts_claims(format, width, height);
 }
 
-bool apply_any(const uint8_t* rgba, uint32_t width, uint32_t height, uint8_t** out_rgba,
-               uint32_t* out_width, uint32_t* out_height) {
+int apply_any(const uint8_t* rgba, uint32_t width, uint32_t height, uint8_t** out_rgba,
+              uint32_t* out_width, uint32_t* out_height) {
     if (claims(kCmpr, width, height))
         return apply(rgba, width, height, out_rgba, out_width, out_height);
     return fonts_apply(rgba, width, height, out_rgba, out_width, out_height);
@@ -213,6 +213,7 @@ uint64_t generation_any() {
 }
 
 extern "C" void buttons_init(void) {
+    fonts_preload();
     static const DolAuroraTextureOverride ops = {claims_any, apply_any, generation_any};
     dol_aurora_set_texture_override(&ops);
 }

@@ -52,6 +52,13 @@ struct Loaded {
     uint32_t width = 0, height = 0, mips = 1;
 };
 
+// A loaded image as the renderer takes it: malloc'd here on the loader thread,
+// so handing it over costs the renderer's thread no copy.
+struct Ready {
+    uint8_t* rgba = nullptr;
+    uint32_t width = 0, height = 0, mips = 1;
+};
+
 // Append the mip chain down to 1x1: each level the 2x2 average of the last,
 // colour weighted by alpha so cut-out edges do not darken.
 void build_mips(Loaded& img) {
@@ -97,7 +104,7 @@ struct Shared {
     std::condition_variable cv;
     std::deque<Key> queue;
     std::unordered_set<Key, KeyHash> queued;  // queued or loading
-    std::unordered_map<Key, Loaded, KeyHash> ready;
+    std::unordered_map<Key, Ready, KeyHash> ready;
     std::unordered_set<Key, KeyHash> failed;
 };
 Shared& g = *new Shared;
@@ -148,10 +155,19 @@ void loader() {
         }();
         if (ok && mips)
             build_mips(img);
+        Ready ready;
+        if (ok) {
+            ready.rgba = static_cast<uint8_t*>(std::malloc(img.rgba.size()));
+            if (ready.rgba != nullptr)
+                std::memcpy(ready.rgba, img.rgba.data(), img.rgba.size());
+            ready.width = img.width;
+            ready.height = img.height;
+            ready.mips = img.mips;
+        }
         std::lock_guard<std::mutex> lock(g.mutex);
         g.queued.erase(key);
-        if (ok)
-            g.ready[key] = std::move(img);
+        if (ready.rgba != nullptr)
+            g.ready[key] = ready;
         else
             g.failed.insert(key);
         if (g_log)
@@ -167,15 +183,12 @@ int lookup(uint32_t format, uint32_t width, uint32_t height, uint64_t hash, uint
         return 0;
     std::lock_guard<std::mutex> lock(g.mutex);
     if (auto it = g.ready.find(key); it != g.ready.end()) {
-        Loaded& img = it->second;
-        *out_rgba = static_cast<uint8_t*>(std::malloc(img.rgba.size()));
-        if (*out_rgba == nullptr)
-            return 0;
-        std::memcpy(*out_rgba, img.rgba.data(), img.rgba.size());
+        const Ready& img = it->second;
+        *out_rgba = img.rgba;  // the renderer frees it
         *out_width = img.width;
         *out_height = img.height;
         *out_mips = img.mips;
-        g.ready.erase(it);  // the renderer keeps it now
+        g.ready.erase(it);
         return 1;
     }
     if (g.failed.count(key) != 0)

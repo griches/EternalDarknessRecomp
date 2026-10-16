@@ -19,6 +19,7 @@
 #include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_scancode.h>
 #include <SDL3/SDL_timer.h>
+#include <SDL3/SDL_video.h>
 
 #include "host/compat.h"
 
@@ -1158,6 +1159,45 @@ extern "C" bool frontend_run_launcher(const char* default_iso, char* iso_out,
     return true;
 }
 
+// The UI context covers the game picture only, and the picture's bars move
+// from the sides to the top and bottom as the game switches between 4:3 and
+// 16:9 (the book's pages, cutscenes), so the counter jumped with them. Keep it
+// at one place on the screen: inside the corner of both a 4:3 and a 16:9
+// picture (and of any picture seen since), whichever is showing.
+void place_fps_counter() {
+    Rml::Element* fps = g_hud->GetElementById("fps");
+    Rml::Context* context = g_hud->GetContext();
+    int count = 0;
+    SDL_Window** windows = SDL_GetWindows(&count);
+    SDL_Window* window = windows != nullptr && count > 0 ? windows[0] : nullptr;
+    SDL_free(windows);
+    int ww = 0, wh = 0;
+    if (fps == nullptr || context == nullptr || window == nullptr ||
+        !SDL_GetWindowSizeInPixels(window, &ww, &wh) || ww <= 0 || wh <= 0)
+        return;
+    static int s_ww = 0, s_wh = 0, s_barX = 0, s_barY = 0, s_left = -1, s_top = -1;
+    if (ww != s_ww || wh != s_wh) {
+        s_ww = ww;
+        s_wh = wh;
+        s_barX = (ww - std::min(ww, wh * 4 / 3)) / 2;
+        s_barY = (wh - std::min(wh, ww * 9 / 16)) / 2;
+    }
+    const Rml::Vector2i dim = context->GetDimensions();
+    const int barX = std::max(0, (ww - dim.x) / 2);
+    const int barY = std::max(0, (wh - dim.y) / 2);
+    s_barX = std::max(s_barX, barX);
+    s_barY = std::max(s_barY, barY);
+    const float dp = context->GetDensityIndependentPixelRatio();
+    const int left = s_barX - barX + static_cast<int>(14.f * dp + 0.5f);
+    const int top = s_barY - barY + static_cast<int>(10.f * dp + 0.5f);
+    if (left != s_left || top != s_top) {
+        s_left = left;
+        s_top = top;
+        fps->SetProperty("left", std::to_string(left) + "px");
+        fps->SetProperty("top", std::to_string(top) + "px");
+    }
+}
+
 // On-screen frames per second (game frames, i.e. calls here), refreshed each
 // second while the FPS counter option is on.
 void update_fps_counter() {
@@ -1174,6 +1214,7 @@ void update_fps_counter() {
         mark = 0;
         return;
     }
+    place_fps_counter();
     const Uint64 now = SDL_GetTicksNS();
     frames++;
     if (mark == 0) {

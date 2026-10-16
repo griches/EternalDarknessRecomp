@@ -1223,7 +1223,10 @@ void update_fps_counter() {
     const ImVec2 extent = font->CalcTextSizeA(size, FLT_MAX, 0.f, text);
     const ImVec2 at{14.f * dp, 10.f * dp};
     const ImVec2 pad{8.f * dp, 3.f * dp};
-    ImDrawList* draw = ImGui::GetForegroundDrawList();
+    // The main viewport's list: the plain call goes through ImGui's current
+    // window, which is null outside an ImGui frame (on quit, Aurora has
+    // stopped starting them while the game's frames still end here).
+    ImDrawList* draw = ImGui::GetForegroundDrawList(ImGui::GetMainViewport());
     draw->AddRectFilled(at, ImVec2{at.x + extent.x + 2.f * pad.x, at.y + extent.y + 2.f * pad.y},
                         IM_COL32(0, 0, 0, 0x99), 4.f * dp);
     draw->AddText(font, size, ImVec2{at.x + pad.x, at.y + pad.y}, IM_COL32(0xf0, 0xe6, 0xc8, 0xff), text);

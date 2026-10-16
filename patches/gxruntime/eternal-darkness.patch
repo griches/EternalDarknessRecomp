@@ -3176,7 +3176,7 @@ index 7af8fca..4c14e34 100644
      g_requested.store(false, std::memory_order_release);
    else
 diff --git a/graphics/aurora/lib/gfx/gxcore_draw.cpp b/graphics/aurora/lib/gfx/gxcore_draw.cpp
-index 71136b9..9530879 100644
+index 71136b9..179b6ee 100644
 --- a/graphics/aurora/lib/gfx/gxcore_draw.cpp
 +++ b/graphics/aurora/lib/gfx/gxcore_draw.cpp
 @@ -1,4 +1,5 @@
@@ -3578,7 +3578,7 @@ index 71136b9..9530879 100644
    gfx::resolve_pass(it->second, srcRect, do_clear && cmd.color_update,
                      do_clear && cmd.alpha_update,
                      do_clear && cmd.depth_update,
-@@ -723,69 +938,256 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -723,69 +938,270 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
                                  static_cast<float>(cmd.clear_a) / 255.f},
                      clearDepthValue, fmt, &filter);
  
@@ -3658,9 +3658,23 @@ index 71136b9..9530879 100644
 +      xfb_h = cmd.height;
 +    g_last_xfb_dest_stride = dest_stride;
 +    g_last_xfb_height = xfb_h;
-+    const XfbRamTarget target{cmd.src_x, cmd.src_y, cmd.width, cmd.height, xfb_h, dest_stride};
++    const XfbRamTarget target{cmd.src_x, cmd.src_y, cmd.width,       cmd.height,
++                              xfb_h,     dest_stride, g_xfb_display_copy_count};
 +    std::lock_guard lock{g_xfbRamMutex};
 +    g_xfbRamTarget = target;
++    // DOL_XFB_LOG=1: each display copy's shape and how old the frame written
++    // to RAM is (in display copies).
++    static const bool xfb_log = std::getenv("DOL_XFB_LOG") != nullptr;
++    if (xfb_log)
++      std::fprintf(stderr,
++                   "[xfb] copy %llu src=(%u,%u %ux%u) xfb_h=%u stride=%u dest=0x%08X "
++                   "writes copy %llu (%lld old)\n",
++                   g_xfb_display_copy_count, cmd.src_x, cmd.src_y, cmd.width, cmd.height, xfb_h,
++                   dest_stride, cmd.dest_address,
++                   g_xfbRamYuyv.empty() ? 0ull : g_xfbRamYuyvTarget.copy,
++                   g_xfbRamYuyv.empty() ? -1ll
++                                        : static_cast<long long>(g_xfb_display_copy_count -
++                                                                 g_xfbRamYuyvTarget.copy));
 +    if (!g_xfbRamYuyv.empty() && g_xfbRamYuyvTarget == target) {
 +      const uint32_t bytes = dest_stride * xfb_h;
 +      const void* dest_c = nullptr;
@@ -3889,7 +3903,7 @@ index 71136b9..9530879 100644
  
    if (plan.viewport_valid) {
      // Raw XF viewport -> logical viewport, the raw path's own formula
-@@ -839,23 +1241,149 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -839,23 +1255,149 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      const uint32_t size = std::min(tsize, available);
      // Hash the actual source texels (+ TLUT for CI) so a content change under an
      // unchanged guest identity is a distinct cache entry — see TextureKey.
@@ -4044,7 +4058,7 @@ index 71136b9..9530879 100644
      // gxcore owns the decode for every format: produce tightly-packed RGBA8 and
      // upload it as a pre-decoded PC texture (no substrate re-conversion).
      std::vector<uint8_t> decoded;
-@@ -868,8 +1396,33 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -868,8 +1410,33 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      } else {
        decoded = gxc::decode_texture(format, width, height, bytes, size);
      }
@@ -4079,7 +4093,7 @@ index 71136b9..9530879 100644
        handle = new_static_texture_2d(
            width, height, 1, GX_TF_RGBA8_PC,
            ArrayRef<uint8_t>{decoded.data(), decoded.size()}, false,
-@@ -892,7 +1445,98 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -892,7 +1459,98 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    };
  
    BindGroupRef textureBindGroup = 0;
@@ -4178,7 +4192,7 @@ index 71136b9..9530879 100644
      if (plan.texmap_mask == 0u) {
        // Single-texmap fast path: primary texture + plan.sampler at binding 0/1.
        if (plan.has_texture) {
-@@ -903,7 +1547,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -903,7 +1561,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
              plan.tlut_data, plan.tlut_available);
          if (bound) {
            const auto sampler =
@@ -4187,7 +4201,7 @@ index 71136b9..9530879 100644
            const std::array entries{
                WGPUBindGroupEntry{.binding = 0,
                                   .textureView =
-@@ -919,6 +1563,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -919,6 +1577,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            textureBindGroup = bind_group_ref(descriptor);
          }
        }
@@ -4195,7 +4209,7 @@ index 71136b9..9530879 100644
      } else {
        // Multi-texmap: bind each used texmap at 2t (texture) / 2t+1 (sampler),
        // matching the WGSL declarations. Per-texmap PlanSampler from
-@@ -945,14 +1590,16 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -945,14 +1604,16 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
          held.push_back(bound);
          const gxc::PlanSampler& ps =
              pt.sampler.valid ? pt.sampler : plan.samplers[t];
@@ -4214,7 +4228,7 @@ index 71136b9..9530879 100644
        const WGPUBindGroupDescriptor descriptor{
            .label = {"GXCore Texture Bind Group", WGPU_STRLEN},
            .layout = texture_bind_group_layout(plan.texmap_mask).Get(),
-@@ -960,6 +1607,239 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -960,6 +1621,239 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            .entries = entries.data(),
        };
        textureBindGroup = bind_group_ref(descriptor);
@@ -4454,7 +4468,7 @@ index 71136b9..9530879 100644
      }
    }
  
-@@ -969,27 +1849,13 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -969,27 +1863,13 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    const auto idxRange = push_indices(
        reinterpret_cast<const uint8_t*>(plan.indices.data()),
        plan.indices.size() * sizeof(uint16_t), 4);
@@ -4484,7 +4498,7 @@ index 71136b9..9530879 100644
          .pixelUniformRange = pixelUniformRange,
          .indexCount = static_cast<uint32_t>(plan.indices.size()),
          .textureBindGroup = textureBindGroup,
-@@ -1006,6 +1872,8 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -1006,6 +1886,8 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      }
    } else {
      issue_draw();
@@ -4866,10 +4880,10 @@ index 91696d9..9a4bf23 100644
  
  } // namespace aurora::gfx::gxcore
 diff --git a/graphics/aurora/lib/gfx/xfb_present.hpp b/graphics/aurora/lib/gfx/xfb_present.hpp
-index b205cfa..72d0351 100644
+index b205cfa..d7a8699 100644
 --- a/graphics/aurora/lib/gfx/xfb_present.hpp
 +++ b/graphics/aurora/lib/gfx/xfb_present.hpp
-@@ -16,5 +16,26 @@ const TextureHandle* lookup_xfb_texture(std::uint32_t physical_address) noexcept
+@@ -16,5 +16,30 @@ const TextureHandle* lookup_xfb_texture(std::uint32_t physical_address) noexcept
  unsigned long long xfb_display_copy_count() noexcept;
  // Times present fell through to YUYV→RGBA RAM decode (no GPU copy hit).
  unsigned long long xfb_ram_present_count() noexcept;
@@ -4888,7 +4902,11 @@ index b205cfa..72d0351 100644
 +struct XfbRamTarget {
 +  uint32_t srcX = 0, srcY = 0, width = 0, height = 0;  // EFB rectangle
 +  uint32_t xfbHeight = 0, stride = 0;                   // in RAM
-+  bool operator==(const XfbRamTarget&) const = default;
++  unsigned long long copy = 0;  // which display copy noted it (age, DOL_XFB_LOG)
++  bool operator==(const XfbRamTarget& o) const {
++    return srcX == o.srcX && srcY == o.srcY && width == o.width && height == o.height &&
++           xfbHeight == o.xfbHeight && stride == o.stride;
++  }
 +};
 +XfbRamTarget xfb_ram_target() noexcept;
 +// rgba: the frame scaled to srcX+width x srcY+height, rows bytesPerRow apart,
@@ -9064,7 +9082,7 @@ index 264500b..e65e613 100644
 +    return g_aram;
 +}
 diff --git a/src/ax_host.c b/src/ax_host.c
-index 2c0e5ff..424acdb 100644
+index 2c0e5ff..be88d3e 100644
 --- a/src/ax_host.c
 +++ b/src/ax_host.c
 @@ -48,6 +48,9 @@ typedef struct {
@@ -9150,7 +9168,34 @@ index 2c0e5ff..424acdb 100644
      mix_channel(ax, cpu, pb, samples, DOL_AX_MAIN_L, 0x12u, 0x52u,
                  (control & 0x0001u) != 0, (control & 0x0008u) != 0, frame_offset);
      mix_channel(ax, cpu, pb, samples, DOL_AX_MAIN_R, 0x16u, 0x58u,
-@@ -435,6 +470,11 @@ void dol_ax_host_init(DolAxHost* ax) {
+@@ -285,7 +320,26 @@ static void process_voice_ms(DolAxHost* ax, CPUState* cpu, u32 pb,
+ 
+ static void process_pb_list(DolAxHost* ax, CPUState* cpu, u32 first_pb) {
+     u32 pb = first_pb;
++    // ED_AX_VOICES=1: every 100 AX frames (0.5 s), each running voice's
++    // sample addresses, ADPCM state and volumes.
++    static int dbg = -1;
++    static unsigned dbg_frame;
++    if (dbg < 0)
++        dbg = getenv("ED_AX_VOICES") != NULL;
++    const bool dump = dbg && (dbg_frame++ % 100u) == 0u;
++    if (dump)
++        fprintf(stderr, "[axv] frame %u\n", dbg_frame);
+     for (u32 voice = 0; pb && voice < DOL_AX_MAX_VOICES; voice++) {
++        if (dump && mem_read16(cpu, pb + 0x0Eu) == 1)
++            fprintf(stderr, "[axv]  v%02u pb=%08X fmt=%u loop=%u strm=%u cur=%08X loopa=%08X end=%08X ps=%02X lps=%02X yn=%d,%d lyn=%d,%d volL=%04X volR=%04X env=%04X/%04X mc=%04X src=%u ratio=%08X\n",
++                    voice, pb, mem_read16(cpu, pb + 0x70u), mem_read16(cpu, pb + 0x6Eu),
++                    mem_read16(cpu, pb + 0x10u), hilo(cpu, pb + 0x7Au), hilo(cpu, pb + 0x72u),
++                    hilo(cpu, pb + 0x76u), mem_read16(cpu, pb + 0xA0u), mem_read16(cpu, pb + 0xB4u),
++                    (s16)mem_read16(cpu, pb + 0xA2u), (s16)mem_read16(cpu, pb + 0xA4u),
++                    (s16)mem_read16(cpu, pb + 0xB6u), (s16)mem_read16(cpu, pb + 0xB8u),
++                    mem_read16(cpu, pb + 0x12u), mem_read16(cpu, pb + 0x16u),
++                    mem_read16(cpu, pb + 0x64u), mem_read16(cpu, pb + 0x66u),
++                    mem_read16(cpu, pb + 0x0Cu), mem_read16(cpu, pb + 0x08u), hilo(cpu, pb + 0xA6u));
+         if (mem_read16(cpu, pb + 0x0Eu) == 1)
+             ax->active_voices++;
+         u32 update_index = 0;
+@@ -435,6 +489,11 @@ void dol_ax_host_init(DolAxHost* ax) {
      memset(ax, 0, sizeof *ax);
  }
  

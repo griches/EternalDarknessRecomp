@@ -55,7 +55,8 @@ set(ED_DISC_SOURCES
 if(ED_ENABLE_AURORA)
     # Launcher and in-game menu (RmlUi documents in res/ui).
     list(APPEND ED_HOST_SOURCES runtime/host/frontend.cpp runtime/host/controls.cpp
-         runtime/host/buttons.cpp runtime/host/fonts.cpp runtime/host/texpack.cpp)
+         runtime/host/buttons.cpp runtime/host/fonts.cpp runtime/host/texpack.cpp
+         runtime/host/guestprof.c)
 endif()
 
 # ED_SPLIT_HOST (the Mac .app): the host is a shared library, libedhost, and

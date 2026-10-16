@@ -83,7 +83,7 @@ void settings_load(void) {
         if (strcmp(key, "skip_intros") == 0)
             g_settings.skip_intros = n != 0;
         else if (strcmp(key, "aspect") == 0)
-            g_settings.aspect = n == 0 ? 2 : clamp_int(n, 1, 3);
+            g_settings.aspect = n == 1 ? 1 : 2;
         else if (strcmp(key, "widescreen_hud") == 0)
             g_settings.widescreen_hud = n != 0;
         else if (strcmp(key, "render_scale") == 0)

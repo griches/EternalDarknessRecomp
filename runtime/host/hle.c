@@ -4980,14 +4980,9 @@ static void find_widescreen_option(CPUState* cpu) {
     entry->notify = notify_options_menu;
 }
 
-// The launcher's choice as the game's word: 16:9 on, 4:3 off, Stretch on when
-// the window is wider than 3:2.
+// The launcher's choice as the game's word: 16:9 on, 4:3 off.
 static int launcher_widescreen(void) {
-    if (g_settings.aspect != 3)
-        return g_settings.aspect == 2;
-    uint32_t w = 0, h = 0;
-    dol_aurora_get_display_info(NULL, &w, &h);
-    return h != 0u && (float)w / (float)h > 1.5f;
+    return g_settings.aspect == 2;
 }
 
 static void sync_widescreen_option(CPUState* cpu) {

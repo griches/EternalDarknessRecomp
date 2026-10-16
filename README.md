@@ -48,8 +48,8 @@ menu with four save slots (`saves/`), the same options, and a way back to the
 launcher. Menus work with the keyboard (arrows, Enter, Esc), a controller
 (d-pad or stick, A, B) or the mouse.
 
-Options (kept in `settings.ini`): skip intros, display (follow the game's
-widescreen setting, 4:3, 16:9 or stretch), widescreen HUD, resolution (each
+Options (kept in `settings.ini`): skip intros, aspect ratio (4:3 or 16:9, the
+game's own two; it sets the game's widescreen option), widescreen HUD, resolution (each
 choice shows its size), fullscreen, on-screen FPS counter, music and
 sound-effect volumes, audio buffer, and Controls: Original (GameCube
 positions), Modern (attack RT/A, action B, aim LT, sprint and creep on the stick clicks

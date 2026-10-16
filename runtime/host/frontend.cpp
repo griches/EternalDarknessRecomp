@@ -511,12 +511,14 @@ Row vibration_row() {
 }
 
 void build_options() {
-    static const char* const kAspect[] = {"16:9", "4:3", "16:9", "Stretch"};
+    static const char* const kAspect[] = {"16:9", "4:3", "16:9"};
     // Each resolution as the pixels it draws at, for the display shape in use:
-    // the window's own, or a standard height at 4:3 or 16:9.
-    float display_aspect = 4.f / 3.f;
+    // the window's own, or a standard height at 4:3 or 16:9. The shape comes
+    // from the choice itself: the renderer takes a new aspect at its next
+    // present, after these rows are built, so its own value lags one change.
+    const float display_aspect = g_settings.aspect == 1 ? 4.f / 3.f : 16.f / 9.f;
     uint32_t win_w = 0, win_h = 0;
-    dol_aurora_get_display_info(&display_aspect, &win_w, &win_h);
+    dol_aurora_get_display_info(nullptr, &win_w, &win_h);
     auto size_label = [&](int scale) {
         uint32_t w, h;
         if (scale == 0) {
@@ -552,8 +554,8 @@ void build_options() {
     aspect.note = "16:9 is the game's own widescreen view: more at the sides, not stretched. "
                   "Changing it in the game's options changes it here too.";
     aspect.change = [](int dir) {
-        int choice = g_settings.aspect - 1;  // 4:3, 16:9, Stretch
-        cycle(choice, 3, dir);
+        int choice = g_settings.aspect - 1;  // 4:3, 16:9
+        cycle(choice, 2, dir);
         g_settings.aspect = choice + 1;
         changed();
     };

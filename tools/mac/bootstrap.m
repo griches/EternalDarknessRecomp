@@ -8,7 +8,9 @@
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 #include <fcntl.h>
+#include <mach-o/loader.h>
 #include <spawn.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <sys/wait.h>
@@ -51,10 +53,23 @@ static NSString* stamp_for(NSString* disc) {
                                       (long)st.st_mtimespec.tv_sec, g_version];
 }
 
+// A linked game: a 64-bit Mach-O of some size (a failed link can leave an
+// empty file behind).
+static BOOL is_game_binary(NSString* path) {
+    struct stat st;
+    if (stat(path.fileSystemRepresentation, &st) != 0 || st.st_size < (1 << 20))
+        return NO;
+    const int fd = open(path.fileSystemRepresentation, O_RDONLY);
+    uint32_t magic = 0;
+    const BOOL ok = fd >= 0 && read(fd, &magic, sizeof magic) == sizeof magic && magic == MH_MAGIC_64;
+    if (fd >= 0)
+        close(fd);
+    return ok;
+}
+
 static BOOL game_ready(NSString* disc) {
     NSString* stamp = stamp_for(disc);
-    return stamp != nil &&
-           [NSFileManager.defaultManager isExecutableFileAtPath:data_path(@"game/EternalDarkness")] &&
+    return stamp != nil && is_game_binary(data_path(@"game/EternalDarkness")) &&
            [read_text(data_path(@"game/build.stamp")) isEqualToString:stamp];
 }
 
@@ -68,7 +83,8 @@ static void sync_res(void) {
     write_text(data_path(@"res/VERSION"), g_version);
 }
 
-// Start the game in place of this program (its window takes over).
+// Start the game in place of this program (its window takes over). Returns
+// only if it could not: the build is then forgotten, so the next try builds.
 static void start_game(NSString* disc) {
     sync_res();
     NSFileManager* fm = NSFileManager.defaultManager;
@@ -87,8 +103,8 @@ static void start_game(NSString* disc) {
     char* const argv[] = {(char*)exe, "game/main.dol", "--iso", (char*)disc.fileSystemRepresentation,
                           "--max-blocks", "1000000000000000", NULL};
     execv(exe, argv);
-    fprintf(stderr, "could not start %s\n", exe);
-    exit(1);
+    fprintf(stderr, "could not start %s: %s\n", exe, strerror(errno));
+    [fm removeItemAtPath:data_path(@"game/build.stamp") error:nil];
 }
 
 // --- building ---------------------------------------------------------------
@@ -268,6 +284,13 @@ static int run_tool(NSArray<NSString*>* args, NSDictionary<NSString*, NSString*>
     }
     if (failed)
         return @"Building the game failed.";
+    for (NSArray* unit in units) {
+        NSString* out = [obj stringByAppendingPathComponent:[((NSString*)unit[0]).lastPathComponent
+                                                                stringByAppendingString:@".o"]];
+        NSDictionary* attrs = [fm attributesOfItemAtPath:out error:nil];
+        if (attrs == nil || attrs.fileSize == 0)
+            return @"Building the game failed.";
+    }
 
     // 3. Link against the host library, beside which the game runs.
     self.progress(0.96, @"Linking…");
@@ -278,7 +301,7 @@ static int run_tool(NSArray<NSString*>* args, NSDictionary<NSString*, NSString*>
         [link addObject:[obj stringByAppendingPathComponent:name]];
     [link addObjectsFromArray:@[ [g_frameworks stringByAppendingPathComponent:@"libedhost.dylib"],
                                  @"-Wl,-rpath,@executable_path" ]];
-    if (run_tool(link, env, nil) != 0)
+    if (run_tool(link, env, nil) != 0 || !is_game_binary(data_path(@"game/EternalDarkness.new")))
         return @"Linking the game failed.";
     [fm removeItemAtPath:data_path(@"game/libedhost.dylib") error:nil];
     [fm copyItemAtPath:[g_frameworks stringByAppendingPathComponent:@"libedhost.dylib"]
@@ -336,6 +359,7 @@ static int run_tool(NSArray<NSString*>* args, NSDictionary<NSString*, NSString*>
 @end
 
 @implementation AppDelegate {
+    BOOL _building;
     NSWindow* _window;
     DropView* _view;
     NSTextField* _text;
@@ -404,6 +428,9 @@ static int run_tool(NSArray<NSString*>* args, NSDictionary<NSString*, NSString*>
 }
 
 - (void)build:(NSString*)disc {
+    if (_building)
+        return;
+    _building = YES;
     _view.onDisc = nil;
     _choose.hidden = YES;
     _bar.hidden = NO;
@@ -421,13 +448,15 @@ static int run_tool(NSArray<NSString*>* args, NSDictionary<NSString*, NSString*>
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSString* error = [builder buildFromDisc:disc];
         dispatch_async(dispatch_get_main_queue(), ^{
+            NSString* message = error;
             if (error == nil) {
                 write_text(data_path(@"disc.txt"), disc);
                 start_game(disc);
-                return;
+                message = @"The game was built but could not start.";
             }
+            self->_building = NO;
             NSAlert* alert = [NSAlert new];
-            alert.messageText = error;
+            alert.messageText = message;
             alert.informativeText = [NSString stringWithFormat:@"The details are in %@.", data_path(@"logs/build.log")];
             [alert runModal];
             self->_bar.hidden = YES;
@@ -447,7 +476,21 @@ static int run_tool(NSArray<NSString*>* args, NSDictionary<NSString*, NSString*>
     if (!pick && disc.length != 0 && [NSFileManager.defaultManager fileExistsAtPath:disc]) {
         if (game_ready(disc))
             start_game(disc);
-        [self build:disc];  // the app or the disc changed: build again
+        [self build:disc];  // the app or the disc changed, or it would not start: build again
+    }
+}
+
+// A disc image opened with the app (Open With, or dropped on its icon).
+- (void)application:(NSApplication*)app openURLs:(NSArray<NSURL*>*)urls {
+    for (NSURL* url in urls) {
+        NSString* ext = url.pathExtension.lowercaseString;
+        if (url.isFileURL && ([ext isEqualToString:@"iso"] || [ext isEqualToString:@"gcm"] ||
+                              [ext isEqualToString:@"ciso"])) {
+            if (_window == nil)
+                [self makeWindow];
+            [self build:url.path];
+            return;
+        }
     }
 }
 
@@ -472,6 +515,18 @@ int main(int argc, const char* argv[]) {
             g_data = data_env;
         [NSFileManager.defaultManager createDirectoryAtPath:g_data withIntermediateDirectories:YES
                                                  attributes:nil error:nil];
+        // One at a time: two builds in this folder delete each other's files.
+        // The lock stays open into the game (exec keeps it), so a second start
+        // while it runs stops here too.
+        const int lock = open(data_path(@".lock").fileSystemRepresentation, O_RDWR | O_CREAT, 0644);
+        if (lock >= 0 && flock(lock, LOCK_EX | LOCK_NB) != 0) {
+            [NSApplication sharedApplication];
+            NSAlert* alert = [NSAlert new];
+            alert.messageText = @"Eternal Darkness is already open.";
+            alert.informativeText = @"It is preparing your game or playing it in another window.";
+            [alert runModal];
+            return 0;
+        }
         // Straight to the game when it is built (no window at all).
         NSString* disc = read_text(data_path(@"disc.txt"));
         if (disc.length != 0 && game_ready(disc) &&

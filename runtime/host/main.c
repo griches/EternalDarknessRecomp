@@ -343,6 +343,67 @@ static int run_loop(void* user) {
 // which is built once for every disc).
 const char* ed_game_id(void) { return ED_GAME_ID; }
 
+// The guest CPU: one per process. Chunks built with DOLRECOMP_STATIC_CPU
+// (CMakeLists.txt) address it by name, a link-time constant, instead of
+// through their CPUState argument.
+CPUState dolrecomp_cpu;
+
+#ifdef ED_AURORA
+#include <SDL3/SDL_thread.h>
+#include <SDL3/SDL_timer.h>
+// ED_GUEST_PROF=1 (debug): a statistical profile of the guest code. A thread
+// samples dolrecomp_cpu.pc (the generated code stores it at each block start)
+// and the running guest thread every 0.5 ms, and rewrites logs/guestprof.txt
+// every 2 s: samples, block pc, guest thread, most first (name the pcs with
+// tools/addr2sym.py).
+#define GUEST_PROF_SLOTS 65536u
+typedef struct { u32 pc, thread, count; } GuestProfSlot;
+static GuestProfSlot g_guest_prof[GUEST_PROF_SLOTS];
+static GuestProfSlot g_guest_prof_sorted[GUEST_PROF_SLOTS];
+
+static int guest_prof_by_count(const void* a, const void* b) {
+    const u32 x = ((const GuestProfSlot*)a)->count, y = ((const GuestProfSlot*)b)->count;
+    return x < y ? 1 : x > y ? -1 : 0;
+}
+
+static int SDLCALL guest_prof_main(void* user) {
+    (void)user;
+    for (u64 n = 1;; n++) {
+        SDL_DelayNS(500000u);
+        const u32 pc = *(volatile const u32*)&dolrecomp_cpu.pc;
+        u32 thread;
+        memcpy(&thread, dolrecomp_cpu.ram + 0xE4u, 4u);  // OS current thread
+        thread = __builtin_bswap32(thread);
+        u32 h = ((pc ^ (thread * 0x9E3779B1u)) * 2654435761u) >> 16;
+        for (u32 i = 0; i < GUEST_PROF_SLOTS; i++, h = (h + 1u) & (GUEST_PROF_SLOTS - 1u)) {
+            GuestProfSlot* slot = &g_guest_prof[h];
+            if (slot->count == 0u) {
+                slot->pc = pc;
+                slot->thread = thread;
+            }
+            if (slot->pc == pc && slot->thread == thread) {
+                slot->count++;
+                break;
+            }
+        }
+        if (n % 4000u != 0u)
+            continue;
+        memcpy(g_guest_prof_sorted, g_guest_prof, sizeof g_guest_prof);
+        qsort(g_guest_prof_sorted, GUEST_PROF_SLOTS, sizeof g_guest_prof_sorted[0],
+              guest_prof_by_count);
+        FILE* f = fopen("logs/guestprof.txt", "w");
+        if (f == NULL)
+            continue;
+        fprintf(f, "# %llu samples (0.5 ms)\n", (unsigned long long)n);
+        for (u32 i = 0; i < GUEST_PROF_SLOTS && g_guest_prof_sorted[i].count != 0u; i++)
+            fprintf(f, "%u %08X %08X\n", g_guest_prof_sorted[i].count,
+                    g_guest_prof_sorted[i].pc, g_guest_prof_sorted[i].thread);
+        fclose(f);
+    }
+    return 0;
+}
+#endif
+
 int main(int argc, char** argv) {
     // Keep stdout/stderr unbuffered so diagnostics are not lost when a worker
     // thread calls abort() (e.g. an Aurora FATAL) before buffered output is
@@ -491,8 +552,7 @@ int main(int argc, char** argv) {
     }
 #endif
 
-    CPUState cpu;
-    if (!cpu_init(&cpu)) {
+    if (!cpu_init(&dolrecomp_cpu)) {
 #ifdef ED_AURORA
         dol_aurora_shutdown();
 #endif
@@ -500,8 +560,8 @@ int main(int argc, char** argv) {
     }
 
     DolLayout layout;
-    if (!dol_load_into_ram(&cpu, dol_path, &layout)) {
-        cpu_free(&cpu);
+    if (!dol_load_into_ram(&dolrecomp_cpu, dol_path, &layout)) {
+        cpu_free(&dolrecomp_cpu);
 #ifdef ED_AURORA
         dol_aurora_shutdown();
 #endif
@@ -515,9 +575,9 @@ int main(int argc, char** argv) {
                 layout.entry_point, (u32)DOLRECOMP_ENTRY_POINT);
     }
 
-    boot_setup_os_globals(&cpu, &layout);
-    if (!mmio_install(&cpu)) {
-        cpu_free(&cpu);
+    boot_setup_os_globals(&dolrecomp_cpu, &layout);
+    if (!mmio_install(&dolrecomp_cpu)) {
+        cpu_free(&dolrecomp_cpu);
 #ifdef ED_AURORA
         dol_aurora_shutdown();
 #endif
@@ -536,7 +596,7 @@ int main(int argc, char** argv) {
             fprintf(stderr,
                     "[card] slot A unavailable; continuing with no card\n");
     }
-    hle_install(&cpu);
+    hle_install(&dolrecomp_cpu);
     if (iso_path == NULL)
         iso_path = getenv("ED_ISO");
     if (iso_path == NULL || iso_path[0] == '\0')
@@ -548,13 +608,13 @@ int main(int argc, char** argv) {
     // disc number, version, streaming) at 0x80000000, where DVDGetCurrentDiskID
     // points. Starting a game checks the save's game and maker code against it.
     if (dvd_image_ready())
-        dvd_read_to_guest(&cpu, 0x80000000u, 0, 0x20u);
+        dvd_read_to_guest(&dolrecomp_cpu, 0x80000000u, 0, 0x20u);
     quickstate_init();  // after every device it saves is set up
-    cpu.instruction_fallback = instruction_fallback;
+    dolrecomp_cpu.instruction_fallback = instruction_fallback;
     // FP instructions check MSR[FP]; the run loop below answers the resulting
     // FP-unavailable exceptions with the OS's lazy FPU switch (interrupt.c).
 
-    cpu.pc = layout.entry_point;
+    dolrecomp_cpu.pc = layout.entry_point;
 
     // --call ambient SPR state. A bare single-function call skips the boot/OSInit
     // path that sets HID2, so HID2[PSE|LSQE] is clear and the FIRST paired-single
@@ -567,11 +627,11 @@ int main(int argc, char** argv) {
     // real GQR/MSR context for a fully faithful differential. A --restore loads
     // its captured HID2 over this default (later, so it wins), which is correct.
     if (call_addr != 0) {
-        cpu.hid2 |= PPC_HID2_PSE | PPC_HID2_LSQE | PPC_HID2_LCE;
+        dolrecomp_cpu.hid2 |= PPC_HID2_PSE | PPC_HID2_LSQE | PPC_HID2_LCE;
         fprintf(stderr,
                 "[call] ambient SPR default: hid2=0x%08X (PSE|LSQE|LCE); "
                 "pass --restore <savestate> for real GQR/MSR fidelity\n",
-                cpu.hid2);
+                dolrecomp_cpu.hid2);
     }
 
     // Deterministic restore: load a previously captured gameplay snapshot over
@@ -580,11 +640,11 @@ int main(int argc, char** argv) {
     // controller, identical state every run. Host function pointers (rebound by
     // cpu_init/hle_install above) are preserved by dol_savestate_read.
     if (restore_path != NULL) {
-        DolSaveRegion regions[1] = {{"MEM1", cpu.ram, cpu.ram_size}};
+        DolSaveRegion regions[1] = {{"MEM1", dolrecomp_cpu.ram, dolrecomp_cpu.ram_size}};
         bool mismatch = false;
-        if (!dol_savestate_read(restore_path, &cpu, regions, 1u, &mismatch)) {
+        if (!dol_savestate_read(restore_path, &dolrecomp_cpu, regions, 1u, &mismatch)) {
             fprintf(stderr, "[state] restore FAILED from %s\n", restore_path);
-            cpu_free(&cpu);
+            cpu_free(&dolrecomp_cpu);
 #ifdef ED_AURORA
             dol_aurora_shutdown();
 #endif
@@ -592,7 +652,7 @@ int main(int argc, char** argv) {
         }
         fprintf(stderr,
                 "[state] restored from %s (pc=0x%08X)%s; resuming\n",
-                restore_path, cpu.pc, mismatch ? " [size mismatch]" : "");
+                restore_path, dolrecomp_cpu.pc, mismatch ? " [size mismatch]" : "");
     }
 
     // Single-function differential setup. Load a raw MEM1 (Dolphin MRAM), apply
@@ -602,20 +662,20 @@ int main(int argc, char** argv) {
         FILE* mf = fopen(restore_mem_path, "rb");
         if (mf == NULL) {
             fprintf(stderr, "[call] FAILED to open MEM1 %s\n", restore_mem_path);
-            cpu_free(&cpu);
+            cpu_free(&dolrecomp_cpu);
 #ifdef ED_AURORA
             dol_aurora_shutdown();
 #endif
             return 1;
         }
-        size_t got = fread(cpu.ram, 1u, cpu.ram_size, mf);
+        size_t got = fread(dolrecomp_cpu.ram, 1u, dolrecomp_cpu.ram_size, mf);
         fclose(mf);
         fprintf(stderr, "[call] loaded MEM1 %s (%zu bytes)\n", restore_mem_path,
                 got);
     }
     for (unsigned r = 0; r < set_reg_count; ++r) {
         if (set_reg_idx[r] < 32u) {
-            cpu.gpr[set_reg_idx[r]] = set_reg_val[r];
+            dolrecomp_cpu.gpr[set_reg_idx[r]] = set_reg_val[r];
             fprintf(stderr, "[call] r%u = 0x%08X\n", set_reg_idx[r],
                     set_reg_val[r]);
         }
@@ -624,16 +684,16 @@ int main(int argc, char** argv) {
         if (set_fpr_idx[r] < 32u) {
             double d;
             memcpy(&d, &set_fpr_bits[r], sizeof(double));
-            cpu.fpr[set_fpr_idx[r]] = d;
-            cpu.ps1[set_fpr_idx[r]] = d;
+            dolrecomp_cpu.fpr[set_fpr_idx[r]] = d;
+            dolrecomp_cpu.ps1[set_fpr_idx[r]] = d;
             fprintf(stderr, "[call] f%u = %g (bits 0x%016llX)\n", set_fpr_idx[r],
                     d, (unsigned long long)set_fpr_bits[r]);
         }
     }
     if (call_addr != 0) {
-        cpu.pc = (u32)call_addr;
-        cpu.lr = CALL_RETURN_SENTINEL;
-        fprintf(stderr, "[call] calling 0x%08X (lr sentinel 0x%08X)\n", cpu.pc,
+        dolrecomp_cpu.pc = (u32)call_addr;
+        dolrecomp_cpu.lr = CALL_RETURN_SENTINEL;
+        fprintf(stderr, "[call] calling 0x%08X (lr sentinel 0x%08X)\n", dolrecomp_cpu.pc,
                 CALL_RETURN_SENTINEL);
     }
 
@@ -641,10 +701,10 @@ int main(int argc, char** argv) {
         getenv("ED_HEAP_CHECK") ? strtoull(getenv("ED_HEAP_CHECK"), NULL, 0) : 0ull;
     g_heap_array_ptr = ED_GUEST_R13 - 21344u;  // OSAlloc's HeapArray (sbss)
     printf("[run] starting execution at 0x%08X (max %llu blocks)\n",
-           cpu.pc, max_blocks);
+           dolrecomp_cpu.pc, max_blocks);
 
     RunLoop run = {
-        .cpu = &cpu,
+        .cpu = &dolrecomp_cpu,
         .max_blocks = max_blocks,
         .call_addr = call_addr,
         .trace_every = trace_every,
@@ -653,6 +713,8 @@ int main(int argc, char** argv) {
         .snapshot_out = snapshot_out,
     };
 #ifdef ED_AURORA
+    if (getenv("ED_GUEST_PROF") != NULL)
+        SDL_DetachThread(SDL_CreateThread(guest_prof_main, "guest-prof", NULL));
     if (aurora_enabled) {
         dol_aurora_set_frame_hook(hle_frame_boundary);
         dol_aurora_run_game(run_loop, &run);
@@ -671,37 +733,37 @@ int main(int argc, char** argv) {
         fprintf(stderr, "\n");
     }
     if (getenv("ED_BACKCHAIN"))
-        dump_backchain(&cpu);
+        dump_backchain(&dolrecomp_cpu);
     if (getenv("ED_DUMP_CTX")) {
         u32 a = (u32)strtoul(getenv("ED_DUMP_CTX"), NULL, 0);
         // OSContext: gpr1 @ +0x04, lr @ +0x84, srr0 @ +0x198 (where it resumes).
         fprintf(stderr, "[ctx] 0x%08X srr0=0x%08X lr=0x%08X r1=0x%08X r3=0x%08X\n",
-                a, mem_read32(&cpu, a + 0x198u), mem_read32(&cpu, a + 0x84u),
-                mem_read32(&cpu, a + 0x04u), mem_read32(&cpu, a + 0x0Cu));
+                a, mem_read32(&dolrecomp_cpu, a + 0x198u), mem_read32(&dolrecomp_cpu, a + 0x84u),
+                mem_read32(&dolrecomp_cpu, a + 0x04u), mem_read32(&dolrecomp_cpu, a + 0x0Cu));
         // Treat the address as an OSThread: state @+0x2C8, suspend @+0x2CC,
         // priority @+0x2D0, queue (the OSThreadQueue* it waits on) @+0x2DC.
         // state: 1=READY 2=RUNNING 4=WAITING 8=MORIBUND.
         fprintf(stderr,
                 "[thread] 0x%08X state=%u suspend=%d priority=%u waiting-on-queue="
                 "0x%08X\n",
-                a, mem_read16(&cpu, a + 0x2C8u), (s32)mem_read32(&cpu, a + 0x2CCu),
-                mem_read16(&cpu, a + 0x2D0u), mem_read32(&cpu, a + 0x2DCu));
+                a, mem_read16(&dolrecomp_cpu, a + 0x2C8u), (s32)mem_read32(&dolrecomp_cpu, a + 0x2CCu),
+                mem_read16(&dolrecomp_cpu, a + 0x2D0u), mem_read32(&dolrecomp_cpu, a + 0x2DCu));
     }
 
     if (getenv("ED_DUMP_THREADS"))
-        dump_threads(&cpu);
+        dump_threads(&dolrecomp_cpu);
     printf("[run] stopped: %s\n", stop_reason);
     printf("[run] blocks executed : %llu\n", blocks);
-    printf("[run] final pc         : 0x%08X\n", cpu.pc);
-    printf("[run] link register    : 0x%08X\n", cpu.lr);
-    printf("[run] stack (r1)       : 0x%08X\n", cpu.gpr[1]);
+    printf("[run] final pc         : 0x%08X\n", dolrecomp_cpu.pc);
+    printf("[run] link register    : 0x%08X\n", dolrecomp_cpu.lr);
+    printf("[run] stack (r1)       : 0x%08X\n", dolrecomp_cpu.gpr[1]);
     printf("[run] exception        : %s (0x%08X)\n",
-           exception_name(cpu.exception), cpu.exception);
+           exception_name(dolrecomp_cpu.exception), dolrecomp_cpu.exception);
 
     // Raw MEM1 at exit for the recomp-vs-Dolphin differential. Guest big-endian
     // bytes, directly diffable against a Dolphin RAM dump.
     if (dump_mem_path != NULL)
-        dump_mem1(dump_mem_path, &cpu);
+        dump_mem1(dump_mem_path, &dolrecomp_cpu);
 
     // C2: fold gxcore GapCounters into the report before serialising so live
     // --gap-report includes gxcore/* rows (backend-only until this flush).
@@ -728,6 +790,6 @@ int main(int argc, char** argv) {
 #ifdef ED_AURORA
     dol_aurora_shutdown();
 #endif
-    cpu_free(&cpu);
+    cpu_free(&dolrecomp_cpu);
     return 0;
 }

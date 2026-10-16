@@ -75,6 +75,17 @@ endif()
 # optimiser from spending minutes on each.
 set_source_files_properties(${ED_CHUNKS} "${ED_GENERATED_DIR}/generated.c"
     PROPERTIES COMPILE_OPTIONS "-w")
+# Chunk code addresses the one guest CPU (main.c dolrecomp_cpu) by name rather
+# than through a pointer the register allocator spills (generated.h), and
+# CodeGenPrepare may fold the CPU-state field addresses into each access even
+# though every field has thousands of users in a chunk (its default stops at
+# 100 and leaves them hoisted and spilled).
+set_property(SOURCE ${ED_CHUNKS} APPEND PROPERTY COMPILE_DEFINITIONS
+    DOLRECOMP_STATIC_CPU=dolrecomp_cpu)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang")
+    set_property(SOURCE ${ED_CHUNKS} APPEND PROPERTY COMPILE_OPTIONS
+        -mllvm -cgp-max-address-users-to-scan=100000)
+endif()
 target_include_directories(EternalDarkness PRIVATE
     "${CMAKE_SOURCE_DIR}/runtime"
     "${ED_GENERATED_DIR}")

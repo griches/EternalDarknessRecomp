@@ -4721,13 +4721,14 @@ static void chain_stop_at(u32 address) {
 }
 
 // Fast RAM access in the generated code (generated.h): bit 0 loads, bit 1
-// stores. ED_NO_FASTMEM=1 sends every access through mem_read / mem_write;
-// ED_STORE_WATCH keeps stores there so the watch sees them.
+// stores, bit 2 write-gather pipe stores (mmio.c dolrecomp_wgp_write).
+// ED_NO_FASTMEM=1 sends every access through mem_read / mem_write;
+// ED_STORE_WATCH keeps RAM stores there so the watch sees them.
 u8 dolrecomp_fast_ram;
 
 static void publish_codegen_options(void) {
     dolrecomp_fast_ram = getenv("ED_NO_FASTMEM") != NULL ? 0u
-                         : getenv("ED_STORE_WATCH") != NULL ? 1u : 3u;
+                         : getenv("ED_STORE_WATCH") != NULL ? 5u : 7u;
     dolrecomp_chain_stop = NULL;
     if (getenv("ED_NO_CHAIN") != NULL || g_hle_log)
         return;

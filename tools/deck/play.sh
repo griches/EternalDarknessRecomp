@@ -63,7 +63,8 @@ build() {
   total=$(wc -l < build/jobs)
 
   echo "15"; echo "# Building the game from your disc (only the first time)..."
-  CFLAGS="-target x86_64-linux-gnu.2.41 -g0 -w -fno-sanitize=all $(cat lib/host-cflags.txt) -DED_GAME_ID=\"$id\" -Iruntime -Igenerated -Iinclude"
+  # DOLRECOMP_STATIC_CPU and the CodeGenPrepare limit: see CMakeLists.txt.
+  CFLAGS="-target x86_64-linux-gnu.2.41 -g0 -w -fno-sanitize=all $(cat lib/host-cflags.txt) -DED_GAME_ID=\"$id\" -DDOLRECOMP_STATIC_CPU=dolrecomp_cpu -mllvm -cgp-max-address-users-to-scan=100000 -Iruntime -Igenerated -Iinclude"
   export ZIG CFLAGS
   xargs -P "$JOBS" -L1 sh -c '"$ZIG" cc $CFLAGS -O$0 -Xclang -O$0 -c "$1" -o "build/obj/$(basename "$1").o" || echo "$1" >> build/failed' \
     < build/jobs >> logs/build.log 2>&1 &

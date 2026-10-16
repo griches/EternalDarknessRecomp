@@ -24,6 +24,8 @@ void mmio_set_pe_token(u16 token);
 bool mmio_cpu_fifo_feeds_gpu(void);
 // The write-gather pipe was re-pointed (PPCMtwpar): drop its pending bytes.
 void mmio_write_gather_reset(void);
+// A store to the write-gather pipe from the generated code (generated.h).
+void dolrecomp_wgp_write(CPUState* cpu, u32 ea, u64 value, u8 size);
 
 // The Processor Interface CPU-FIFO registers (0xCC00300C-0xCC003017), owned
 // here because the gather pipe writes through them (see mmio.c).

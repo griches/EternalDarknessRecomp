@@ -173,8 +173,24 @@ static void fifo_profile_dump(u32 base, u32 size) {
 }
 
 static void wg_burst_to_ram(CPUState* cpu) {
-    for (u32 i = 0; i < 32u; i++)
-        mem_write8(cpu, GC_RAM_BASE | (g_pi_fifo_wptr + i), g_wg_line[i]);
+    // A line inside MEM1 is one copy (the game records its display lists
+    // through here every frame); mem_write8 per byte otherwise, and while
+    // ED_STORE_WATCH wants to see each store.
+    static int byte_stores = -1;
+    if (byte_stores < 0)
+        byte_stores = getenv("ED_STORE_WATCH") != NULL;
+    if (!byte_stores && g_pi_fifo_wptr <= cpu->ram_size - 32u) {
+        const u32 first = GC_RAM_BASE | g_pi_fifo_wptr;
+        memcpy(cpu->ram + g_pi_fifo_wptr, g_wg_line, 32u);
+        // mem_write8's reservation rule, for both 32-byte granules touched.
+        if (cpu->reserve_valid &&
+            (((cpu->reserve_addr ^ first) & ~31u) == 0u ||
+             ((cpu->reserve_addr ^ (first + 31u)) & ~31u) == 0u))
+            cpu->reserve_valid = false;
+    } else {
+        for (u32 i = 0; i < 32u; i++)
+            mem_write8(cpu, GC_RAM_BASE | (g_pi_fifo_wptr + i), g_wg_line[i]);
+    }
     g_pi_fifo_wptr += 32u;
     if (g_pi_fifo_end != 0u && g_pi_fifo_wptr >= g_pi_fifo_end) {
         static int wrap_log = -1;  // ED_PI_LOG=1: a buffer target wrapped
@@ -585,6 +601,13 @@ static void mmio_write(CPUState* cpu, u32 ea, u64 value, u8 size) {
         fprintf(stderr, "[mmio] write%u %-10s 0x%08X <- 0x%llX\n",
                 (unsigned)(size * 8u), region_name(ea), ea,
                 (unsigned long long)value);
+}
+
+// The generated code's stores to the write-gather pipe (generated.h, when
+// dolrecomp_fast_ram bit 2 is set): straight here, not through mem_write's
+// address lookup and external_write.
+void dolrecomp_wgp_write(CPUState* cpu, u32 ea, u64 value, u8 size) {
+    mmio_write(cpu, ea, value, size);
 }
 
 static u32 mmio_read32(CPUState* cpu, u32 ea, u8 rid) {

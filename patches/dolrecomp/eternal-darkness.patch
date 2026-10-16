@@ -40,7 +40,7 @@ index 83314bb..0eac038 100644
      fprintf(out, "    DolRecompFunction fn = dolrecomp_find_original(address);\n");
      fprintf(out, "    if (!fn) return 0;\n");
 diff --git a/src/backend/emitter.c b/src/backend/emitter.c
-index 4868b4c..0388cb7 100644
+index 4868b4c..ee7883f 100644
 --- a/src/backend/emitter.c
 +++ b/src/backend/emitter.c
 @@ -37,6 +37,19 @@ static void emit_set_cr1_from_fpscr(FILE* out) {
@@ -139,7 +139,7 @@ index 4868b4c..0388cb7 100644
  void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
      fprintf(out,
          "// DolRecomp output\n"
-@@ -439,10 +483,88 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
+@@ -439,10 +483,309 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
          "    return dolrecomp_f32_to_bits((f32)value);\n"
          "}\n"
          "\n"
@@ -183,7 +183,205 @@ index 4868b4c..0388cb7 100644
 + * the runtime's mem_read / mem_write calls. Everything else (the uncached
 + * mirror, MMIO, locked cache, MEM2), and any store while a lwarx reservation is
 + * held, still takes the runtime path. The host enables it with
-+ * dolrecomp_fast_ram: bit 0 loads, bit 1 stores (off while it watches stores). */
++ * dolrecomp_fast_ram: bit 0 loads, bit 1 stores (off while it watches stores),
++ * bit 2 stores to the GX write-gather pipe (0xCC008000, 32 bytes), which go
++ * straight to the host's dolrecomp_wgp_write instead of the MMIO lookup.
++ *
++ * Paired-single loads and stores (psq_l / psq_st) and fmadd(s) are inline too
++ * for the common case, with the same results as the runtime's ppc_psq_load,
++ * ppc_psq_store and ppc_fma (FPRF included): psq on cached MEM1 or the
++ * write-gather pipe with any valid quantization type, fma with finite inputs
++ * (and, for fmadds, a frC that is not a denormal). Everything else calls the
++ * runtime. */
++static const char fast_ps_source[] =
++    "/* 2^n as a double (n in -64..64): the GQR dequantize / quantize scale. */\n"
++    "static inline f64 dolrecomp_pow2(s32 n) {\n"
++    "    return dolrecomp_f64_from_bits((u64)(1023 + n) << 52);\n"
++    "}\n"
++    "\n"
++    "static inline s32 dolrecomp_gqr_scale(u32 field) {\n"
++    "    const s32 s = (s32)(field & 0x3Fu);\n"
++    "    return (s & 0x20) != 0 ? s - 64 : s;\n"
++    "}\n"
++    "\n"
++    "static inline int dolrecomp_psq_enabled(const CPUState* ctx, bool indexed) {\n"
++    "    const u32 need = indexed ? PPC_HID2_PSE : (PPC_HID2_PSE | PPC_HID2_LSQE);\n"
++    "    return (ctx->hid2 & need) == need;\n"
++    "}\n"
++    "\n"
++    "static inline f64 dolrecomp_psq_dequant(const u8* p, u32 type, f64 mul) {\n"
++    "    f64 v;\n"
++    "    switch (type) {\n"
++    "    case 4u: v = (f64)p[0]; break;\n"
++    "    case 5u: v = (f64)(u16)((p[0] << 8) | p[1]); break;\n"
++    "    case 6u: v = (f64)(s8)p[0]; break;\n"
++    "    default: v = (f64)(s16)(u16)((p[0] << 8) | p[1]); break;\n"
++    "    }\n"
++    "    return (f64)(f32)(v * mul);\n"
++    "}\n"
++    "\n"
++    "static inline void dolrecomp_psq_load(CPUState* ctx, u8 frD, u32 ea, bool w,\n"
++    "                                      u8 gi, bool indexed, u32 cia) {\n"
++    "    const u32 gqr = ctx->gqr[gi & 7u];\n"
++    "    const u32 type = (gqr >> 16) & 7u;\n"
++    "    const u32 off = ea - 0x80000000u;\n"
++    "    if ((dolrecomp_fast_ram & 1u) != 0u && off <= DOLRECOMP_RAM_SIZE - 8u &&\n"
++    "        dolrecomp_psq_enabled(ctx, indexed)) {\n"
++    "        const u8* p = ctx->ram + off;\n"
++    "        if (type == 0u && (ea & 3u) == 0u) {\n"
++    "            u32 bits;\n"
++    "            memcpy(&bits, p, 4u);\n"
++    "            ctx->fpr[frD] = (f64)dolrecomp_f32_from_bits(__builtin_bswap32(bits));\n"
++    "            if (w) {\n"
++    "                ctx->ps1[frD] = 1.0;\n"
++    "            } else {\n"
++    "                memcpy(&bits, p + 4, 4u);\n"
++    "                ctx->ps1[frD] = (f64)dolrecomp_f32_from_bits(__builtin_bswap32(bits));\n"
++    "            }\n"
++    "            return;\n"
++    "        }\n"
++    "        if (type >= 4u) {\n"
++    "            const f64 mul = dolrecomp_pow2(-dolrecomp_gqr_scale(gqr >> 24));\n"
++    "            ctx->fpr[frD] = dolrecomp_psq_dequant(p, type, mul);\n"
++    "            ctx->ps1[frD] = w ? 1.0 : dolrecomp_psq_dequant(p + ((type & 1u) ? 2u : 1u), type, mul);\n"
++    "            return;\n"
++    "        }\n"
++    "    }\n"
++    "    (ppc_psq_load)(ctx, frD, ea, w, gi, indexed, cia);\n"
++    "}\n"
++    "\n"
++    "static inline u32 dolrecomp_psq_quant(f64 v, s32 lo, s32 hi, f64 mul) {\n"
++    "    if (v != v)\n"
++    "        return (u32)hi;\n"
++    "    const f64 s = trunc(v * mul);\n"
++    "    if (s <= (f64)lo)\n"
++    "        return (u32)lo;\n"
++    "    if (s >= (f64)hi)\n"
++    "        return (u32)hi;\n"
++    "    return (u32)(s32)s;\n"
++    "}\n"
++    "\n"
++    "static inline u32 dolrecomp_psq_store_bits(f64 v, u32 type, f64 mul) {\n"
++    "    switch (type) {\n"
++    "    case 0u: {\n"
++    "        const u32 bits = dolrecomp_f32_to_bits((f32)v);\n"
++    "        return (bits & 0x7F800000u) == 0u && (bits & 0x007FFFFFu) != 0u ? 0u : bits;\n"
++    "    }\n"
++    "    case 4u: return dolrecomp_psq_quant(v, 0, 255, mul) & 0xFFu;\n"
++    "    case 5u: return dolrecomp_psq_quant(v, 0, 65535, mul) & 0xFFFFu;\n"
++    "    case 6u: return dolrecomp_psq_quant(v, -128, 127, mul) & 0xFFu;\n"
++    "    default: return dolrecomp_psq_quant(v, -32768, 32767, mul) & 0xFFFFu;\n"
++    "    }\n"
++    "}\n"
++    "\n"
++    "static inline void dolrecomp_psq_put(u8* p, u32 v, u32 size) {\n"
++    "    if (size == 4u) {\n"
++    "        v = __builtin_bswap32(v);\n"
++    "        memcpy(p, &v, 4u);\n"
++    "    } else if (size == 2u) {\n"
++    "        p[0] = (u8)(v >> 8);\n"
++    "        p[1] = (u8)v;\n"
++    "    } else {\n"
++    "        p[0] = (u8)v;\n"
++    "    }\n"
++    "}\n"
++    "\n"
++    "static inline void dolrecomp_psq_store(CPUState* ctx, u8 frS, u32 ea, bool w,\n"
++    "                                       u8 gi, bool indexed, u32 cia) {\n"
++    "    const u32 gqr = ctx->gqr[gi & 7u];\n"
++    "    const u32 type = gqr & 7u;\n"
++    "    const u32 off = ea - 0x80000000u;\n"
++    "    const int ram = (dolrecomp_fast_ram & 2u) != 0u && !ctx->reserve_valid &&\n"
++    "                    off <= DOLRECOMP_RAM_SIZE - 8u;\n"
++    "    const int wgp = (dolrecomp_fast_ram & 4u) != 0u && ea - 0xCC008000u < 0x18u;\n"
++    "    if ((ram || wgp) && dolrecomp_psq_enabled(ctx, indexed) &&\n"
++    "        (type == 0u ? (ea & 3u) == 0u : type >= 4u)) {\n"
++    "        const u32 size = type == 0u ? 4u : (type & 1u) ? 2u : 1u;\n"
++    "        const f64 mul = type == 0u ? 1.0 : dolrecomp_pow2(dolrecomp_gqr_scale(gqr >> 8));\n"
++    "        const u32 v0 = dolrecomp_psq_store_bits(ctx->fpr[frS], type, mul);\n"
++    "        const u32 v1 = w ? 0u : dolrecomp_psq_store_bits(ctx->ps1[frS], type, mul);\n"
++    "        if (ram) {\n"
++    "            dolrecomp_psq_put(ctx->ram + off, v0, size);\n"
++    "            if (!w)\n"
++    "                dolrecomp_psq_put(ctx->ram + off + size, v1, size);\n"
++    "        } else {\n"
++    "            dolrecomp_wgp_write(ctx, ea, v0, (u8)size);\n"
++    "            if (!w)\n"
++    "                dolrecomp_wgp_write(ctx, ea + size, v1, (u8)size);\n"
++    "        }\n"
++    "        return;\n"
++    "    }\n"
++    "    (ppc_psq_store)(ctx, frS, ea, w, gi, indexed, cia);\n"
++    "}\n"
++    "\n"
++    "static inline u32 dolrecomp_fprf_f64(u64 bits) {\n"
++    "    const u64 e = bits & 0x7FF0000000000000ull, f = bits & 0x000FFFFFFFFFFFFFull;\n"
++    "    const int s = (int)(bits >> 63);\n"
++    "    if (e == 0x7FF0000000000000ull)\n"
++    "        return f ? 0x11u : (s ? 0x09u : 0x05u);\n"
++    "    if (e == 0u)\n"
++    "        return f ? (s ? 0x18u : 0x14u) : (s ? 0x12u : 0x02u);\n"
++    "    return s ? 0x08u : 0x04u;\n"
++    "}\n"
++    "\n"
++    "static inline u32 dolrecomp_fprf_f32(u32 bits) {\n"
++    "    const u32 e = bits & 0x7F800000u, f = bits & 0x007FFFFFu;\n"
++    "    const int s = (int)(bits >> 31);\n"
++    "    if (e == 0x7F800000u)\n"
++    "        return f ? 0x11u : (s ? 0x09u : 0x05u);\n"
++    "    if (e == 0u)\n"
++    "        return f ? (s ? 0x18u : 0x14u) : (s ? 0x12u : 0x02u);\n"
++    "    return s ? 0x08u : 0x04u;\n"
++    "}\n"
++    "\n"
++    "/* ppc_fma for finite inputs: fmadds rounds frC to 25 bits and corrects the\n"
++    " * double rounding exactly as the runtime does; a denormal frC (fmadds) or any\n"
++    " * NaN / infinity goes to the runtime. */\n"
++    "static inline bool dolrecomp_fma(CPUState* ctx, f64 a, f64 c, f64 b, bool single,\n"
++    "                                 bool subtract, bool negative, f64* output) {\n"
++    "    const u64 cb = dolrecomp_f64_to_bits(c);\n"
++    "    if (isfinite(a) && isfinite(b) && isfinite(c) &&\n"
++    "        (!single || (cb & 0x7FF0000000000000ull) != 0u ||\n"
++    "         (cb & 0x000FFFFFFFFFFFFFull) == 0u)) {\n"
++    "        const f64 addend = subtract ? -b : b;\n"
++    "        f64 result;\n"
++    "        u32 fprf;\n"
++    "        if (!single) {\n"
++    "            result = fma(a, c, addend);\n"
++    "            if (negative)\n"
++    "                result = -result;\n"
++    "            fprf = dolrecomp_fprf_f64(dolrecomp_f64_to_bits(result));\n"
++    "        } else {\n"
++    "            const f64 rc = dolrecomp_f64_from_bits((cb & 0xFFFFFFFFF8000000ull) +\n"
++    "                                                   (cb & 0x0000000008000000ull));\n"
++    "            result = fma(a, rc, addend);\n"
++    "            u64 bits = dolrecomp_f64_to_bits(result);\n"
++    "            if ((bits & 0x000000001FFFFFFFull) == 0x0000000010000000ull) {\n"
++    "                const f64 a_prime = addend - result;\n"
++    "                const f64 b_prime = result + a_prime;\n"
++    "                const f64 error = fma(a, rc, a_prime) + (addend - b_prime);\n"
++    "                if (error != 0.0) {\n"
++    "                    if ((error > 0.0) == (result > 0.0)) bits++;\n"
++    "                    else bits--;\n"
++    "                    result = dolrecomp_f64_from_bits(bits);\n"
++    "                }\n"
++    "            }\n"
++    "            result = (f64)(f32)result;\n"
++    "            if (negative)\n"
++    "                result = -result;\n"
++    "            fprf = dolrecomp_fprf_f32(dolrecomp_f32_to_bits((f32)result));\n"
++    "        }\n"
++    "        ctx->fpscr = (ctx->fpscr & ~(0x1Fu << 12)) | (fprf << 12);\n"
++    "        *output = result;\n"
++    "        return true;\n"
++    "    }\n"
++    "    return (ppc_fma)(ctx, a, c, b, single, subtract, negative, output);\n"
++    "}\n"
++    "\n"
++    "#define ppc_psq_load(ctx, r, ea, w, i, x, cia) dolrecomp_psq_load(ctx, r, ea, w, i, x, cia)\n"
++    "#define ppc_psq_store(ctx, r, ea, w, i, x, cia) dolrecomp_psq_store(ctx, r, ea, w, i, x, cia)\n"
++    "#define ppc_fma(ctx, a, c, b, s, sub, neg, out) dolrecomp_fma(ctx, a, c, b, s, sub, neg, out)\n";
++
 +static void emit_fast_ram(FILE* out) {
 +    static const struct { unsigned bits; const char* type; const char* swap; } sizes[] = {
 +        { 8u, "u8", "" },
@@ -192,15 +390,33 @@ index 4868b4c..0388cb7 100644
 +        { 64u, "u64", "__builtin_bswap64" },
 +    };
 +    unsigned i;
++    /* DOLRECOMP_STATIC_CPU=<symbol>: the host keeps its one guest CPU in that
++     * global, and chunk functions address it directly (a link-time constant)
++     * instead of through their ctx argument, which in a chunk-sized function
++     * the register allocator spills and reloads at nearly every instruction. */
++    fprintf(out, "#if defined(DOLRECOMP_CHUNK) && defined(DOLRECOMP_STATIC_CPU)\n");
++    fprintf(out, "#if defined(__GNUC__) || defined(__clang__)\n");
++    fprintf(out, "extern CPUState DOLRECOMP_STATIC_CPU __attribute__((visibility(\"hidden\")));\n");
++    fprintf(out, "#else\n");
++    fprintf(out, "extern CPUState DOLRECOMP_STATIC_CPU;\n");
++    fprintf(out, "#endif\n");
++    fprintf(out, "#define DOLRECOMP_CTX(arg) (&DOLRECOMP_STATIC_CPU)\n");
++    fprintf(out, "#else\n");
++    fprintf(out, "#define DOLRECOMP_CTX(arg) (arg)\n");
++    fprintf(out, "#endif\n\n");
 +    fprintf(out, "#if defined(DOLRECOMP_CHUNK) && !defined(DOLRECOMP_NO_FAST_RAM)\n");
-+    fprintf(out, "extern u8 dolrecomp_fast_ram;\n\n");
++    fprintf(out, "extern u8 dolrecomp_fast_ram;\n");
++    fprintf(out, "void dolrecomp_wgp_write(CPUState* ctx, u32 ea, u64 value, u8 size);\n");
++    /* MEM1's size is fixed (cpu_init), so the bound is a constant. */
++    fprintf(out, "#ifdef GC_MAIN_RAM_SIZE\n#define DOLRECOMP_RAM_SIZE ((u32)GC_MAIN_RAM_SIZE)\n");
++    fprintf(out, "#else\n#define DOLRECOMP_RAM_SIZE ctx->ram_size\n#endif\n\n");
 +    for (i = 0; i < sizeof sizes / sizeof sizes[0]; i++) {
 +        const unsigned bits = sizes[i].bits, bytes = bits / 8u;
 +        const char* t = sizes[i].type;
 +        const char* sw = sizes[i].swap;
 +        fprintf(out, "static inline %s dolrecomp_mem_read%u(CPUState* ctx, u32 ea) {\n", t, bits);
 +        fprintf(out, "    const u32 off = ea - 0x80000000u;\n");
-+        fprintf(out, "    if ((dolrecomp_fast_ram & 1u) != 0u && off <= ctx->ram_size - %uu) {\n", bytes);
++        fprintf(out, "    if ((dolrecomp_fast_ram & 1u) != 0u && off <= DOLRECOMP_RAM_SIZE - %uu) {\n", bytes);
 +        fprintf(out, "        %s v;\n", t);
 +        fprintf(out, "        memcpy(&v, ctx->ram + off, %uu);\n", bytes);
 +        fprintf(out, "        return %s(v);\n", sw);
@@ -210,14 +426,19 @@ index 4868b4c..0388cb7 100644
 +        fprintf(out, "static inline void dolrecomp_mem_write%u(CPUState* ctx, u32 ea, %s value) {\n", bits, t);
 +        fprintf(out, "    const u32 off = ea - 0x80000000u;\n");
 +        fprintf(out, "    if ((dolrecomp_fast_ram & 2u) != 0u && !ctx->reserve_valid &&\n");
-+        fprintf(out, "        off <= ctx->ram_size - %uu) {\n", bytes);
++        fprintf(out, "        off <= DOLRECOMP_RAM_SIZE - %uu) {\n", bytes);
 +        fprintf(out, "        value = %s(value);\n", sw);
 +        fprintf(out, "        memcpy(ctx->ram + off, &value, %uu);\n", bytes);
++        fprintf(out, "        return;\n");
++        fprintf(out, "    }\n");
++        fprintf(out, "    if ((dolrecomp_fast_ram & 4u) != 0u && ea - 0xCC008000u < 0x20u) {\n");
++        fprintf(out, "        dolrecomp_wgp_write(ctx, ea, value, %uu);\n", bytes);
 +        fprintf(out, "        return;\n");
 +        fprintf(out, "    }\n");
 +        fprintf(out, "    (mem_write%u)(ctx, ea, value);\n", bits);
 +        fprintf(out, "}\n\n");
 +    }
++    fputs(fast_ps_source, out);
 +    for (i = 0; i < sizeof sizes / sizeof sizes[0]; i++) {
 +        fprintf(out, "#define mem_read%u(ctx, ea) dolrecomp_mem_read%u(ctx, ea)\n",
 +                sizes[i].bits, sizes[i].bits);
@@ -228,7 +449,7 @@ index 4868b4c..0388cb7 100644
  }
  
  void emit_header(FILE* out) {
-@@ -456,6 +578,7 @@ void emit_footer(FILE* out) {
+@@ -456,6 +799,7 @@ void emit_footer(FILE* out) {
  static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
                                          u32 func_start, u32 func_end) {
      char disasm[64];
@@ -236,7 +457,7 @@ index 4868b4c..0388cb7 100644
      ppc_disasm(disasm, sizeof(disasm), inst);
      fprintf(out, "    // %08X: %s\n", inst->address, disasm);
  
-@@ -465,7 +588,8 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+@@ -465,7 +809,8 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
      }
  
      if (ppc_op_uses_fpu(inst->op))
@@ -246,7 +467,7 @@ index 4868b4c..0388cb7 100644
  
      switch (inst->op) {
      case PPC_OP_MULLI:
-@@ -937,23 +1061,27 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+@@ -937,23 +1282,27 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
          break;
  
      case PPC_OP_FADDS:
@@ -282,7 +503,7 @@ index 4868b4c..0388cb7 100644
          break;
  
      case PPC_OP_FRES:
-@@ -1047,7 +1175,8 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+@@ -1047,7 +1396,8 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
          break;
  
      case PPC_OP_FRSP:
@@ -292,7 +513,7 @@ index 4868b4c..0388cb7 100644
          break;
  
      case PPC_OP_FSEL:
-@@ -1222,76 +1351,68 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+@@ -1222,76 +1572,68 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
          if (inst->rc) emit_set_cr1_from_fpscr(out);
          break;
  
@@ -403,7 +624,7 @@ index 4868b4c..0388cb7 100644
          break;
  
      case PPC_OP_PS_CMPU0:
-@@ -1539,7 +1660,8 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+@@ -1539,7 +1881,8 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
      case PPC_OP_B:
          fprintf(out, "    {\n");
          emit_direct_branch(out, inst,
@@ -413,7 +634,7 @@ index 4868b4c..0388cb7 100644
          fprintf(out, "    }\n");
          break;
  
-@@ -1548,17 +1670,18 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+@@ -1548,17 +1891,18 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
          emit_branch_condition(out, inst->bo, inst->bi);
          fprintf(out, "        if (ctr_ok && cr_ok) {\n");
          emit_direct_branch(out, inst,
@@ -435,15 +656,35 @@ index 4868b4c..0388cb7 100644
          break;
  
      case PPC_OP_TWI:
-@@ -1916,6 +2039,8 @@ void emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
+@@ -1915,7 +2259,10 @@ void emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
+         }
      }
  
-     fprintf(out, "void func_%08X(CPUState* ctx) {\n", func_addr);
+-    fprintf(out, "void func_%08X(CPUState* ctx) {\n", func_addr);
++    fprintf(out, "void func_%08X(CPUState* dolrecomp_ctx_arg) {\n", func_addr);
++    fprintf(out, "    CPUState* const ctx = DOLRECOMP_CTX(dolrecomp_ctx_arg);\n");
 +    fprintf(out, "    if (dolrecomp_call_depth == 0u) dolrecomp_chain_budget = DOLRECOMP_CHAIN_BUDGET;\n");
 +    fprintf(out, "dolrecomp_dispatch:\n");
      fprintf(out, "    switch (ctx->pc) {\n");
      for (i = 0; i < count; i++) {
          fprintf(out, "    case 0x%08Xu: goto label_%08X;\n",
+@@ -1924,9 +2271,15 @@ void emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
+     fprintf(out, "    default: return;\n");
+     fprintf(out, "    }\n");
+ 
++    /* ctx->pc is set at block starts only: every way out of a chunk (branch,
++     * call, exception, fallback) sets it itself, and helpers take the
++     * instruction address as an argument, so a per-instruction store is only
++     * for debug output that prints ctx->pc (DOLRECOMP_EXACT_PC=1 keeps it). */
++    const bool exact_pc = getenv("DOLRECOMP_EXACT_PC") != NULL;
+     for (i = 0; i < count; i++) {
+         fprintf(out, "label_%08X:\n", insts[i].address);
+-        fprintf(out, "    ctx->pc = 0x%08Xu;\n", insts[i].address);
++        if (leader[i] || exact_pc)
++            fprintf(out, "    ctx->pc = 0x%08Xu;\n", insts[i].address);
+         if (leader[i] && block_cost[i] != 0)
+             fprintf(out, "    ctx->downcount -= %u;\n", block_cost[i]);
+         emit_instruction_with_range(out, &insts[i], func_addr, func_end);
 diff --git a/src/cpu/cpu.c b/src/cpu/cpu.c
 index 3702bef..5ff845c 100644
 --- a/src/cpu/cpu.c

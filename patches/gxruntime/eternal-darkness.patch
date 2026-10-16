@@ -1,8 +1,8 @@
 diff --git a/backends/aurora/aurora_backend.cpp b/backends/aurora/aurora_backend.cpp
-index d94f811..05af8d6 100644
+index d94f811..b41ff55 100644
 --- a/backends/aurora/aurora_backend.cpp
 +++ b/backends/aurora/aurora_backend.cpp
-@@ -19,9 +19,20 @@
+@@ -19,9 +19,22 @@
  #include <dolphin/pad.h>
  #include <dolphin/vi.h>
  #include <SDL3/SDL_audio.h>
@@ -17,13 +17,15 @@ index d94f811..05af8d6 100644
 +#define WIN32_LEAN_AND_MEAN
 +#define NOMINMAX
 +#include <windows.h>
++#else
++#include <sys/stat.h>
 +#endif
 +#include <SDL3/SDL_thread.h>
 +#include <SDL3/SDL_video.h>
  
  #include <gx/fifo.hpp>
  #include <gx/gx.hpp>
-@@ -30,12 +41,23 @@
+@@ -30,12 +43,23 @@
  #include <cstdio>
  #include <cstdlib>
  #include <cstring>
@@ -47,7 +49,7 @@ index d94f811..05af8d6 100644
  
  #if GXRUNTIME_HAS_AURORA_RECOMP
  // gxcore substrate submission lives in the Aurora fork (lib/gfx/gxcore_draw.cpp),
-@@ -46,9 +68,40 @@ namespace aurora::gfx::gxcore {
+@@ -46,9 +70,40 @@ namespace aurora::gfx::gxcore {
  bool submit_draw_plan(const gxruntime::gxcore::DrawPlan& plan);
  void copy_efb_to_texture(const gxruntime::gxcore::EfbCopyCommand& cmd);
  void reset_texture_cache();
@@ -88,7 +90,7 @@ index d94f811..05af8d6 100644
  // Forward for continuous EFB readback attach (fork-internal).
  namespace aurora::gfx::efb_readback {
  void set_continuous(bool enabled) noexcept;
-@@ -57,10 +110,24 @@ bool peek(const std::uint8_t** rgba, std::uint32_t* width,
+@@ -57,10 +112,24 @@ bool peek(const std::uint8_t** rgba, std::uint32_t* width,
            std::uint32_t* height) noexcept;
  } // namespace aurora::gfx::efb_readback
  
@@ -114,7 +116,7 @@ index d94f811..05af8d6 100644
  bool g_graphics_log = false;
  bool g_force_untextured = false;
  bool g_gx_core_enabled = true; // gxcore is the default renderer; DOL_GX_CORE=0 opts out
-@@ -79,6 +146,9 @@ SDL_AudioStream* g_audio_stream = nullptr;
+@@ -79,9 +148,213 @@ SDL_AudioStream* g_audio_stream = nullptr;
  bool g_audio_playing = false;
  int g_audio_prebuffer_ms = 40;
  int g_audio_max_queue_ms = 250;
@@ -124,7 +126,211 @@ index d94f811..05af8d6 100644
  DolPlatformGuestAddressResolverFn g_guest_address_resolver = nullptr;
  void* g_guest_address_resolver_user = nullptr;
  
-@@ -112,6 +182,28 @@ std::array<PendingTlutMetadata, 20> g_pending_tluts{};
++// The mark recorder (dol_aurora_mark): every frame's timing, audio queue and
++// pipeline waits, and the audio itself, kept for the last ~17 s; a mark
++// writes out the span from 5 s before it to 7 s after (the log, and
++// logs/mark-<n>.wav), to time a glitch someone saw or heard as it happened.
++namespace mark {
++struct Frame {
++    std::uint64_t t_ns;
++    std::uint64_t present;
++    std::uint64_t wait_us;   // totals since start: draws waiting for pipelines,
++    std::uint64_t skipped;   // draws skipped while one compiled,
++    std::uint32_t built;     // pipelines built
++    std::uint32_t queued;    // now: pipelines waiting to compile
++    std::uint32_t audio_min_us;  // during the frame: least audio queued,
++    std::uint32_t audio_gap_us;  // longest gap between pushes,
++    std::uint32_t audio_drops;   // chunks dropped (output not draining)
++    std::uint32_t audio_dry;     // dry-outs (playback paused to refill)
++};
++constexpr double kBeforeS = 5.0, kAfterS = 7.0;
++constexpr std::size_t kFrames = 1024;
++constexpr std::size_t kAudioSeconds = 16;
++Frame g_frames[kFrames];
++std::size_t g_frame_count = 0;
++std::atomic<int> g_requests{0};
++std::atomic<std::uint32_t> g_audio_min_us{UINT32_MAX};
++std::atomic<std::uint32_t> g_audio_gap_us{0};
++std::atomic<std::uint32_t> g_audio_drops{0};
++std::atomic<std::uint32_t> g_audio_dry{0};
++std::mutex g_audio_mutex;
++std::vector<s16> g_audio;           // stereo ring, kAudioSeconds at 48 kHz
++std::uint64_t g_audio_written = 0;  // stereo frames pushed in all
++u32 g_audio_rate = 32000;
++struct Pending {
++    int id;
++    std::uint64_t t_ns;
++};
++std::vector<Pending> g_pending;
++int g_next_id = 1;
++
++void note_audio(std::uint32_t queued_us, std::uint32_t gap_us) {
++    std::uint32_t v = g_audio_min_us.load(std::memory_order_relaxed);
++    while (queued_us < v && !g_audio_min_us.compare_exchange_weak(v, queued_us)) {
++    }
++    v = g_audio_gap_us.load(std::memory_order_relaxed);
++    while (gap_us > v && !g_audio_gap_us.compare_exchange_weak(v, gap_us)) {
++    }
++}
++
++void keep_audio(const s16* samples, u32 frames, u32 rate) {
++    std::lock_guard<std::mutex> lock(g_audio_mutex);
++    const std::size_t ring = kAudioSeconds * 48000u;
++    if (g_audio.empty())
++        g_audio.resize(ring * 2u);
++    g_audio_rate = rate;
++    for (u32 i = 0; i < frames; i++) {
++        const std::size_t at = (g_audio_written + i) % ring;
++        g_audio[at * 2u] = samples[i * 2u];
++        g_audio[at * 2u + 1u] = samples[i * 2u + 1u];
++    }
++    g_audio_written += frames;
++}
++
++void write_wav(const std::string& path, const std::vector<s16>& pcm, u32 rate) {
++    FILE* f = std::fopen(path.c_str(), "wb");
++    if (f == nullptr) {
++        std::fprintf(stderr, "[mark] could not write %s\n", path.c_str());
++        return;
++    }
++    const std::uint32_t data = static_cast<std::uint32_t>(pcm.size() * sizeof(s16));
++    auto u32le = [&](std::uint32_t v) {
++        const unsigned char b[4] = {static_cast<unsigned char>(v), static_cast<unsigned char>(v >> 8),
++                                    static_cast<unsigned char>(v >> 16), static_cast<unsigned char>(v >> 24)};
++        std::fwrite(b, 1, 4, f);
++    };
++    auto u16le = [&](std::uint16_t v) {
++        const unsigned char b[2] = {static_cast<unsigned char>(v), static_cast<unsigned char>(v >> 8)};
++        std::fwrite(b, 1, 2, f);
++    };
++    std::fwrite("RIFF", 1, 4, f);
++    u32le(36u + data);
++    std::fwrite("WAVEfmt ", 1, 8, f);
++    u32le(16u);
++    u16le(1u);
++    u16le(2u);
++    u32le(rate);
++    u32le(rate * 4u);
++    u16le(4u);
++    u16le(16u);
++    std::fwrite("data", 1, 4, f);
++    u32le(data);
++    std::fwrite(pcm.data(), sizeof(s16), pcm.size(), f);  // little-endian hosts
++    std::fclose(f);
++}
++
++void dump(const Pending& m, std::uint64_t now_ns) {
++    const double from_s = -kBeforeS;
++    std::fprintf(stderr, "[mark %d] frames from %.0f s before the mark to %.0f s after:\n", m.id,
++                 kBeforeS, kAfterS);
++    std::fprintf(stderr,
++                 "[mark %d]     time  present    dt ms  audio ms  push gap  wait ms  skip  built  queue\n",
++                 m.id);
++    const std::size_t have = std::min(g_frame_count, kFrames);
++    const Frame* prev = nullptr;
++    double worst_dt = 0.0, least_audio = 1e9, wait_total = 0.0;
++    std::uint64_t skips = 0, built = 0, drops = 0, dries = 0;
++    for (std::size_t i = g_frame_count - have; i < g_frame_count; i++) {
++        const Frame& f = g_frames[i % kFrames];
++        const double rel = (static_cast<double>(f.t_ns) - static_cast<double>(m.t_ns)) / 1e9;
++        if (rel < from_s || rel > kAfterS) {
++            prev = &f;
++            continue;
++        }
++        if (prev == nullptr) {
++            prev = &f;
++            continue;
++        }
++        const double dt = (f.t_ns - prev->t_ns) / 1e6;
++        const double wait = (f.wait_us - prev->wait_us) / 1e3;
++        const std::uint64_t skip = f.skipped - prev->skipped;
++        const std::uint32_t made = f.built - prev->built;
++        const double audio = f.audio_min_us == UINT32_MAX ? -1.0 : f.audio_min_us / 1e3;
++        worst_dt = std::max(worst_dt, dt);
++        if (audio >= 0.0)
++            least_audio = std::min(least_audio, audio);
++        wait_total += wait;
++        skips += skip;
++        built += made;
++        drops += f.audio_drops;
++        dries += f.audio_dry;
++        std::fprintf(stderr,
++                     "[mark %d] %+8.3fs %8llu %8.1f %9.1f %9.1f %8.1f %5llu %6u %6u%s%s%s%s\n",
++                     m.id, rel, static_cast<unsigned long long>(f.present), dt, audio,
++                     f.audio_gap_us / 1e3, wait, static_cast<unsigned long long>(skip), made,
++                     f.queued, dt > 25.0 ? "  SLOW" : "", f.audio_dry != 0 ? "  DRY" : "",
++                     f.audio_drops != 0 ? "  DROP" : "", skip != 0 ? "  SKIP" : "");
++        prev = &f;
++    }
++    std::fprintf(stderr,
++                 "[mark %d] summary: slowest frame %.1f ms, least audio %.1f ms, %u dry, %u dropped, "
++                 "%.1f ms waiting for %llu pipelines built, %llu draws skipped\n",
++                 m.id, worst_dt, least_audio, static_cast<unsigned>(dries),
++                 static_cast<unsigned>(drops), wait_total, static_cast<unsigned long long>(built),
++                 static_cast<unsigned long long>(skips));
++    // The audio pushed over the same span (it plays a queue's length later).
++    std::vector<s16> pcm;
++    u32 rate;
++    {
++        std::lock_guard<std::mutex> lock(g_audio_mutex);
++        rate = g_audio_rate;
++        const std::size_t ring = kAudioSeconds * 48000u;
++        const double span_s = (static_cast<double>(now_ns) - static_cast<double>(m.t_ns)) / 1e9 + kBeforeS;
++        std::uint64_t frames = static_cast<std::uint64_t>(span_s * rate);
++        frames = std::min<std::uint64_t>({frames, g_audio_written, ring});
++        pcm.resize(frames * 2u);
++        for (std::uint64_t i = 0; i < frames; i++) {
++            const std::size_t at = (g_audio_written - frames + i) % ring;
++            pcm[i * 2u] = g_audio[at * 2u];
++            pcm[i * 2u + 1u] = g_audio[at * 2u + 1u];
++        }
++    }
++    const char* dir_env = std::getenv("ED_MARK_DIR");
++    const std::string dir = dir_env != nullptr && dir_env[0] != '\0' ? dir_env : "logs";
++#if defined(_WIN32)
++    CreateDirectoryA(dir.c_str(), nullptr);
++#else
++    mkdir(dir.c_str(), 0755);
++#endif
++    const std::string path = dir + "/mark-" + std::to_string(m.id) + ".wav";
++    std::fprintf(stderr, "[mark %d] audio: %s (%.1f s, the mark %.1f s in)\n", m.id, path.c_str(),
++                 pcm.size() / 2.0 / rate, std::min(kBeforeS, pcm.size() / 2.0 / rate));
++    std::thread([path, pcm = std::move(pcm), rate] { write_wav(path, pcm, rate); }).detach();
++}
++
++// Each present: record the frame, take new marks, write out finished ones.
++void record_frame() {
++    const std::uint64_t now = SDL_GetTicksNS();
++    Frame& f = g_frames[g_frame_count % kFrames];
++    f.t_ns = now;
++    f.present = g_present_count;
++    aurora_get_pipeline_wait_totals(&f.wait_us, &f.skipped);
++    const AuroraStats* stats = aurora_get_stats();
++    f.built = stats != nullptr ? stats->createdPipelines : 0u;
++    f.queued = stats != nullptr ? stats->queuedPipelines : 0u;
++    f.audio_min_us = g_audio_min_us.exchange(UINT32_MAX, std::memory_order_relaxed);
++    f.audio_gap_us = g_audio_gap_us.exchange(0, std::memory_order_relaxed);
++    f.audio_drops = g_audio_drops.exchange(0, std::memory_order_relaxed);
++    f.audio_dry = g_audio_dry.exchange(0, std::memory_order_relaxed);
++    g_frame_count++;
++    for (int n = g_requests.exchange(0); n > 0; n--) {
++        const Pending m{g_next_id++, now};
++        g_pending.push_back(m);
++        std::fprintf(stderr, "[mark %d] marked at %.3f s (present %llu); writing it out in %.0f s\n",
++                     m.id, now / 1e9, g_present_count, kAfterS);
++    }
++    while (!g_pending.empty() &&
++           now >= g_pending.front().t_ns + static_cast<std::uint64_t>(kAfterS * 1e9)) {
++        dump(g_pending.front(), now);
++        g_pending.erase(g_pending.begin());
++    }
++}
++} // namespace mark
++
+ struct PendingTextureMetadata {
+     bool valid = false;
+     const void* data = nullptr;
+@@ -112,6 +385,28 @@ std::array<PendingTlutMetadata, 20> g_pending_tluts{};
  // validating sink checked. The live Aurora path stays authoritative; this only
  // proves the consumer survives real FIFO traffic ahead of renderer cutover.
  gxruntime::aurora_recomp::RetailGxFrontend g_shadow_frontend;
@@ -153,7 +359,7 @@ index d94f811..05af8d6 100644
  gxruntime::aurora_recomp::ConsumingAuroraRenderSink g_shadow_packet_sink;
  bool g_shadow_frontend_enabled = false;
  bool g_shadow_frontend_failed = false;
-@@ -124,9 +216,17 @@ bool g_shadow_frontend_failed = false;
+@@ -124,9 +419,17 @@ bool g_shadow_frontend_failed = false;
  gxruntime::gxcore::GxCoreSink g_core_sink;
  unsigned long long g_core_submitted = 0;
  unsigned long long g_core_rejected = 0;
@@ -171,7 +377,7 @@ index d94f811..05af8d6 100644
      if (aurora::gfx::gxcore::submit_draw_plan(plan))
          ++g_core_submitted;
      else
-@@ -244,6 +344,7 @@ void log_callback(AuroraLogLevel level, const char* module, const char* message,
+@@ -244,6 +547,7 @@ void log_callback(AuroraLogLevel level, const char* module, const char* message,
  }
  
  void poll_events() {
@@ -179,7 +385,7 @@ index d94f811..05af8d6 100644
      const AuroraEvent* event = aurora_update();
      while (event != nullptr && event->type != AURORA_NONE) {
          if (event->type == AURORA_EXIT)
-@@ -379,13 +480,39 @@ unsigned long long g_trace_present_scope_frame = 0ull;
+@@ -379,13 +683,39 @@ unsigned long long g_trace_present_scope_frame = 0ull;
  bool g_trace_frame_begun = false;
  unsigned long long g_trace_frames_recorded = 0ull;
  gxruntime::aurora_recomp::trace::TraceWriter g_trace_writer;
@@ -226,7 +432,7 @@ index d94f811..05af8d6 100644
  
  unsigned long long trace_current_frame() {
      return g_trace_present_scope_frame != 0ull ? g_trace_present_scope_frame
-@@ -435,6 +562,17 @@ bool trace_should_record() {
+@@ -435,6 +765,17 @@ bool trace_should_record() {
          g_trace_writer.frame_begin(static_cast<u32>(frame));
          g_trace_frame_begun = true;
          ++g_trace_frames_recorded;
@@ -244,7 +450,7 @@ index d94f811..05af8d6 100644
      }
      return true;
  }
-@@ -442,18 +580,46 @@ bool trace_should_record() {
+@@ -442,18 +783,46 @@ bool trace_should_record() {
  void trace_record_mem_update(u32 address, u32 size, const void* data) {
      if (size == 0 || data == nullptr || !trace_should_record())
          return;
@@ -300,7 +506,7 @@ index d94f811..05af8d6 100644
  }
  
  void trace_close_and_log() {
-@@ -491,6 +657,10 @@ void trace_on_present() {
+@@ -491,6 +860,10 @@ void trace_on_present() {
          trace_close_and_log();
      g_trace_present_scope_frame = 0ull;
      g_trace_frame_begun = false;
@@ -311,7 +517,7 @@ index d94f811..05af8d6 100644
  }
  // ---------------------------------------------------------------------------
  
-@@ -514,11 +684,54 @@ void shadow_frontend_set_array(u32 attr, u32 guest_address, u8 stride) {
+@@ -514,11 +887,54 @@ void shadow_frontend_set_array(u32 attr, u32 guest_address, u8 stride) {
      }
  }
  
@@ -366,7 +572,7 @@ index d94f811..05af8d6 100644
      const void* data = nullptr;
      u32 available = 0;
      if (!g_guest_address_resolver(g_guest_address_resolver_user, address, size,
-@@ -587,6 +800,29 @@ void shadow_frontend_call_display_list(const void* data, u32 size) {
+@@ -587,6 +1003,29 @@ void shadow_frontend_call_display_list(const void* data, u32 size) {
      }
  }
  
@@ -396,7 +602,7 @@ index d94f811..05af8d6 100644
  void shadow_frontend_write(u64 value, u8 size) {
      if (!g_shadow_frontend_enabled || g_shadow_frontend_failed)
          return;
-@@ -615,24 +851,7 @@ void shadow_frontend_write(u64 value, u8 size) {
+@@ -615,24 +1054,7 @@ void shadow_frontend_write(u64 value, u8 size) {
      }
      const std::span<const std::uint8_t> fragment(bytes, size);
      if (g_gx_core_enabled) {
@@ -422,7 +628,7 @@ index d94f811..05af8d6 100644
          return;
      }
      if (!g_shadow_frontend.write_fifo(fragment) ||
-@@ -842,8 +1061,969 @@ void shadow_transform_observer(
+@@ -842,8 +1264,969 @@ void shadow_transform_observer(
      }
  }
  #endif
@@ -1392,7 +1598,7 @@ index d94f811..05af8d6 100644
  extern "C" {
  
  void aurora_backend_set_array_guest(u32 attr, u32 guest_address,
-@@ -937,7 +2117,7 @@ bool dol_aurora_initialize(int argc, char** argv,
+@@ -937,7 +2320,7 @@ bool dol_aurora_initialize(int argc, char** argv,
      g_trace_present_scope_frame = 0ull;
      g_trace_frame_begun = false;
      g_trace_frames_recorded = 0ull;
@@ -1401,7 +1607,7 @@ index d94f811..05af8d6 100644
      const char* trace_out = std::getenv("DOL_AURORA_RECOMP_TRACE_OUT");
      if (trace_out != nullptr && trace_out[0] != '\0') {
          g_trace_path = trace_out;
-@@ -1069,7 +2249,11 @@ static void flush_gxcore_gap_counters() {
+@@ -1069,7 +2452,11 @@ static void flush_gxcore_gap_counters() {
  #if GXRUNTIME_HAS_AURORA_RECOMP
      if (!g_gx_core_enabled)
          return;
@@ -1414,7 +1620,7 @@ index d94f811..05af8d6 100644
      struct {
          const char* name;
          unsigned long long value;
-@@ -1114,10 +2298,178 @@ void dol_aurora_flush_gap_report(void) {
+@@ -1114,10 +2501,178 @@ void dol_aurora_flush_gap_report(void) {
      flush_gxcore_gap_counters();
  }
  
@@ -1594,7 +1800,7 @@ index d94f811..05af8d6 100644
          aurora::gfx::efb_readback::set_continuous(true);
          aurora_request_framebuffer_readback();
      }
-@@ -1169,7 +2521,8 @@ void aurora_backend_present(void) {
+@@ -1169,7 +2724,8 @@ void aurora_backend_present(void) {
      // gxcore accumulates the frame's draws as their spans complete; the final
      // pending draw is only planned at the frame boundary. Submit it into the
      // still-open Aurora frame before end_frame flushes the command list.
@@ -1604,7 +1810,7 @@ index d94f811..05af8d6 100644
          g_core_sink.flush_frame();
      // TEMP DIAG: per-frame gxcore gap-counter deltas so a live
      // goal celebration reveals which skip reason dominates (missing_vcd /
-@@ -1201,8 +2554,11 @@ void aurora_backend_present(void) {
+@@ -1201,8 +2757,11 @@ void aurora_backend_present(void) {
          g_frame_open = false;
      }
      // Host EFB fill: push latest present-source snapshot into software backing
@@ -1618,10 +1824,11 @@ index d94f811..05af8d6 100644
          const std::uint8_t* rgba = nullptr;
          std::uint32_t w = 0;
          std::uint32_t h = 0;
-@@ -1212,6 +2568,87 @@ void aurora_backend_present(void) {
+@@ -1212,6 +2771,88 @@ void aurora_backend_present(void) {
          }
      }
      ++g_present_count;
++    mark::record_frame();
 +#if GXRUNTIME_HAS_AURORA_RECOMP
 +    // Follow the game's widescreen setting: show 16:9 while its 3D draws
 +    // project at 16:9 (anamorphic, as on a widescreen TV), 4:3 otherwise.
@@ -1706,7 +1913,7 @@ index d94f811..05af8d6 100644
      if (g_frame_pacing_log &&
          (g_present_count <= 10 || (g_present_count % 60) == 0)) {
          const AuroraStats* stats = aurora_get_stats();
-@@ -1432,6 +2869,7 @@ void aurora_backend_present(void) {
+@@ -1432,6 +3073,7 @@ void aurora_backend_present(void) {
      const unsigned long long present_fifo = g_fifo_bytes;
      g_fifo_bytes = 0;
      poll_events();
@@ -1714,7 +1921,7 @@ index d94f811..05af8d6 100644
      if (!g_should_quit) {
          g_frame_open = aurora_begin_frame();
  #if GXRUNTIME_HAS_AURORA_RECOMP
-@@ -1482,7 +2920,13 @@ void aurora_backend_gx_write(u64 value, u8 size) {
+@@ -1482,7 +3124,13 @@ void aurora_backend_gx_write(u64 value, u8 size) {
          return;
      g_fifo_bytes += size;
  #if GXRUNTIME_HAS_AURORA_RECOMP
@@ -1729,7 +1936,7 @@ index d94f811..05af8d6 100644
      // Record AFTER the shadow write so MEM_UPDATEs its resolves emitted
      // precede this GX_WRITE in the trace (replay reads them first), and
      // BEFORE the live-Aurora forwarding below so the pristine value is
-@@ -1737,6 +3181,7 @@ void aurora_backend_set_xfb_black(bool black) {
+@@ -1737,6 +3385,7 @@ void aurora_backend_set_xfb_black(bool black) {
  }
  
  bool aurora_backend_pad_init(void) {
@@ -1737,7 +1944,7 @@ index d94f811..05af8d6 100644
      if (PADInit() == FALSE)
          return false;
  
-@@ -1780,6 +3225,7 @@ bool aurora_backend_pad_init(void) {
+@@ -1780,6 +3429,7 @@ bool aurora_backend_pad_init(void) {
  }
  
  u32 aurora_backend_pad_read(DolPadState state[4]) {
@@ -1745,7 +1952,7 @@ index d94f811..05af8d6 100644
      PADStatus status[4]{};
      const u32 motor_mask = PADRead(status);
      for (u32 i = 0; i < 4; i++) {
-@@ -1796,22 +3242,41 @@ u32 aurora_backend_pad_read(DolPadState state[4]) {
+@@ -1796,22 +3446,41 @@ u32 aurora_backend_pad_read(DolPadState state[4]) {
              .error = status[i].err,
          };
      }
@@ -1787,7 +1994,7 @@ index d94f811..05af8d6 100644
      PADSetSpec(spec);
  }
  
-@@ -1841,13 +3306,16 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1841,13 +3510,16 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
          return;
      const int bytes_per_second =
          static_cast<int>(g_audio_sample_rate) * 2 * static_cast<int>(sizeof(s16));
@@ -1806,7 +2013,7 @@ index d94f811..05af8d6 100644
      while (queued > max_queued_bytes && waited_ms < 20u) {
          g_audio_throttle_count++;
          if (g_audio_queue_log &&
-@@ -1860,11 +3328,45 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1860,11 +3532,51 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
                           max_queued_bytes);
          SDL_Delay(1);
          waited_ms++;
@@ -1818,9 +2025,11 @@ index d94f811..05af8d6 100644
 +            stalled = true;
 +            break;
 +        }
-     }
-+    if (stalled || queued > max_queued_bytes * 2)
++    }
++    if (stalled || queued > max_queued_bytes * 2) {
++        mark::g_audio_drops.fetch_add(1, std::memory_order_relaxed);
 +        return;
+     }
  
      const bool low_queue =
          queued >= 0 && queued < bytes_per_second / 100;
@@ -1835,6 +2044,9 @@ index d94f811..05af8d6 100644
 +            std::fprintf(stderr, "[audio-dry] t=%.3fs queued=%.1fms gap=%.1fms\n",
 +                         now_ns / 1e9, queued * 1000.0 / bytes_per_second, gap_ms);
 +        last_push_ns = now_ns;
++        if (g_audio_playing && queued >= 0)
++            mark::note_audio(static_cast<std::uint32_t>(queued * 1e6 / bytes_per_second),
++                             static_cast<std::uint32_t>(gap_ms * 1e3));
 +        // Ran dry: the output would now play scraps between silences (a
 +        // crackle). Pause it until a larger reserve has built up instead, one
 +        // short gap, and keep that reserve from now on.
@@ -1842,6 +2054,7 @@ index d94f811..05af8d6 100644
 +            gap_ms > 5.0) {
 +            if (g_audio_extra_ms < 120)
 +                g_audio_extra_ms += 20;
++            mark::g_audio_dry.fetch_add(1, std::memory_order_relaxed);
 +            std::fprintf(stderr,
 +                         "[audio] ran dry after a %.0f ms pause; keeping %d ms in reserve\n",
 +                         gap_ms, g_audio_prebuffer_ms + g_audio_extra_ms);
@@ -1852,7 +2065,7 @@ index d94f811..05af8d6 100644
      if (g_audio_queue_log &&
          (g_audio_push_count <= 16 || (g_audio_push_count % 4000) == 0 ||
           (low_queue && g_audio_push_count - g_audio_low_log_push >= 4000))) {
-@@ -1876,6 +3378,20 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1876,6 +3588,21 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
                       g_audio_push_count, queued, queued + bytes,
                       g_audio_playing ? 1u : 0u, g_audio_throttle_count);
      }
@@ -1870,13 +2083,18 @@ index d94f811..05af8d6 100644
 +            std::fprintf(stderr, "[audio-queue] rate=%.4f queued=%d target=%d\n", ratio,
 +                         queued, prebuffer_bytes);
 +    }
++    mark::keep_audio(samples, frames, g_audio_sample_rate);
      if (!SDL_PutAudioStreamData(g_audio_stream, samples, bytes))
          std::fprintf(stderr, "[audio] failed to queue samples: %s\n", SDL_GetError());
      else if (!g_audio_playing && queued + bytes >= prebuffer_bytes) {
-@@ -1886,10 +3402,373 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1886,10 +3613,377 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
      }
  }
  
++void dol_aurora_mark(void) {
++    mark::g_requests.fetch_add(1, std::memory_order_relaxed);
++}
++
 +bool dol_aurora_key_down(int sdl_scancode) {
 +    if (!g_initialized || sdl_scancode <= 0)
 +        return false;
@@ -2247,7 +2465,7 @@ index d94f811..05af8d6 100644
      const DolPlatformOps ops = {
          .should_quit = aurora_backend_should_quit,
          .present = aurora_backend_present,
-@@ -1918,6 +3797,7 @@ void install_platform_ops() {
+@@ -1918,6 +4012,7 @@ void install_platform_ops() {
          .audio_set_sample_rate = aurora_backend_audio_set_sample_rate,
          .audio_push = aurora_backend_audio_push,
      };
@@ -2270,6 +2488,21 @@ index b86b214..f6b70de 100644
  
  AuroraBackend aurora_get_backend();
  const AuroraBackend* aurora_get_available_backends(size_t* count);
+diff --git a/graphics/aurora/include/aurora/gfx.h b/graphics/aurora/include/aurora/gfx.h
+index a13ce39..8cc350b 100644
+--- a/graphics/aurora/include/aurora/gfx.h
++++ b/graphics/aurora/include/aurora/gfx.h
+@@ -29,6 +29,10 @@ typedef struct {
+ } AuroraStats;
+ 
+ const AuroraStats* aurora_get_stats();
++
++/* GXRuntime recomp patch: since start, the time draws spent waiting for a
++   compiling pipeline (microseconds) and the draws skipped while one compiled. */
++void aurora_get_pipeline_wait_totals(uint64_t* waitedUs, uint64_t* skippedDraws);
+ float aurora_get_fps();
+ 
+ void aurora_enable_vsync(bool enabled);
 diff --git a/graphics/aurora/lib/aurora.cpp b/graphics/aurora/lib/aurora.cpp
 index b09ef4d..c293c6d 100644
 --- a/graphics/aurora/lib/aurora.cpp
@@ -2373,10 +2606,16 @@ index 7af8fca..4c14e34 100644
      g_requested.store(false, std::memory_order_release);
    else
 diff --git a/graphics/aurora/lib/gfx/gxcore_draw.cpp b/graphics/aurora/lib/gfx/gxcore_draw.cpp
-index 71136b9..c3f4b3a 100644
+index 71136b9..9b36e46 100644
 --- a/graphics/aurora/lib/gfx/gxcore_draw.cpp
 +++ b/graphics/aurora/lib/gfx/gxcore_draw.cpp
-@@ -19,6 +19,10 @@
+@@ -1,4 +1,5 @@
+ #include "gxcore_draw.hpp"
++#include "pipeline_cache.hpp"
+ #include "xfb_present.hpp"
+ #include "efb_readback.hpp"
+ #include "plane_capture.hpp"
+@@ -19,6 +20,10 @@
  #include <absl/container/flat_hash_map.h>
  
  #include <algorithm>
@@ -2387,7 +2626,7 @@ index 71136b9..c3f4b3a 100644
  #include <cstring>
  #include <vector>
  
-@@ -40,6 +44,22 @@ namespace {
+@@ -40,6 +45,22 @@ namespace {
  // LOD bias has no WebGPU sampler field — residual stays shader-side if needed.
  // maxAnisotropy>1 is clamped to device capability (textureAnisotropy); WebGPU
  // linear min/mag/mip when aniso is already applied in decode_sampler.
@@ -2410,7 +2649,7 @@ index 71136b9..c3f4b3a 100644
  wgpu::SamplerDescriptor sampler_from_plan(const gxc::PlanSampler& s) {
    auto address = [](std::uint8_t a) -> wgpu::AddressMode {
      switch (a) {
-@@ -158,6 +178,64 @@ wgpu::BlendFactor to_blend_factor_dst(gxc::DstBlendFactor factor, bool dual_src)
+@@ -158,6 +179,64 @@ wgpu::BlendFactor to_blend_factor_dst(gxc::DstBlendFactor factor, bool dual_src)
    }
  }
  
@@ -2475,7 +2714,7 @@ index 71136b9..c3f4b3a 100644
  // Texture bind group layout for a used-texmap set (63/Mfin multi-texmap): texmap
  // t occupies binding 2t (texture) + 2t+1 (sampler), matching the WGSL. Cached per
  // mask; used_mask=1 (texmap 0 only) reproduces the pre-Mfin single-texmap layout.
-@@ -228,11 +306,43 @@ struct TextureKey {
+@@ -228,11 +307,43 @@ struct TextureKey {
  };
  
  absl::flat_hash_map<TextureKey, TextureHandle> g_textureCache;
@@ -2519,7 +2758,7 @@ index 71136b9..c3f4b3a 100644
  TextureCacheStats g_textureCacheStats;
  
  // EFB copy-to-texture destinations (63/S16): dest guest address -> resolved EFB
-@@ -242,6 +352,13 @@ TextureCacheStats g_textureCacheStats;
+@@ -242,6 +353,13 @@ TextureCacheStats g_textureCacheStats;
  // (a re-copy to the same address updates in place, matching the live path).
  // E7: format-0xF display copies also land here (Virtual XFB GPU texture).
  absl::flat_hash_map<uint32_t, TextureHandle> g_efbCopyTextures;
@@ -2533,7 +2772,7 @@ index 71136b9..c3f4b3a 100644
  
  // E7 present-from-RAM: YUYV decoded from guest MEM1 when no GPU copy exists
  // (software/external XFB writers). Keyed by physical address; re-upload when
-@@ -281,13 +398,17 @@ unsigned long long xfb_ram_present_count() noexcept {
+@@ -281,13 +399,17 @@ unsigned long long xfb_ram_present_count() noexcept {
    return g_xfb_ram_present_count;
  }
  
@@ -2553,7 +2792,7 @@ index 71136b9..c3f4b3a 100644
      return &it->second;
  
    const auto dims = aurora::vi::configured_xfb_size();
-@@ -368,7 +489,7 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -368,7 +490,7 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
    const uint32_t tex_mask = textured ? gxc::used_texmap_mask(key.shader) : 1u;
    std::array<wgpu::BindGroupLayout, 4> bindGroupLayouts{
        g_staticBindGroupLayout,
@@ -2562,7 +2801,7 @@ index 71136b9..c3f4b3a 100644
        tev ? g_uniformBindGroupLayout : texture_bind_group_layout(tex_mask),
        texture_bind_group_layout(tex_mask),
    };
-@@ -427,7 +548,13 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -427,7 +549,13 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
    // vertex FORMAT carries that attribute. A lit/emboss draw whose format omits
    // it reads the cached fallback from the uniform instead (I_CACHED_NORMAL), so
    // the shader does not declare the input and the layout must not provide it.
@@ -2577,7 +2816,7 @@ index 71136b9..c3f4b3a 100644
        key.shader.has_vertex_normal != 0) {
      attributes.push_back(wgpu::VertexAttribute{
          .format = wgpu::VertexFormat::Float32x3,
-@@ -442,14 +569,14 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -442,14 +570,14 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
          .shaderLocation = 13,
      });
    }
@@ -2594,7 +2833,7 @@ index 71136b9..c3f4b3a 100644
      attributes.push_back(wgpu::VertexAttribute{
          .format = wgpu::VertexFormat::Float32x3,
          .offset = gxc::kVertexTangentOffset,
-@@ -536,6 +663,10 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -536,6 +664,10 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
    default:
      break; // None here; All was skipped at plan time
    }
@@ -2605,7 +2844,7 @@ index 71136b9..c3f4b3a 100644
  
    const wgpu::RenderPipelineDescriptor descriptor{
        .label = "GXCore Pipeline",
-@@ -566,10 +697,21 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -566,10 +698,22 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
  
  void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
    if (!bind_pipeline(data.pipeline, pass)) {
@@ -2619,6 +2858,7 @@ index 71136b9..c3f4b3a 100644
 +      skipped = 0;
 +    }
 +    ++skipped;
++    note_skipped_draw();
      return;
    }
 -  const std::array vsOffsets{data.uniformRange.offset};
@@ -2629,7 +2869,7 @@ index 71136b9..c3f4b3a 100644
    if (data.tev) {
      // group 2 = PS uniform (same dynamic-uniform bind group, its own offset);
      // group 3 = texture.
-@@ -591,8 +733,13 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
+@@ -591,8 +735,13 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
  
  void reset_texture_cache() {
    g_textureCache.clear();
@@ -2643,7 +2883,7 @@ index 71136b9..c3f4b3a 100644
    g_ramXfbTextures.clear();
    g_last_xfb_dest_stride = 0;
    g_last_xfb_height = 0;
-@@ -612,6 +759,8 @@ const TextureCacheStats& texture_cache_stats() { return g_textureCacheStats; }
+@@ -612,6 +761,8 @@ const TextureCacheStats& texture_cache_stats() { return g_textureCacheStats; }
  // color/Z afterwards. The bound draw's geometry is already in the pass (the
  // sink flushed the pending draw before firing this).
  void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
@@ -2652,7 +2892,7 @@ index 71136b9..c3f4b3a 100644
    // Mirror the copy-clear color/Z (BP 0x4F-0x51 at this copy) into the gx
    // state GXSetCopyClear would have written: begin_frame's pass-0 EFB clear
    // reads g_gxState.clearColor/clearDepth, and in gxcore mode the live gx
-@@ -660,8 +809,9 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -660,8 +811,9 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
        dstHeight = xfb_h;
    }
  
@@ -2664,7 +2904,7 @@ index 71136b9..c3f4b3a 100644
        it->second->size.width != dstWidth || it->second->size.height != dstHeight) {
      TextureHandle handle;
      if (!is_xfb && gfx::tex_copy_conv::needs_conversion(fmt)) {
-@@ -670,7 +820,7 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -670,7 +822,7 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
        handle = gfx::new_render_texture(dstWidth, dstHeight, GX_TF_RGBA8,
                                         is_xfb ? "GXCore XFB" : "GXCore Copy");
      }
@@ -2673,7 +2913,7 @@ index 71136b9..c3f4b3a 100644
    }
    if (!it->second) {
      return;
-@@ -709,11 +859,30 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -709,11 +861,30 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
    // XFB YUYV into guest RAM from this readback on every display copy, so it
    // must stay armed in product runs too (cost: one EFB readback per display
    // copy, ~1-2/frame).
@@ -2705,7 +2945,7 @@ index 71136b9..c3f4b3a 100644
    gfx::resolve_pass(it->second, srcRect, do_clear && cmd.color_update,
                      do_clear && cmd.alpha_update,
                      do_clear && cmd.depth_update,
-@@ -730,7 +899,7 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -730,7 +901,7 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
    // never read XFB RAM stay safe.
    // dest_stride_bytes = BP 0x4D << 5 when set; else tight width*2.
    // XFB dest height from y_scale (byte_size/stride or cmd.xfb_height).
@@ -2714,7 +2954,7 @@ index 71136b9..c3f4b3a 100644
        (cmd.width & 1u) == 0u) {
      if (!efb_readback::continuous()) {
        efb_readback::set_continuous(true);
-@@ -782,10 +951,103 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -782,10 +953,103 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
    }
  }
  
@@ -2818,7 +3058,7 @@ index 71136b9..c3f4b3a 100644
  
    if (plan.viewport_valid) {
      // Raw XF viewport -> logical viewport, the raw path's own formula
-@@ -839,23 +1101,108 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -839,23 +1103,108 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      const uint32_t size = std::min(tsize, available);
      // Hash the actual source texels (+ TLUT for CI) so a content change under an
      // unchanged guest identity is a distinct cache entry — see TextureKey.
@@ -2932,7 +3172,7 @@ index 71136b9..c3f4b3a 100644
      // gxcore owns the decode for every format: produce tightly-packed RGBA8 and
      // upload it as a pre-decoded PC texture (no substrate re-conversion).
      std::vector<uint8_t> decoded;
-@@ -868,8 +1215,32 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -868,8 +1217,32 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      } else {
        decoded = gxc::decode_texture(format, width, height, bytes, size);
      }
@@ -2966,7 +3206,7 @@ index 71136b9..c3f4b3a 100644
        handle = new_static_texture_2d(
            width, height, 1, GX_TF_RGBA8_PC,
            ArrayRef<uint8_t>{decoded.data(), decoded.size()}, false,
-@@ -892,7 +1263,96 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -892,7 +1265,96 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    };
  
    BindGroupRef textureBindGroup = 0;
@@ -3063,7 +3303,7 @@ index 71136b9..c3f4b3a 100644
      if (plan.texmap_mask == 0u) {
        // Single-texmap fast path: primary texture + plan.sampler at binding 0/1.
        if (plan.has_texture) {
-@@ -903,7 +1363,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -903,7 +1365,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
              plan.tlut_data, plan.tlut_available);
          if (bound) {
            const auto sampler =
@@ -3072,7 +3312,7 @@ index 71136b9..c3f4b3a 100644
            const std::array entries{
                WGPUBindGroupEntry{.binding = 0,
                                   .textureView =
-@@ -919,6 +1379,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -919,6 +1381,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            textureBindGroup = bind_group_ref(descriptor);
          }
        }
@@ -3080,7 +3320,7 @@ index 71136b9..c3f4b3a 100644
      } else {
        // Multi-texmap: bind each used texmap at 2t (texture) / 2t+1 (sampler),
        // matching the WGSL declarations. Per-texmap PlanSampler from
-@@ -945,14 +1406,16 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -945,14 +1408,16 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
          held.push_back(bound);
          const gxc::PlanSampler& ps =
              pt.sampler.valid ? pt.sampler : plan.samplers[t];
@@ -3099,7 +3339,7 @@ index 71136b9..c3f4b3a 100644
        const WGPUBindGroupDescriptor descriptor{
            .label = {"GXCore Texture Bind Group", WGPU_STRLEN},
            .layout = texture_bind_group_layout(plan.texmap_mask).Get(),
-@@ -960,6 +1423,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -960,6 +1425,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            .entries = entries.data(),
        };
        textureBindGroup = bind_group_ref(descriptor);
@@ -3107,7 +3347,7 @@ index 71136b9..c3f4b3a 100644
      }
    }
  
-@@ -969,27 +1433,125 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -969,27 +1435,125 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    const auto idxRange = push_indices(
        reinterpret_cast<const uint8_t*>(plan.indices.data()),
        plan.indices.size() * sizeof(uint16_t), 4);
@@ -3324,7 +3564,7 @@ index 0a23a3f..9f25bbf 100644
  // was unavailable (single-source SrcAlpha fallback). Zero when feature present.
  unsigned long long dst_alpha_fallback_count() noexcept;
 diff --git a/graphics/aurora/lib/gfx/pipeline_cache.cpp b/graphics/aurora/lib/gfx/pipeline_cache.cpp
-index 822a560..c2ab896 100644
+index 822a560..068da90 100644
 --- a/graphics/aurora/lib/gfx/pipeline_cache.cpp
 +++ b/graphics/aurora/lib/gfx/pipeline_cache.cpp
 @@ -14,6 +14,7 @@
@@ -3335,7 +3575,7 @@ index 822a560..c2ab896 100644
  #include <condition_variable>
  #include <cstdlib>
  #include <deque>
-@@ -1146,9 +1147,53 @@ PipelineRef find_pipeline(ShaderType type, const rmlui::PipelineConfig& config,
+@@ -1146,9 +1147,62 @@ PipelineRef find_pipeline(ShaderType type, const rmlui::PipelineConfig& config,
  #endif
  
  #ifdef AURORA_ENABLE_GXCORE
@@ -3345,6 +3585,12 @@ index 822a560..c2ab896 100644
 +// Wait for it instead, first in the compile queue, up to 50 ms in a frame (a
 +// short hitch the first time something appears); past that, skip as before.
 +// AURORA_DRAW_WAIT_MS sets the budget; 0 restores skipping.
++// Totals for aurora_get_pipeline_wait_totals (the GXRuntime mark recorder).
++static std::atomic<uint64_t> g_drawWaitUs{0};
++static std::atomic<uint64_t> g_skippedDraws{0};
++
++void note_skipped_draw() { g_skippedDraws.fetch_add(1, std::memory_order_relaxed); }
++
 +static void wait_for_draw_pipeline(PipelineRef hash) {
 +  static const double budgetMs = [] {
 +    const char* value = std::getenv("AURORA_DRAW_WAIT_MS");
@@ -3378,7 +3624,10 @@ index 822a560..c2ab896 100644
 +  const auto start = std::chrono::steady_clock::now();
 +  g_pipelineReadyCv.wait_for(lock, std::chrono::duration<double, std::milli>(budgetMs - s_waitedMs),
 +                             [=] { return g_pipelines.contains(hash) || g_pipelineThreadEnd; });
-+  s_waitedMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
++  const double waitedMs =
++      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
++  s_waitedMs += waitedMs;
++  g_drawWaitUs.fetch_add(static_cast<uint64_t>(waitedMs * 1000.0), std::memory_order_relaxed);
 +}
 +
  template <>
@@ -3390,6 +3639,33 @@ index 822a560..c2ab896 100644
  }
  #endif
  
+@@ -1221,3 +1275,13 @@ bool get_pipeline(PipelineRef ref, wgpu::RenderPipeline& pipeline) {
+ }
+ 
+ } // namespace aurora::gfx
++
++void aurora_get_pipeline_wait_totals(uint64_t* waitedUs, uint64_t* skippedDraws) {
++#ifdef AURORA_ENABLE_GXCORE
++  *waitedUs = aurora::gfx::g_drawWaitUs.load(std::memory_order_relaxed);
++  *skippedDraws = aurora::gfx::g_skippedDraws.load(std::memory_order_relaxed);
++#else
++  *waitedUs = 0;
++  *skippedDraws = 0;
++#endif
++}
+diff --git a/graphics/aurora/lib/gfx/pipeline_cache.hpp b/graphics/aurora/lib/gfx/pipeline_cache.hpp
+index 2e87f4c..1cdd589 100644
+--- a/graphics/aurora/lib/gfx/pipeline_cache.hpp
++++ b/graphics/aurora/lib/gfx/pipeline_cache.hpp
+@@ -30,4 +30,8 @@ PipelineRef find_pipeline(ShaderType type, const Config& config, NewPipelineCall
+ 
+ bool get_pipeline(PipelineRef ref, wgpu::RenderPipeline& pipeline);
+ 
++// A draw was skipped because its pipeline was still compiling (counted for
++// aurora_get_pipeline_wait_totals).
++void note_skipped_draw();
++
+ } // namespace aurora::gfx
 diff --git a/graphics/aurora/lib/gfx/plane_capture.cpp b/graphics/aurora/lib/gfx/plane_capture.cpp
 index f51a682..11a455a 100644
 --- a/graphics/aurora/lib/gfx/plane_capture.cpp
@@ -6671,7 +6947,7 @@ index 9c2f7bb..6dd6411 100644
 +
  #endif
 diff --git a/include/gxruntime/aurora_backend.h b/include/gxruntime/aurora_backend.h
-index 6ef4cf4..c47fc64 100644
+index 6ef4cf4..6301816 100644
 --- a/include/gxruntime/aurora_backend.h
 +++ b/include/gxruntime/aurora_backend.h
 @@ -5,6 +5,7 @@
@@ -6706,7 +6982,7 @@ index 6ef4cf4..c47fc64 100644
  
  // C2: walk nonzero gxcore GapCounters into the process-global gap_report.
  // Call once before gap_report_write_json on the live Strikers path so
-@@ -40,6 +52,102 @@ void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user);
+@@ -40,6 +52,106 @@ void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user);
  // from shutdown (second call only bumps if counters grew).
  void dol_aurora_flush_gap_report(void);
  
@@ -6715,6 +6991,10 @@ index 6ef4cf4..c47fc64 100644
 +// '2' = 31). Reads the keyboard state the event pump keeps; false when the
 +// window does not have focus.
 +bool dol_aurora_key_down(int sdl_scancode);
++// Mark this moment (from any thread): 7 s later the log gets every frame from
++// 5 s before to 7 s after (timing, audio queue, pipeline waits and skips) and
++// logs/mark-<n>.wav (ED_MARK_DIR) the audio over that span.
++void dol_aurora_mark(void);
 +// True when the GX FIFO decoder holds no partial command, so the guest is
 +// between GX commands too: the only point where a state can be taken or
 +// replaced without the decoder misreading the bytes that follow.

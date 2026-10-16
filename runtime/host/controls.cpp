@@ -7,6 +7,7 @@
 #include "gxruntime/aurora_backend.h"
 #include "host/settings.h"
 
+#include <SDL3/SDL_events.h>
 #include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_keyboard.h>
 #include <SDL3/SDL_scancode.h>
@@ -307,6 +308,19 @@ void note_last_device(SDL_Gamepad* pad) {
         g_keyboard_last = true;
 }
 
+// M, or a controller's Share / touchpad button: mark the moment for the log
+// (dol_aurora_mark), to time a glitch as it is seen or heard. Taken from the
+// events, so a tap shorter than a frame still counts.
+bool SDLCALL mark_watch(void*, SDL_Event* event) {
+    if ((event->type == SDL_EVENT_KEY_DOWN && event->key.scancode == SDL_SCANCODE_M &&
+         !event->key.repeat) ||
+        (event->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN &&
+         (event->gbutton.button == SDL_GAMEPAD_BUTTON_MISC1 ||
+          event->gbutton.button == SDL_GAMEPAD_BUTTON_TOUCHPAD)))
+        dol_aurora_mark();
+    return true;
+}
+
 bool read_pad(DolPadState* state) {
     SDL_Gamepad* pad = gamepad();
     note_last_device(pad);
@@ -597,4 +611,5 @@ extern "C" void controls_init(void) {
     else
         load_preset(g_layout == kCustom ? kOriginal : g_layout);
     dol_aurora_set_pad0_override(read_pad);
+    SDL_AddEventWatch(mark_watch, nullptr);
 }

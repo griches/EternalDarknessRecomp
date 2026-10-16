@@ -332,7 +332,10 @@ static bool gx_fifo_write_cb(void* user, CPUState* cpu, u32 ea, u8 size,
                              u64 value) {
     (void)user;
     (void)ea;
-    mmio_fifo_dump_write(cpu, size, value);
+    // Once the dump has looked for ED_FIFO_DUMP and found none (or filled its
+    // 256 KiB), skip the call on every GX write.
+    if (g_fifo_dump_state == 0 || g_fifo_dump != NULL)
+        mmio_fifo_dump_write(cpu, size, value);
     if (!cpu_fifo_feeds_gpu()) {
         fifo_profile_add(cpu, size);
         for (u8 i = 0; i < size; i++) {

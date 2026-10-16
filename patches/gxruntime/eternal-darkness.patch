@@ -1,5 +1,5 @@
 diff --git a/backends/aurora/aurora_backend.cpp b/backends/aurora/aurora_backend.cpp
-index d94f811..6693868 100644
+index d94f811..4c121f9 100644
 --- a/backends/aurora/aurora_backend.cpp
 +++ b/backends/aurora/aurora_backend.cpp
 @@ -19,9 +19,25 @@
@@ -520,7 +520,7 @@ index d94f811..6693868 100644
  }
  // ---------------------------------------------------------------------------
  
-@@ -514,11 +890,54 @@ void shadow_frontend_set_array(u32 attr, u32 guest_address, u8 stride) {
+@@ -514,11 +890,64 @@ void shadow_frontend_set_array(u32 attr, u32 guest_address, u8 stride) {
      }
  }
  
@@ -562,6 +562,16 @@ index d94f811..6693868 100644
 +    return true;
 +}
 +
++// The decoder's resolver reads MEM1 directly (its mem1 window) unless a trace
++// records: then every resolve goes through the bridge below.
++void install_frontend_mem1() {
++    DolGuestAddressResolver& resolver = g_shadow_frontend.state().resolver;
++    const bool direct =
++        g_mem1 != nullptr && !g_trace_armed && resolver.resolve != nullptr;
++    resolver.mem1 = direct ? g_mem1 : nullptr;
++    resolver.mem1_size = direct ? g_mem1_size : 0u;
++}
++
  bool frontend_guest_address_resolver_bridge(
      void*, u32 address, u32 size, DolGuestAddressSpace space,
      DolGuestResourceKind resource, DolGuestResolvedRange* out) {
@@ -575,7 +585,7 @@ index d94f811..6693868 100644
      const void* data = nullptr;
      u32 available = 0;
      if (!g_guest_address_resolver(g_guest_address_resolver_user, address, size,
-@@ -587,6 +1006,29 @@ void shadow_frontend_call_display_list(const void* data, u32 size) {
+@@ -587,6 +1016,29 @@ void shadow_frontend_call_display_list(const void* data, u32 size) {
      }
  }
  
@@ -605,7 +615,7 @@ index d94f811..6693868 100644
  void shadow_frontend_write(u64 value, u8 size) {
      if (!g_shadow_frontend_enabled || g_shadow_frontend_failed)
          return;
-@@ -615,24 +1057,7 @@ void shadow_frontend_write(u64 value, u8 size) {
+@@ -615,24 +1067,7 @@ void shadow_frontend_write(u64 value, u8 size) {
      }
      const std::span<const std::uint8_t> fragment(bytes, size);
      if (g_gx_core_enabled) {
@@ -631,7 +641,7 @@ index d94f811..6693868 100644
          return;
      }
      if (!g_shadow_frontend.write_fifo(fragment) ||
-@@ -825,24 +1250,1093 @@ void shadow_transform_observer(
+@@ -825,24 +1260,1093 @@ void shadow_transform_observer(
                       kChanNames[c], ctrl, lit, matsrc, ambsrc, diffunc,
                       attnfunc, light_mask);
      }
@@ -1740,7 +1750,7 @@ index d94f811..6693868 100644
  
  extern "C" {
  
-@@ -937,7 +2431,7 @@ bool dol_aurora_initialize(int argc, char** argv,
+@@ -937,7 +2441,7 @@ bool dol_aurora_initialize(int argc, char** argv,
      g_trace_present_scope_frame = 0ull;
      g_trace_frame_begun = false;
      g_trace_frames_recorded = 0ull;
@@ -1749,7 +1759,7 @@ index d94f811..6693868 100644
      const char* trace_out = std::getenv("DOL_AURORA_RECOMP_TRACE_OUT");
      if (trace_out != nullptr && trace_out[0] != '\0') {
          g_trace_path = trace_out;
-@@ -1069,7 +2563,11 @@ static void flush_gxcore_gap_counters() {
+@@ -1069,7 +2573,11 @@ static void flush_gxcore_gap_counters() {
  #if GXRUNTIME_HAS_AURORA_RECOMP
      if (!g_gx_core_enabled)
          return;
@@ -1762,7 +1772,7 @@ index d94f811..6693868 100644
      struct {
          const char* name;
          unsigned long long value;
-@@ -1114,10 +2612,178 @@ void dol_aurora_flush_gap_report(void) {
+@@ -1114,10 +2622,179 @@ void dol_aurora_flush_gap_report(void) {
      flush_gxcore_gap_counters();
  }
  
@@ -1917,6 +1927,7 @@ index d94f811..6693868 100644
 +#if GXRUNTIME_HAS_AURORA_RECOMP
 +    g_mem1 = static_cast<std::uint8_t*>(ram);
 +    g_mem1_size = ram != nullptr ? size : 0u;
++    install_frontend_mem1();
 +#else
 +    (void)ram;
 +    (void)size;
@@ -1942,7 +1953,7 @@ index d94f811..6693868 100644
          aurora::gfx::efb_readback::set_continuous(true);
          aurora_request_framebuffer_readback();
      }
-@@ -1169,7 +2835,8 @@ void aurora_backend_present(void) {
+@@ -1169,7 +2846,8 @@ void aurora_backend_present(void) {
      // gxcore accumulates the frame's draws as their spans complete; the final
      // pending draw is only planned at the frame boundary. Submit it into the
      // still-open Aurora frame before end_frame flushes the command list.
@@ -1952,7 +1963,7 @@ index d94f811..6693868 100644
          g_core_sink.flush_frame();
      // TEMP DIAG: per-frame gxcore gap-counter deltas so a live
      // goal celebration reveals which skip reason dominates (missing_vcd /
-@@ -1201,8 +2868,11 @@ void aurora_backend_present(void) {
+@@ -1201,8 +2879,11 @@ void aurora_backend_present(void) {
          g_frame_open = false;
      }
      // Host EFB fill: push latest present-source snapshot into software backing
@@ -1966,7 +1977,7 @@ index d94f811..6693868 100644
          const std::uint8_t* rgba = nullptr;
          std::uint32_t w = 0;
          std::uint32_t h = 0;
-@@ -1212,6 +2882,109 @@ void aurora_backend_present(void) {
+@@ -1212,6 +2893,109 @@ void aurora_backend_present(void) {
          }
      }
      ++g_present_count;
@@ -2076,7 +2087,7 @@ index d94f811..6693868 100644
      if (g_frame_pacing_log &&
          (g_present_count <= 10 || (g_present_count % 60) == 0)) {
          const AuroraStats* stats = aurora_get_stats();
-@@ -1432,6 +3205,7 @@ void aurora_backend_present(void) {
+@@ -1432,6 +3216,7 @@ void aurora_backend_present(void) {
      const unsigned long long present_fifo = g_fifo_bytes;
      g_fifo_bytes = 0;
      poll_events();
@@ -2084,7 +2095,7 @@ index d94f811..6693868 100644
      if (!g_should_quit) {
          g_frame_open = aurora_begin_frame();
  #if GXRUNTIME_HAS_AURORA_RECOMP
-@@ -1482,7 +3256,13 @@ void aurora_backend_gx_write(u64 value, u8 size) {
+@@ -1482,7 +3267,13 @@ void aurora_backend_gx_write(u64 value, u8 size) {
          return;
      g_fifo_bytes += size;
  #if GXRUNTIME_HAS_AURORA_RECOMP
@@ -2099,7 +2110,15 @@ index d94f811..6693868 100644
      // Record AFTER the shadow write so MEM_UPDATEs its resolves emitted
      // precede this GX_WRITE in the trace (replay reads them first), and
      // BEFORE the live-Aurora forwarding below so the pristine value is
-@@ -1737,6 +3517,7 @@ void aurora_backend_set_xfb_black(bool black) {
+@@ -1673,6 +3464,7 @@ void aurora_backend_set_guest_address_resolver(
+             &frontend_resolver, frontend_guest_address_resolver_bridge,
+             nullptr);
+         g_shadow_frontend.reset(&frontend_resolver);
++        install_frontend_mem1();
+         g_shadow_frontend.set_packet_drain_enabled(g_shadow_frontend_enabled);
+         g_shadow_packet_sink.reset();
+         // Resolve packet guest addresses to host bytes through the frontend's
+@@ -1737,6 +3529,7 @@ void aurora_backend_set_xfb_black(bool black) {
  }
  
  bool aurora_backend_pad_init(void) {
@@ -2107,7 +2126,7 @@ index d94f811..6693868 100644
      if (PADInit() == FALSE)
          return false;
  
-@@ -1780,6 +3561,7 @@ bool aurora_backend_pad_init(void) {
+@@ -1780,6 +3573,7 @@ bool aurora_backend_pad_init(void) {
  }
  
  u32 aurora_backend_pad_read(DolPadState state[4]) {
@@ -2115,7 +2134,7 @@ index d94f811..6693868 100644
      PADStatus status[4]{};
      const u32 motor_mask = PADRead(status);
      for (u32 i = 0; i < 4; i++) {
-@@ -1796,22 +3578,41 @@ u32 aurora_backend_pad_read(DolPadState state[4]) {
+@@ -1796,22 +3590,41 @@ u32 aurora_backend_pad_read(DolPadState state[4]) {
              .error = status[i].err,
          };
      }
@@ -2157,7 +2176,7 @@ index d94f811..6693868 100644
      PADSetSpec(spec);
  }
  
-@@ -1841,13 +3642,16 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1841,13 +3654,16 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
          return;
      const int bytes_per_second =
          static_cast<int>(g_audio_sample_rate) * 2 * static_cast<int>(sizeof(s16));
@@ -2176,7 +2195,7 @@ index d94f811..6693868 100644
      while (queued > max_queued_bytes && waited_ms < 20u) {
          g_audio_throttle_count++;
          if (g_audio_queue_log &&
-@@ -1860,11 +3664,51 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1860,11 +3676,51 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
                           max_queued_bytes);
          SDL_Delay(1);
          waited_ms++;
@@ -2228,7 +2247,7 @@ index d94f811..6693868 100644
      if (g_audio_queue_log &&
          (g_audio_push_count <= 16 || (g_audio_push_count % 4000) == 0 ||
           (low_queue && g_audio_push_count - g_audio_low_log_push >= 4000))) {
-@@ -1876,6 +3720,21 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1876,6 +3732,21 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
                       g_audio_push_count, queued, queued + bytes,
                       g_audio_playing ? 1u : 0u, g_audio_throttle_count);
      }
@@ -2250,7 +2269,7 @@ index d94f811..6693868 100644
      if (!SDL_PutAudioStreamData(g_audio_stream, samples, bytes))
          std::fprintf(stderr, "[audio] failed to queue samples: %s\n", SDL_GetError());
      else if (!g_audio_playing && queued + bytes >= prebuffer_bytes) {
-@@ -1886,10 +3745,391 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1886,10 +3757,391 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
      }
  }
  
@@ -2642,7 +2661,7 @@ index d94f811..6693868 100644
      const DolPlatformOps ops = {
          .should_quit = aurora_backend_should_quit,
          .present = aurora_backend_present,
-@@ -1918,6 +4158,7 @@ void install_platform_ops() {
+@@ -1918,6 +4170,7 @@ void install_platform_ops() {
          .audio_set_sample_rate = aurora_backend_audio_set_sample_rate,
          .audio_push = aurora_backend_audio_push,
      };
@@ -8693,6 +8712,24 @@ index 3731914..694a939 100644
  void dol_ax_host_reset_stats(DolAxHost* ax);
  const DolAxHostStats* dol_ax_host_stats(const DolAxHost* ax);
  
+diff --git a/include/gxruntime/guest_memory.h b/include/gxruntime/guest_memory.h
+index 11df96c..04923b4 100644
+--- a/include/gxruntime/guest_memory.h
++++ b/include/gxruntime/guest_memory.h
+@@ -55,6 +55,13 @@ typedef struct DolGuestAddressResolver {
+     CPUState* cpu;
+     DolGuestAddressResolveFn resolve;
+     void* user;
++    /* GXRuntime recomp patch: optional direct MEM1 window. When set, MEM1
++       addresses (physical, or the cached/uncached mirrors) resolve here
++       without the callback, which the GX decoder otherwise calls for every
++       array, texture and display list. Leave NULL when every resolve must
++       reach the callback (trace recording). */
++    u8* mem1;
++    u32 mem1_size;
+ } DolGuestAddressResolver;
+ 
+ DolGuestMemoryConfig dol_guest_memory_default_config(void);
 diff --git a/include/gxruntime/gx_recomp.h b/include/gxruntime/gx_recomp.h
 index 70bc960..d4a1c30 100644
 --- a/include/gxruntime/gx_recomp.h
@@ -9068,6 +9105,43 @@ index f4e48e8..507cfb5 100644
      GapEntry* e = &g_entries[g_count++];
      copy_str(e->lane, GAP_STR, lane);
      copy_str(e->kind, GAP_STR, kind);
+diff --git a/src/guest_memory.c b/src/guest_memory.c
+index 2e4c762..fb7c6bb 100644
+--- a/src/guest_memory.c
++++ b/src/guest_memory.c
+@@ -246,6 +246,32 @@ bool dol_guest_address_resolver_resolve(
+     if (resolver == NULL || out == NULL)
+         return false;
+ 
++    if (resolver->mem1 != NULL && size != 0u) {
++        const u32 mem1_size = resolver->mem1_size;
++        u32 offset = 0;
++        bool found = true;
++        if (space != DOL_GUEST_ADDRESS_VIRTUAL && address < mem1_size)
++            offset = address;
++        else if (space != DOL_GUEST_ADDRESS_PHYSICAL &&
++                 address - GC_RAM_BASE < mem1_size)
++            offset = address - GC_RAM_BASE;
++        else if (space != DOL_GUEST_ADDRESS_PHYSICAL &&
++                 address - GC_RAM_UNCACHED < mem1_size)
++            offset = address - GC_RAM_UNCACHED;
++        else
++            found = false;
++        if (found && size <= mem1_size - offset) {
++            /* As the callback path reports it: the space asked for. */
++            out->data = resolver->mem1 + offset;
++            out->address = address;
++            out->size = size;
++            out->available = mem1_size - offset;
++            out->space = space;
++            out->resource = resource;
++            return true;
++        }
++    }
++
+     if (resolver->resolve != NULL) {
+         DolGuestResolvedRange range;
+         memset(&range, 0, sizeof(range));
 diff --git a/src/gx_recomp.c b/src/gx_recomp.c
 index 842e0e6..168b12d 100644
 --- a/src/gx_recomp.c

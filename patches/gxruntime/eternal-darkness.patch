@@ -1,8 +1,8 @@
 diff --git a/backends/aurora/aurora_backend.cpp b/backends/aurora/aurora_backend.cpp
-index d94f811..73ecc78 100644
+index d94f811..22e2923 100644
 --- a/backends/aurora/aurora_backend.cpp
 +++ b/backends/aurora/aurora_backend.cpp
-@@ -19,9 +19,22 @@
+@@ -19,9 +19,25 @@
  #include <dolphin/pad.h>
  #include <dolphin/vi.h>
  #include <SDL3/SDL_audio.h>
@@ -20,12 +20,15 @@ index d94f811..73ecc78 100644
 +#else
 +#include <sys/stat.h>
 +#endif
++#ifdef __APPLE__
++#include <sys/sysctl.h>
++#endif
 +#include <SDL3/SDL_thread.h>
 +#include <SDL3/SDL_video.h>
  
  #include <gx/fifo.hpp>
  #include <gx/gx.hpp>
-@@ -30,12 +43,23 @@
+@@ -30,12 +46,23 @@
  #include <cstdio>
  #include <cstdlib>
  #include <cstring>
@@ -49,7 +52,7 @@ index d94f811..73ecc78 100644
  
  #if GXRUNTIME_HAS_AURORA_RECOMP
  // gxcore substrate submission lives in the Aurora fork (lib/gfx/gxcore_draw.cpp),
-@@ -46,9 +70,40 @@ namespace aurora::gfx::gxcore {
+@@ -46,9 +73,40 @@ namespace aurora::gfx::gxcore {
  bool submit_draw_plan(const gxruntime::gxcore::DrawPlan& plan);
  void copy_efb_to_texture(const gxruntime::gxcore::EfbCopyCommand& cmd);
  void reset_texture_cache();
@@ -90,7 +93,7 @@ index d94f811..73ecc78 100644
  // Forward for continuous EFB readback attach (fork-internal).
  namespace aurora::gfx::efb_readback {
  void set_continuous(bool enabled) noexcept;
-@@ -57,10 +112,24 @@ bool peek(const std::uint8_t** rgba, std::uint32_t* width,
+@@ -57,10 +115,24 @@ bool peek(const std::uint8_t** rgba, std::uint32_t* width,
            std::uint32_t* height) noexcept;
  } // namespace aurora::gfx::efb_readback
  
@@ -116,7 +119,7 @@ index d94f811..73ecc78 100644
  bool g_graphics_log = false;
  bool g_force_untextured = false;
  bool g_gx_core_enabled = true; // gxcore is the default renderer; DOL_GX_CORE=0 opts out
-@@ -79,9 +148,213 @@ SDL_AudioStream* g_audio_stream = nullptr;
+@@ -79,9 +151,213 @@ SDL_AudioStream* g_audio_stream = nullptr;
  bool g_audio_playing = false;
  int g_audio_prebuffer_ms = 40;
  int g_audio_max_queue_ms = 250;
@@ -330,7 +333,7 @@ index d94f811..73ecc78 100644
  struct PendingTextureMetadata {
      bool valid = false;
      const void* data = nullptr;
-@@ -112,6 +385,28 @@ std::array<PendingTlutMetadata, 20> g_pending_tluts{};
+@@ -112,6 +388,28 @@ std::array<PendingTlutMetadata, 20> g_pending_tluts{};
  // validating sink checked. The live Aurora path stays authoritative; this only
  // proves the consumer survives real FIFO traffic ahead of renderer cutover.
  gxruntime::aurora_recomp::RetailGxFrontend g_shadow_frontend;
@@ -359,7 +362,7 @@ index d94f811..73ecc78 100644
  gxruntime::aurora_recomp::ConsumingAuroraRenderSink g_shadow_packet_sink;
  bool g_shadow_frontend_enabled = false;
  bool g_shadow_frontend_failed = false;
-@@ -124,9 +419,17 @@ bool g_shadow_frontend_failed = false;
+@@ -124,9 +422,17 @@ bool g_shadow_frontend_failed = false;
  gxruntime::gxcore::GxCoreSink g_core_sink;
  unsigned long long g_core_submitted = 0;
  unsigned long long g_core_rejected = 0;
@@ -377,7 +380,7 @@ index d94f811..73ecc78 100644
      if (aurora::gfx::gxcore::submit_draw_plan(plan))
          ++g_core_submitted;
      else
-@@ -244,6 +547,7 @@ void log_callback(AuroraLogLevel level, const char* module, const char* message,
+@@ -244,6 +550,7 @@ void log_callback(AuroraLogLevel level, const char* module, const char* message,
  }
  
  void poll_events() {
@@ -385,7 +388,7 @@ index d94f811..73ecc78 100644
      const AuroraEvent* event = aurora_update();
      while (event != nullptr && event->type != AURORA_NONE) {
          if (event->type == AURORA_EXIT)
-@@ -379,13 +683,39 @@ unsigned long long g_trace_present_scope_frame = 0ull;
+@@ -379,13 +686,39 @@ unsigned long long g_trace_present_scope_frame = 0ull;
  bool g_trace_frame_begun = false;
  unsigned long long g_trace_frames_recorded = 0ull;
  gxruntime::aurora_recomp::trace::TraceWriter g_trace_writer;
@@ -432,7 +435,7 @@ index d94f811..73ecc78 100644
  
  unsigned long long trace_current_frame() {
      return g_trace_present_scope_frame != 0ull ? g_trace_present_scope_frame
-@@ -435,6 +765,17 @@ bool trace_should_record() {
+@@ -435,6 +768,17 @@ bool trace_should_record() {
          g_trace_writer.frame_begin(static_cast<u32>(frame));
          g_trace_frame_begun = true;
          ++g_trace_frames_recorded;
@@ -450,7 +453,7 @@ index d94f811..73ecc78 100644
      }
      return true;
  }
-@@ -442,18 +783,46 @@ bool trace_should_record() {
+@@ -442,18 +786,46 @@ bool trace_should_record() {
  void trace_record_mem_update(u32 address, u32 size, const void* data) {
      if (size == 0 || data == nullptr || !trace_should_record())
          return;
@@ -506,7 +509,7 @@ index d94f811..73ecc78 100644
  }
  
  void trace_close_and_log() {
-@@ -491,6 +860,10 @@ void trace_on_present() {
+@@ -491,6 +863,10 @@ void trace_on_present() {
          trace_close_and_log();
      g_trace_present_scope_frame = 0ull;
      g_trace_frame_begun = false;
@@ -517,7 +520,7 @@ index d94f811..73ecc78 100644
  }
  // ---------------------------------------------------------------------------
  
-@@ -514,11 +887,54 @@ void shadow_frontend_set_array(u32 attr, u32 guest_address, u8 stride) {
+@@ -514,11 +890,54 @@ void shadow_frontend_set_array(u32 attr, u32 guest_address, u8 stride) {
      }
  }
  
@@ -572,7 +575,7 @@ index d94f811..73ecc78 100644
      const void* data = nullptr;
      u32 available = 0;
      if (!g_guest_address_resolver(g_guest_address_resolver_user, address, size,
-@@ -587,6 +1003,29 @@ void shadow_frontend_call_display_list(const void* data, u32 size) {
+@@ -587,6 +1006,29 @@ void shadow_frontend_call_display_list(const void* data, u32 size) {
      }
  }
  
@@ -602,7 +605,7 @@ index d94f811..73ecc78 100644
  void shadow_frontend_write(u64 value, u8 size) {
      if (!g_shadow_frontend_enabled || g_shadow_frontend_failed)
          return;
-@@ -615,24 +1054,7 @@ void shadow_frontend_write(u64 value, u8 size) {
+@@ -615,24 +1057,7 @@ void shadow_frontend_write(u64 value, u8 size) {
      }
      const std::span<const std::uint8_t> fragment(bytes, size);
      if (g_gx_core_enabled) {
@@ -628,13 +631,44 @@ index d94f811..73ecc78 100644
          return;
      }
      if (!g_shadow_frontend.write_fifo(fragment) ||
-@@ -842,8 +1264,1012 @@ void shadow_transform_observer(
+@@ -825,24 +1250,1088 @@ void shadow_transform_observer(
+                      kChanNames[c], ctrl, lit, matsrc, ambsrc, diffunc,
+                      attnfunc, light_mask);
      }
- }
- #endif
+-    for (unsigned i = 0; i < DOL_GX_RECOMP_LIGHT_COUNT; ++i) {
+-        if (draw.light_word_mask[i] == 0u)
+-            continue;
+-        // Word layout per light (Dolphin XFMemory Light): 0-2 reserved,
+-        // 3 RGBA8 color, 4-6 cosatt, 7-9 distatt, 10-12 pos, 13-15 dir.
+-        float f[16];
+-        std::memcpy(f, draw.light_words[i], sizeof(f));
+-        std::fprintf(stderr,
+-                     "[gfx] draw-light light[%u] mask=0x%04X col=0x%08X "
+-                     "cos=%.8g,%.8g,%.8g dist=%.8g,%.8g,%.8g "
+-                     "pos=%.8g,%.8g,%.8g dir=%.8g,%.8g,%.8g\n",
+-                     i, draw.light_word_mask[i], draw.light_words[i][3],
+-                     f[4], f[5], f[6], f[7], f[8], f[9], f[10], f[11], f[12],
+-                     f[13], f[14], f[15]);
++    for (unsigned i = 0; i < DOL_GX_RECOMP_LIGHT_COUNT; ++i) {
++        if (draw.light_word_mask[i] == 0u)
++            continue;
++        // Word layout per light (Dolphin XFMemory Light): 0-2 reserved,
++        // 3 RGBA8 color, 4-6 cosatt, 7-9 distatt, 10-12 pos, 13-15 dir.
++        float f[16];
++        std::memcpy(f, draw.light_words[i], sizeof(f));
++        std::fprintf(stderr,
++                     "[gfx] draw-light light[%u] mask=0x%04X col=0x%08X "
++                     "cos=%.8g,%.8g,%.8g dist=%.8g,%.8g,%.8g "
++                     "pos=%.8g,%.8g,%.8g dir=%.8g,%.8g,%.8g\n",
++                     i, draw.light_word_mask[i], draw.light_words[i][3],
++                     f[4], f[5], f[6], f[7], f[8], f[9], f[10], f[11], f[12],
++                     f[13], f[14], f[15]);
++    }
++}
++#endif
 +
- } // namespace
- 
++} // namespace
++
 +extern "C" {
 +void aurora_backend_gx_write(u64 value, u8 size);
 +void aurora_backend_set_array_guest(u32 attr, u32 guest_address,
@@ -952,11 +986,71 @@ index d94f811..73ecc78 100644
 +// Each slot is ~14 KB and the decode thread writes every slot it fills, so a
 +// ring that outgrows the cache turns those writes into misses
 +// (DOL_GX_RING_SLOTS to experiment).
-+// 1024 (GXRuntime recomp patch; was 64): a scene of 15,000 draws a frame
-+// (Eternal Darkness's nightmare) kept a 64-slot ring full, so the decoder and
-+// the main thread ran in lockstep and each one's stalls stopped the other;
-+// the PC held 60 fps there only with the deeper ring (17-19 ms at 64).
++// Sized to the last-level cache (GXRuntime recomp patch; was 64): a scene
++// of 15,000 draws a frame (Eternal Darkness's nightmare) kept a 64-slot ring
++// full, so the decoder and the main thread ran in lockstep and each one's
++// stalls stopped the other (the PC held 60 there only at 1024), but a ring
++// far beyond the cache costs every slot a miss (the Steam Deck's 4 MB L3:
++// 1024 slots cost 4 ms a frame and doubled latency; 128 was best).
 +std::uint64_t kRingSlots = 1024u;
++
++// The last-level cache in bytes (0 when unknown).
++std::uint64_t last_level_cache_bytes() {
++#if defined(_WIN32)
++    DWORD len = 0;
++    GetLogicalProcessorInformationEx(RelationCache, nullptr, &len);
++    std::vector<unsigned char> buf(len);
++    std::uint64_t best = 0;
++    if (len != 0 &&
++        GetLogicalProcessorInformationEx(
++            RelationCache, reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buf.data()), &len)) {
++        for (DWORD off = 0; off < len;) {
++            const auto* e = reinterpret_cast<const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buf.data() + off);
++            if (e->Relationship == RelationCache && e->Cache.Level >= 2)
++                best = std::max<std::uint64_t>(best, e->Cache.CacheSize);
++            off += e->Size;
++        }
++    }
++    return best;
++#elif defined(__APPLE__)
++    std::uint64_t value = 0;
++    size_t size = sizeof value;
++    if (sysctlbyname("hw.l3cachesize", &value, &size, nullptr, 0) == 0 && value != 0)
++        return value;
++    size = sizeof value;
++    value = 0;  // Apple silicon: the performance cluster's shared L2
++    if (sysctlbyname("hw.perflevel0.l2cachesize", &value, &size, nullptr, 0) == 0)
++        return value;
++    return 0;
++#else
++    std::uint64_t best = 0;
++    for (int i = 0; i < 8; ++i) {
++        char path[96];
++        std::snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu0/cache/index%d/size", i);
++        FILE* f = std::fopen(path, "r");
++        if (f == nullptr)
++            break;
++        unsigned long long n = 0;
++        char unit = 0;
++        if (std::fscanf(f, "%llu%c", &n, &unit) >= 1)
++            best = std::max<std::uint64_t>(best, unit == 'M' ? n << 20 : unit == 'K' ? n << 10 : n);
++        std::fclose(f);
++    }
++    return best;
++#endif
++}
++
++// About one slot (~14 KB of draw and plan) per 24 KB of last-level cache, a
++// power of two from 64 to 1024: 128 on a 4 MB L3, 1024 on 24 MB.
++std::uint64_t ring_slots_for_cache() {
++    const std::uint64_t cache = last_level_cache_bytes();
++    if (cache == 0)
++        return 1024u;
++    std::uint64_t slots = 64u;
++    while (slots * 2u <= 1024u && slots * 2u * 24u * 1024u <= cache)
++        slots *= 2u;
++    return slots;
++}
 +std::unique_ptr<RenderItem[]> g_ring;
 +// Each on its own cache line: the decode thread writes the tail per draw
 +// while the others poll, and sharing a line would stall those writes.
@@ -1594,7 +1688,7 @@ index d94f811..73ecc78 100644
 +    if (!t_game_thread) {
 +        aurora_backend_set_copy_destination_guest(guest_address, data);
 +        return;
-+    }
+     }
 +    const CopyDestArgs a{data, guest_address};
 +    append(Op::CopyDest, &a, sizeof a);
 +}
@@ -1626,7 +1720,7 @@ index d94f811..73ecc78 100644
 +        append(Op::FlushXfb, nullptr, 0u);
 +    else
 +        aurora_backend_flush_xfb();
-+}
+ }
 +
 +void set_xfb_black_op(bool black) {
 +    if (t_game_thread)
@@ -1636,12 +1730,12 @@ index d94f811..73ecc78 100644
 +}
 +
 +} // namespace gxq
-+#endif
-+
+ #endif
+-} // namespace
+ 
  extern "C" {
  
- void aurora_backend_set_array_guest(u32 attr, u32 guest_address,
-@@ -937,7 +2363,7 @@ bool dol_aurora_initialize(int argc, char** argv,
+@@ -937,7 +2426,7 @@ bool dol_aurora_initialize(int argc, char** argv,
      g_trace_present_scope_frame = 0ull;
      g_trace_frame_begun = false;
      g_trace_frames_recorded = 0ull;
@@ -1650,7 +1744,7 @@ index d94f811..73ecc78 100644
      const char* trace_out = std::getenv("DOL_AURORA_RECOMP_TRACE_OUT");
      if (trace_out != nullptr && trace_out[0] != '\0') {
          g_trace_path = trace_out;
-@@ -1069,7 +2495,11 @@ static void flush_gxcore_gap_counters() {
+@@ -1069,7 +2558,11 @@ static void flush_gxcore_gap_counters() {
  #if GXRUNTIME_HAS_AURORA_RECOMP
      if (!g_gx_core_enabled)
          return;
@@ -1663,7 +1757,7 @@ index d94f811..73ecc78 100644
      struct {
          const char* name;
          unsigned long long value;
-@@ -1114,10 +2544,178 @@ void dol_aurora_flush_gap_report(void) {
+@@ -1114,10 +2607,178 @@ void dol_aurora_flush_gap_report(void) {
      flush_gxcore_gap_counters();
  }
  
@@ -1843,7 +1937,7 @@ index d94f811..73ecc78 100644
          aurora::gfx::efb_readback::set_continuous(true);
          aurora_request_framebuffer_readback();
      }
-@@ -1169,7 +2767,8 @@ void aurora_backend_present(void) {
+@@ -1169,7 +2830,8 @@ void aurora_backend_present(void) {
      // gxcore accumulates the frame's draws as their spans complete; the final
      // pending draw is only planned at the frame boundary. Submit it into the
      // still-open Aurora frame before end_frame flushes the command list.
@@ -1853,7 +1947,7 @@ index d94f811..73ecc78 100644
          g_core_sink.flush_frame();
      // TEMP DIAG: per-frame gxcore gap-counter deltas so a live
      // goal celebration reveals which skip reason dominates (missing_vcd /
-@@ -1201,8 +2800,11 @@ void aurora_backend_present(void) {
+@@ -1201,8 +2863,11 @@ void aurora_backend_present(void) {
          g_frame_open = false;
      }
      // Host EFB fill: push latest present-source snapshot into software backing
@@ -1867,7 +1961,7 @@ index d94f811..73ecc78 100644
          const std::uint8_t* rgba = nullptr;
          std::uint32_t w = 0;
          std::uint32_t h = 0;
-@@ -1212,6 +2814,109 @@ void aurora_backend_present(void) {
+@@ -1212,6 +2877,109 @@ void aurora_backend_present(void) {
          }
      }
      ++g_present_count;
@@ -1977,7 +2071,7 @@ index d94f811..73ecc78 100644
      if (g_frame_pacing_log &&
          (g_present_count <= 10 || (g_present_count % 60) == 0)) {
          const AuroraStats* stats = aurora_get_stats();
-@@ -1432,6 +3137,7 @@ void aurora_backend_present(void) {
+@@ -1432,6 +3200,7 @@ void aurora_backend_present(void) {
      const unsigned long long present_fifo = g_fifo_bytes;
      g_fifo_bytes = 0;
      poll_events();
@@ -1985,7 +2079,7 @@ index d94f811..73ecc78 100644
      if (!g_should_quit) {
          g_frame_open = aurora_begin_frame();
  #if GXRUNTIME_HAS_AURORA_RECOMP
-@@ -1482,7 +3188,13 @@ void aurora_backend_gx_write(u64 value, u8 size) {
+@@ -1482,7 +3251,13 @@ void aurora_backend_gx_write(u64 value, u8 size) {
          return;
      g_fifo_bytes += size;
  #if GXRUNTIME_HAS_AURORA_RECOMP
@@ -2000,7 +2094,7 @@ index d94f811..73ecc78 100644
      // Record AFTER the shadow write so MEM_UPDATEs its resolves emitted
      // precede this GX_WRITE in the trace (replay reads them first), and
      // BEFORE the live-Aurora forwarding below so the pristine value is
-@@ -1737,6 +3449,7 @@ void aurora_backend_set_xfb_black(bool black) {
+@@ -1737,6 +3512,7 @@ void aurora_backend_set_xfb_black(bool black) {
  }
  
  bool aurora_backend_pad_init(void) {
@@ -2008,7 +2102,7 @@ index d94f811..73ecc78 100644
      if (PADInit() == FALSE)
          return false;
  
-@@ -1780,6 +3493,7 @@ bool aurora_backend_pad_init(void) {
+@@ -1780,6 +3556,7 @@ bool aurora_backend_pad_init(void) {
  }
  
  u32 aurora_backend_pad_read(DolPadState state[4]) {
@@ -2016,7 +2110,7 @@ index d94f811..73ecc78 100644
      PADStatus status[4]{};
      const u32 motor_mask = PADRead(status);
      for (u32 i = 0; i < 4; i++) {
-@@ -1796,22 +3510,41 @@ u32 aurora_backend_pad_read(DolPadState state[4]) {
+@@ -1796,22 +3573,41 @@ u32 aurora_backend_pad_read(DolPadState state[4]) {
              .error = status[i].err,
          };
      }
@@ -2058,7 +2152,7 @@ index d94f811..73ecc78 100644
      PADSetSpec(spec);
  }
  
-@@ -1841,13 +3574,16 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1841,13 +3637,16 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
          return;
      const int bytes_per_second =
          static_cast<int>(g_audio_sample_rate) * 2 * static_cast<int>(sizeof(s16));
@@ -2077,7 +2171,7 @@ index d94f811..73ecc78 100644
      while (queued > max_queued_bytes && waited_ms < 20u) {
          g_audio_throttle_count++;
          if (g_audio_queue_log &&
-@@ -1860,11 +3596,51 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1860,11 +3659,51 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
                           max_queued_bytes);
          SDL_Delay(1);
          waited_ms++;
@@ -2129,7 +2223,7 @@ index d94f811..73ecc78 100644
      if (g_audio_queue_log &&
          (g_audio_push_count <= 16 || (g_audio_push_count % 4000) == 0 ||
           (low_queue && g_audio_push_count - g_audio_low_log_push >= 4000))) {
-@@ -1876,6 +3652,21 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1876,6 +3715,21 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
                       g_audio_push_count, queued, queued + bytes,
                       g_audio_playing ? 1u : 0u, g_audio_throttle_count);
      }
@@ -2151,7 +2245,7 @@ index d94f811..73ecc78 100644
      if (!SDL_PutAudioStreamData(g_audio_stream, samples, bytes))
          std::fprintf(stderr, "[audio] failed to queue samples: %s\n", SDL_GetError());
      else if (!g_audio_playing && queued + bytes >= prebuffer_bytes) {
-@@ -1886,10 +3677,377 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1886,10 +3740,380 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
      }
  }
  
@@ -2373,8 +2467,11 @@ index d94f811..73ecc78 100644
 +    SDL_SetPointerProperty(props, SDL_PROP_THREAD_CREATE_USERDATA_POINTER, &run);
 +    SDL_SetNumberProperty(props, SDL_PROP_THREAD_CREATE_STACKSIZE_NUMBER,
 +                          64ll * 1024 * 1024);
++    gxq::kRingSlots = gxq::ring_slots_for_cache();
 +    if (const char* env = std::getenv("DOL_GX_RING_SLOTS"))
 +        gxq::kRingSlots = std::clamp<std::uint64_t>(std::strtoull(env, nullptr, 10), 8u, 4096u);
++    std::fprintf(stderr, "[gx-thread] ring of %llu slots\n",
++                 static_cast<unsigned long long>(gxq::kRingSlots));
 +    gxq::g_ring.reset(new gxq::RenderItem[gxq::kRingSlots]);
 +    gxq::g_ring_head = 0;
 +    gxq::g_ring_tail = 0;
@@ -2529,7 +2626,7 @@ index d94f811..73ecc78 100644
      const DolPlatformOps ops = {
          .should_quit = aurora_backend_should_quit,
          .present = aurora_backend_present,
-@@ -1918,6 +4076,7 @@ void install_platform_ops() {
+@@ -1918,6 +4142,7 @@ void install_platform_ops() {
          .audio_set_sample_rate = aurora_backend_audio_set_sample_rate,
          .audio_push = aurora_backend_audio_push,
      };

@@ -419,14 +419,18 @@ static DolMemoryCard* g_memory_card;
 // for good: the stream never read again (its buffer replayed, a door's sound
 // repeating) and never closed (picking up a book waited for it forever).
 // Due once that thread has run DVD_CALLBACK_VISITS dispatch-loop visits of its
-// own, or sleeps (it got to its wait), or a drive's time has passed whatever
-// it does. A read asked for with interrupts off is due at once: nothing lands
-// before they are back on. (A fixed 2 ms instead held the chained 4 KB reads
-// of the game's loader to 8 a frame.) Not in the quick state: after a load
-// every queued callback waits for the thread running then (hle_state_loaded).
+// own, or sleeps (it got to its wait). A read asked for with interrupts off is
+// due at once: nothing lands before they are back on. (A fixed 2 ms instead
+// held the chained 4 KB reads of the game's loader to 8 a frame.) A thread
+// switched out in the window (a retrace waking main, which outranks the stream
+// feeder) is ready but not past its store, and on the Steam Deck heavy scenes
+// keep it off the CPU for over a second; so the give-up only breaks a deadlock
+// (a higher-priority thread spinning on that callback) and is long. Not in the
+// quick state: after a load every queued callback waits for the thread running
+// then (hle_state_loaded). Callbacks stay in order, as a drive completes them.
 #define DVD_CALLBACK_VISITS 64u
-#define DVD_CALLBACK_GIVE_UP_NS 20000000ull
-#define DVD_CALLBACK_GIVE_UP_VISITS (1ull << 20)  // block-paced runs
+#define DVD_CALLBACK_GIVE_UP_NS 1000000000ull
+#define DVD_CALLBACK_GIVE_UP_VISITS (1ull << 27)  // block-paced: ~1 s of 2M-block frames
 #define OS_CURRENT_THREAD 0x800000E4u
 #define OS_THREAD_STATE 0x2C8u                     // u16: 1 ready, 2 running
 typedef struct {

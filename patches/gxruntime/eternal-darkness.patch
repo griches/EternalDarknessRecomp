@@ -3013,7 +3013,7 @@ index 7af8fca..4c14e34 100644
      g_requested.store(false, std::memory_order_release);
    else
 diff --git a/graphics/aurora/lib/gfx/gxcore_draw.cpp b/graphics/aurora/lib/gfx/gxcore_draw.cpp
-index 71136b9..fda6a30 100644
+index 71136b9..76f121c 100644
 --- a/graphics/aurora/lib/gfx/gxcore_draw.cpp
 +++ b/graphics/aurora/lib/gfx/gxcore_draw.cpp
 @@ -1,4 +1,5 @@
@@ -3394,7 +3394,7 @@ index 71136b9..fda6a30 100644
    gfx::resolve_pass(it->second, srcRect, do_clear && cmd.color_update,
                      do_clear && cmd.alpha_update,
                      do_clear && cmd.depth_update,
-@@ -723,69 +924,147 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -723,69 +924,255 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
                                  static_cast<float>(cmd.clear_a) / 255.f},
                      clearDepthValue, fmt, &filter);
  
@@ -3593,10 +3593,118 @@ index 71136b9..fda6a30 100644
 +        ++g_frameDrawsWide;
 +    }
 +  }
++
++  // GXRuntime recomp patch: the merge fast path. A draw whose fingerprints
++  // (pipeline, constants, pixel and shared constants), textures, samplers,
++  // viewport and scissor match the draw just submitted joins it straight
++  // away, skipping the viewport, texture, uniform and pipeline work below
++  // (most of a scene of single triangles). HUD-style orthographic draws take
++  // the full path (the widescreen HUD placement looks at each one).
++  struct LastSubmit {
++    bool valid = false;
++    uint32_t frame = UINT32_MAX;
++    uint32_t epoch = 0;
++    uint64_t pipeline = 0, constants = 0, pixel = 0, shared = 0;
++    uint32_t vertOffset = 0;
++    bool viewportValid = false;
++    float viewport[6]{};
++    bool scissorValid = false;
++    uint32_t scissorCount = 0;
++    gxc::PlanScissorRect scissor{};
++    gxc::PlanTexture textures[8]{};
++    gxc::PlanSampler samplers[8]{};
++  };
++  static LastSubmit s_last;
++  static const bool s_fastMerge = [] {
++    const char* env = std::getenv("AURORA_GXCORE_MERGE");
++    return env == nullptr || std::strcmp(env, "0") != 0;
++  }();
++  const auto plan_matches_last = [&]() {
++    const auto& P = plan.constants.projection;
++    const bool hudCandidate = g_widescreenHud && P[3][2] == 0.f && P[3][3] == 1.f && P[0][0] > 0.f;
++    return s_fastMerge && s_last.valid && !hudCandidate && s_last.frame == current_frame() &&
++           s_last.epoch == g_textureEpoch && plan.pipeline_hash != 0u && plan.constants_hash != 0u &&
++           plan.shared_constants_hash != 0u && plan.pipeline_hash == s_last.pipeline &&
++           plan.constants_hash == s_last.constants && plan.shared_constants_hash == s_last.shared &&
++           (plan.pipeline.shader.tev_valid == 0 || plan.pixel_constants_hash == s_last.pixel) &&
++           plan.viewport_valid == s_last.viewportValid &&
++           std::memcmp(plan.viewport, s_last.viewport, sizeof s_last.viewport) == 0 &&
++           plan.scissor_valid == s_last.scissorValid &&
++           (plan.scissor_valid ? static_cast<uint32_t>(plan.scissor_rect_count) : 0u) == s_last.scissorCount &&
++           s_last.scissorCount <= 1u &&
++           (s_last.scissorCount == 0u ||
++            std::memcmp(&plan.scissor_rects[0], &s_last.scissor, sizeof s_last.scissor) == 0) &&
++           std::memcmp(plan.textures, s_last.textures, sizeof s_last.textures) == 0 &&
++           std::memcmp(plan.samplers, s_last.samplers, sizeof s_last.samplers) == 0;
++  };
++  if (plan_matches_last()) {
++    DrawData* last = get_last_draw_command<DrawData>();
++    if (last != nullptr && last->vertRange.offset == s_last.vertOffset &&
++        last->vertRange.size % gxc::kVertexStrideBytes == 0u) {
++      const uint32_t base = last->vertRange.size / gxc::kVertexStrideBytes;
++      if (base + plan.vertex_count <= 0xFFFFu) {
++        const auto moreVerts = push_verts(reinterpret_cast<const uint8_t*>(plan.vertices.data()),
++                                          plan.vertices.size() * sizeof(float), 4);
++        if (moreVerts.offset == last->vertRange.offset + last->vertRange.size) {
++          static std::vector<uint16_t> s_fastIdx;
++          if (s_fastIdx.size() < plan.indices.size())
++            s_fastIdx.resize(plan.indices.size());
++          for (size_t i = 0; i < plan.indices.size(); ++i)
++            s_fastIdx[i] = static_cast<uint16_t>(plan.indices[i] + base);
++          const auto moreIdx = push_indices(reinterpret_cast<const uint8_t*>(s_fastIdx.data()),
++                                            plan.indices.size() * sizeof(uint16_t), 2);
++          if (moreIdx.offset == last->idxRange.offset + last->idxRange.size) {
++            last->vertRange.size += moreVerts.size;
++            last->idxRange.size += moreIdx.size;
++            last->indexCount += static_cast<uint32_t>(plan.indices.size());
++            ++g_mergedDrawCallCount;
++            return true;
++          }
++          // Indices landed elsewhere: draw on its own from the vertices pushed.
++          DrawData own = *last;
++          own.vertRange = moreVerts;
++          own.idxRange = push_indices(reinterpret_cast<const uint8_t*>(plan.indices.data()),
++                                      plan.indices.size() * sizeof(uint16_t), 4);
++          own.indexCount = static_cast<uint32_t>(plan.indices.size());
++          push_draw_command(own);
++          s_last.vertOffset = own.vertRange.offset;
++          return true;
++        }
++        // Vertices landed elsewhere: a draw of their own, same state.
++        DrawData own = *last;
++        own.vertRange = moreVerts;
++        own.idxRange = push_indices(reinterpret_cast<const uint8_t*>(plan.indices.data()),
++                                    plan.indices.size() * sizeof(uint16_t), 4);
++        own.indexCount = static_cast<uint32_t>(plan.indices.size());
++        push_draw_command(own);
++        s_last.vertOffset = own.vertRange.offset;
++        return true;
++      }
++    }
++  }
++  s_last.valid = false;
++  const auto remember_last = [&](const DrawData& d) {
++    s_last.valid = true;
++    s_last.frame = current_frame();
++    s_last.epoch = g_textureEpoch;
++    s_last.pipeline = plan.pipeline_hash;
++    s_last.constants = plan.constants_hash;
++    s_last.pixel = plan.pixel_constants_hash;
++    s_last.shared = plan.shared_constants_hash;
++    s_last.vertOffset = d.vertRange.offset;
++    s_last.viewportValid = plan.viewport_valid;
++    std::memcpy(s_last.viewport, plan.viewport, sizeof s_last.viewport);
++    s_last.scissorValid = plan.scissor_valid;
++    s_last.scissorCount = plan.scissor_valid ? static_cast<uint32_t>(plan.scissor_rect_count) : 0u;
++    if (s_last.scissorCount != 0u)
++      s_last.scissor = plan.scissor_rects[0];
++    std::memcpy(s_last.textures, plan.textures, sizeof s_last.textures);
++    std::memcpy(s_last.samplers, plan.samplers, sizeof s_last.samplers);
++  };
  
    if (plan.viewport_valid) {
      // Raw XF viewport -> logical viewport, the raw path's own formula
-@@ -839,23 +1118,108 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -839,23 +1226,108 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      const uint32_t size = std::min(tsize, available);
      // Hash the actual source texels (+ TLUT for CI) so a content change under an
      // unchanged guest identity is a distinct cache entry — see TextureKey.
@@ -3710,7 +3818,7 @@ index 71136b9..fda6a30 100644
      // gxcore owns the decode for every format: produce tightly-packed RGBA8 and
      // upload it as a pre-decoded PC texture (no substrate re-conversion).
      std::vector<uint8_t> decoded;
-@@ -868,8 +1232,32 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -868,8 +1340,32 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      } else {
        decoded = gxc::decode_texture(format, width, height, bytes, size);
      }
@@ -3744,7 +3852,7 @@ index 71136b9..fda6a30 100644
        handle = new_static_texture_2d(
            width, height, 1, GX_TF_RGBA8_PC,
            ArrayRef<uint8_t>{decoded.data(), decoded.size()}, false,
-@@ -892,7 +1280,98 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -892,7 +1388,98 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    };
  
    BindGroupRef textureBindGroup = 0;
@@ -3843,7 +3951,7 @@ index 71136b9..fda6a30 100644
      if (plan.texmap_mask == 0u) {
        // Single-texmap fast path: primary texture + plan.sampler at binding 0/1.
        if (plan.has_texture) {
-@@ -903,7 +1382,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -903,7 +1490,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
              plan.tlut_data, plan.tlut_available);
          if (bound) {
            const auto sampler =
@@ -3852,7 +3960,7 @@ index 71136b9..fda6a30 100644
            const std::array entries{
                WGPUBindGroupEntry{.binding = 0,
                                   .textureView =
-@@ -919,6 +1398,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -919,6 +1506,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            textureBindGroup = bind_group_ref(descriptor);
          }
        }
@@ -3860,7 +3968,7 @@ index 71136b9..fda6a30 100644
      } else {
        // Multi-texmap: bind each used texmap at 2t (texture) / 2t+1 (sampler),
        // matching the WGSL declarations. Per-texmap PlanSampler from
-@@ -945,14 +1425,16 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -945,14 +1533,16 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
          held.push_back(bound);
          const gxc::PlanSampler& ps =
              pt.sampler.valid ? pt.sampler : plan.samplers[t];
@@ -3879,7 +3987,7 @@ index 71136b9..fda6a30 100644
        const WGPUBindGroupDescriptor descriptor{
            .label = {"GXCore Texture Bind Group", WGPU_STRLEN},
            .layout = texture_bind_group_layout(plan.texmap_mask).Get(),
-@@ -960,6 +1442,237 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -960,6 +1550,239 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            .entries = entries.data(),
        };
        textureBindGroup = bind_group_ref(descriptor);
@@ -4083,6 +4191,8 @@ index 71136b9..fda6a30 100644
 +          last->idxRange.size += moreIdx.size;
 +          last->indexCount += static_cast<uint32_t>(plan.indices.size());
 +          ++g_mergedDrawCallCount;
++          if (widescreen_hud_shift(plan) == 0.f)
++            remember_last(*last);
 +          return true;
 +        }
 +        // Not contiguous after all: draw these indices on their own.
@@ -4117,7 +4227,7 @@ index 71136b9..fda6a30 100644
      }
    }
  
-@@ -969,27 +1682,13 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -969,27 +1792,13 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    const auto idxRange = push_indices(
        reinterpret_cast<const uint8_t*>(plan.indices.data()),
        plan.indices.size() * sizeof(uint16_t), 4);
@@ -4147,6 +4257,15 @@ index 71136b9..fda6a30 100644
          .pixelUniformRange = pixelUniformRange,
          .indexCount = static_cast<uint32_t>(plan.indices.size()),
          .textureBindGroup = textureBindGroup,
+@@ -1006,6 +1815,8 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+     }
+   } else {
+     issue_draw();
++    if (DrawData* d = get_last_draw_command<DrawData>(); d != nullptr && uniformRange.offset == d->uniformRange.offset)
++      remember_last(*d);
+   }
+   return true;
+ }
 diff --git a/graphics/aurora/lib/gfx/gxcore_draw.hpp b/graphics/aurora/lib/gfx/gxcore_draw.hpp
 index 0a23a3f..9f25bbf 100644
 --- a/graphics/aurora/lib/gfx/gxcore_draw.hpp

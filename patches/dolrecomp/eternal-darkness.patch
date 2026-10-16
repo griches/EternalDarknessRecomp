@@ -1,15 +1,46 @@
+diff --git a/src/app/pipeline.c b/src/app/pipeline.c
+index cf3a3f5..419848b 100644
+--- a/src/app/pipeline.c
++++ b/src/app/pipeline.c
+@@ -224,6 +224,9 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
+             job->insts = insts + start;
+             job->count = chunk_count;
+             job->func_addr = func_addr;
++            job->section_insts = insts;
++            job->section_count = num_insts;
++            job->section_addr = base_addr;
+ 
+             if (!join_path(job->path, sizeof(job->path), chunks_dir, chunk_name)) {
+                 fprintf(stderr, "error: chunk path is too long\n");
 diff --git a/src/backend/codegen.c b/src/backend/codegen.c
-index 5279cdb..26adfdb 100644
+index 5279cdb..940e754 100644
 --- a/src/backend/codegen.c
 +++ b/src/backend/codegen.c
-@@ -30,6 +30,7 @@ int emit_chunk_file(const ChunkJob* job) {
+@@ -30,7 +30,9 @@ int emit_chunk_file(const ChunkJob* job) {
      }
  
      fprintf(chunk, "// DolRecomp output\n");
 +    fprintf(chunk, "#define DOLRECOMP_CHUNK 1\n");
      fprintf(chunk, "#include \"../%s\"\n\n", job->include_name);
++    emit_set_section(job->section_insts, job->section_count, job->section_addr);
      emit_function(chunk, job->insts, job->count, job->func_addr);
  
+     if (fclose(chunk) != 0) {
+diff --git a/src/backend/codegen.h b/src/backend/codegen.h
+index 87f8f5d..e846d68 100644
+--- a/src/backend/codegen.h
++++ b/src/backend/codegen.h
+@@ -12,6 +12,10 @@ typedef struct {
+     const PPCInst* insts;
+     u32 count;
+     u32 func_addr;
++    /* The whole code section the chunk is cut from (leaf functions it calls). */
++    const PPCInst* section_insts;
++    u32 section_count;
++    u32 section_addr;
+     char path[1200];
+     char include_name[512];
+ } ChunkJob;
 diff --git a/src/backend/dispatch.c b/src/backend/dispatch.c
 index 83314bb..0eac038 100644
 --- a/src/backend/dispatch.c
@@ -40,7 +71,7 @@ index 83314bb..0eac038 100644
      fprintf(out, "    DolRecompFunction fn = dolrecomp_find_original(address);\n");
      fprintf(out, "    if (!fn) return 0;\n");
 diff --git a/src/backend/emitter.c b/src/backend/emitter.c
-index 4868b4c..0992e94 100644
+index 4868b4c..60b085d 100644
 --- a/src/backend/emitter.c
 +++ b/src/backend/emitter.c
 @@ -37,6 +37,19 @@ static void emit_set_cr1_from_fpscr(FILE* out) {
@@ -63,7 +94,7 @@ index 4868b4c..0992e94 100644
  static void emit_compare_s32(FILE* out, u8 crf, const char* lhs, const char* rhs) {
      u32 shift = cr_field_shift(crf);
  
-@@ -308,28 +321,67 @@ static bool branch_target_is_local(u32 func_start, u32 func_end, u32 target) {
+@@ -308,28 +321,145 @@ static bool branch_target_is_local(u32 func_start, u32 func_end, u32 target) {
      return target >= func_start && target < func_end && ((target - func_start) & 3u) == 0;
  }
  
@@ -75,6 +106,74 @@ index 4868b4c..0992e94 100644
 +#define MAX_RETURN_SITES 16u
 +static _Thread_local u32 g_return_sites[MAX_RETURN_SITES];  /* chunks emit in parallel */
 +static _Thread_local u32 g_return_site_count;
++
++/* Leaf functions: straight from the entry to an unconditional blr (at most
++ * MAX_LEAF_INSTRUCTIONS) with no call or computed branch, every branch inside
++ * that range, and nothing for the host's fallback, sc or rfi. A chunk gets a
++ * static copy of each leaf it calls (dolrecomp_leaf_XXXXXXXX), so a bl to one
++ * is a direct C call, often inlined, instead of the chunk's dispatch switch or
++ * a nested call into the leaf's own chunk. The copy runs the same emitted code;
++ * the caller carries on at the return address only if the leaf came back
++ * there (pc == lr it set), and otherwise returns to the host. */
++#define MAX_LEAF_INSTRUCTIONS 64u
++#define MAX_CHUNK_LEAVES 2048u
++static _Thread_local const PPCInst* g_section_insts;
++static _Thread_local u32 g_section_count;
++static _Thread_local u32 g_section_addr;
++static _Thread_local u32 g_leaves[MAX_CHUNK_LEAVES];  /* sorted entry addresses */
++static _Thread_local u32 g_leaf_count;
++static _Thread_local bool g_leaf_mode;  /* emitting a leaf's copy */
++
++void emit_set_section(const PPCInst* insts, u32 count, u32 addr) {
++    g_section_insts = insts;
++    g_section_count = insts != NULL ? count : 0u;
++    g_section_addr = addr;
++}
++
++static bool inst_routes_to_fallback(const PPCInst* inst);
++
++static bool find_leaf(u32 target, u32* end_out) {
++    u32 first, n, k;
++    if (g_section_insts == NULL || target < g_section_addr ||
++        ((target - g_section_addr) & 3u) != 0u)
++        return false;
++    first = (target - g_section_addr) / 4u;
++    for (n = 0; n < MAX_LEAF_INSTRUCTIONS && first + n < g_section_count; n++) {
++        const PPCInst* in = &g_section_insts[first + n];
++        if (in->embedded_data || in->op == PPC_OP_SC || in->op == PPC_OP_RFI ||
++            in->op == PPC_OP_BCCTR || inst_routes_to_fallback(in))
++            return false;
++        if (in->lk && (in->op == PPC_OP_B || in->op == PPC_OP_BC || in->op == PPC_OP_BCLR))
++            return false;
++        if (in->op == PPC_OP_BCLR && (in->bo & 0x14u) == 0x14u) {
++            const u32 end = target + n * 4u;
++            for (k = 0; k <= n; k++) {
++                const PPCInst* b = &g_section_insts[first + k];
++                if ((b->op == PPC_OP_B || b->op == PPC_OP_BC) &&
++                    (b->branch_target < target || b->branch_target > end ||
++                     ((b->branch_target - target) & 3u) != 0u))
++                    return false;
++            }
++            *end_out = end;
++            return true;
++        }
++    }
++    return false;
++}
++
++static bool is_chunk_leaf(u32 target) {
++    u32 lo = 0, hi = g_leaf_count;
++    while (lo < hi) {
++        const u32 mid = (lo + hi) / 2u;
++        if (g_leaves[mid] == target)
++            return true;
++        if (g_leaves[mid] < target)
++            lo = mid + 1u;
++        else
++            hi = mid;
++    }
++    return false;
++}
 +
 +/* A branch out of this chunk: run the target's chunk as a nested call, and
 + * carry on here if it comes back to this chunk (dolrecomp_call_chunk); a call
@@ -102,6 +201,16 @@ index 4868b4c..0992e94 100644
      if (inst->lk) {
          fprintf(out, "            ctx->lr = 0x%08Xu;\n", inst->address + 4);
          fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
++        if (!g_leaf_mode && is_chunk_leaf(inst->branch_target)) {
++            const u32 ret = inst->address + 4u;
++            fprintf(out, "            if (DOLRECOMP_CHAIN(0x%08Xu)) {\n", inst->branch_target);
++            fprintf(out, "                dolrecomp_leaf_%08X(ctx);\n", inst->branch_target);
++            if (ret < func_end)
++                fprintf(out, "                if (ctx->pc == 0x%08Xu) goto label_%08X;\n", ret, ret);
++            fprintf(out, "            }\n");
++            fprintf(out, "            return;\n");
++            return;
++        }
 +        if (local_target)
 +            fprintf(out, "            if (DOLRECOMP_CHAIN(0x%08Xu)) goto label_%08X;\n",
 +                    inst->branch_target, inst->branch_target);
@@ -133,13 +242,15 @@ index 4868b4c..0992e94 100644
      fprintf(out, "    {\n");
      fprintf(out, "        u32 target = %s;\n", target_expr);
      emit_branch_condition(out, inst->bo, inst->bi);
-@@ -338,6 +390,27 @@ static void emit_dynamic_branch(FILE* out, const PPCInst* inst,
+@@ -338,6 +468,29 @@ static void emit_dynamic_branch(FILE* out, const PPCInst* inst,
          fprintf(out, "            ctx->lr = 0x%08Xu;\n", inst->address + 4);
      }
      fprintf(out, "            ctx->pc = target;\n");
 +    /* A return or computed call that lands in this chunk re-enters its switch
 +     * (a blr tries its function's known return sites first). */
-+    if (!inst->lk && inst->op == PPC_OP_BCLR && g_return_site_count != 0u) {
++    if (g_leaf_mode) {
++        /* A leaf's return: its caller checks where it landed. */
++    } else if (!inst->lk && inst->op == PPC_OP_BCLR && g_return_site_count != 0u) {
 +        u32 i;
 +        fprintf(out, "            if (target - 0x%08Xu < 0x%08Xu && DOLRECOMP_CHAIN(target)) {\n",
 +                func_start, func_end - func_start);
@@ -161,7 +272,7 @@ index 4868b4c..0992e94 100644
      fprintf(out, "            return;\n");
      fprintf(out, "        }\n");
      fprintf(out, "    }\n");
-@@ -383,6 +456,8 @@ static const char* emit_cpu_label(DolRecompCPU cpu) {
+@@ -383,6 +536,8 @@ static const char* emit_cpu_label(DolRecompCPU cpu) {
      }
  }
  
@@ -170,7 +281,7 @@ index 4868b4c..0992e94 100644
  void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
      fprintf(out,
          "// DolRecomp output\n"
-@@ -439,10 +514,309 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
+@@ -439,10 +594,309 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
          "    return dolrecomp_f32_to_bits((f32)value);\n"
          "}\n"
          "\n"
@@ -480,7 +591,7 @@ index 4868b4c..0992e94 100644
  }
  
  void emit_header(FILE* out) {
-@@ -456,6 +830,7 @@ void emit_footer(FILE* out) {
+@@ -456,6 +910,7 @@ void emit_footer(FILE* out) {
  static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
                                          u32 func_start, u32 func_end) {
      char disasm[64];
@@ -488,7 +599,7 @@ index 4868b4c..0992e94 100644
      ppc_disasm(disasm, sizeof(disasm), inst);
      fprintf(out, "    // %08X: %s\n", inst->address, disasm);
  
-@@ -465,7 +840,8 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+@@ -465,7 +920,8 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
      }
  
      if (ppc_op_uses_fpu(inst->op))
@@ -498,7 +609,7 @@ index 4868b4c..0992e94 100644
  
      switch (inst->op) {
      case PPC_OP_MULLI:
-@@ -937,23 +1313,27 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+@@ -937,23 +1393,27 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
          break;
  
      case PPC_OP_FADDS:
@@ -534,7 +645,7 @@ index 4868b4c..0992e94 100644
          break;
  
      case PPC_OP_FRES:
-@@ -1047,7 +1427,8 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+@@ -1047,7 +1507,8 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
          break;
  
      case PPC_OP_FRSP:
@@ -544,7 +655,7 @@ index 4868b4c..0992e94 100644
          break;
  
      case PPC_OP_FSEL:
-@@ -1222,76 +1603,68 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+@@ -1222,76 +1683,68 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
          if (inst->rc) emit_set_cr1_from_fpscr(out);
          break;
  
@@ -655,7 +766,7 @@ index 4868b4c..0992e94 100644
          break;
  
      case PPC_OP_PS_CMPU0:
-@@ -1539,7 +1912,8 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+@@ -1539,7 +1992,8 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
      case PPC_OP_B:
          fprintf(out, "    {\n");
          emit_direct_branch(out, inst,
@@ -665,7 +776,7 @@ index 4868b4c..0992e94 100644
          fprintf(out, "    }\n");
          break;
  
-@@ -1548,17 +1922,18 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+@@ -1548,17 +2002,18 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
          emit_branch_condition(out, inst->bo, inst->bi);
          fprintf(out, "        if (ctr_ok && cr_ok) {\n");
          emit_direct_branch(out, inst,
@@ -687,11 +798,97 @@ index 4868b4c..0992e94 100644
          break;
  
      case PPC_OP_TWI:
-@@ -1915,7 +2290,10 @@ void emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
+@@ -1881,13 +2336,12 @@ static u32 inst_cycle_cost(const PPCInst* inst) {
+     }
+ }
+ 
+-void emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
++/* Basic blocks of insts[0..count) at func_addr: leader[i] marks a block start,
++ * block_cost[i] its cycle cost (for downcount). */
++static void find_blocks(const PPCInst* insts, u32 count, u32 func_addr, u8* leader,
++                        u32* block_cost) {
+     u32 i;
+-    u32 func_end = func_addr + count * 4u;
+-
+-    u8* leader = (u8*)calloc(count ? count : 1u, sizeof(u8));
+-    u32* block_cost = (u32*)calloc(count ? count : 1u, sizeof(u32));
+-
++    const u32 func_end = func_addr + count * 4u;
+     if (count)
+         leader[0] = 1;
+     for (i = 0; i < count; i++) {
+@@ -1914,8 +2368,77 @@ void emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
+                 break;
          }
      }
++}
++
++static int compare_u32(const void* a, const void* b) {
++    const u32 x = *(const u32*)a, y = *(const u32*)b;
++    return x < y ? -1 : x > y ? 1 : 0;
++}
  
 -    fprintf(out, "void func_%08X(CPUState* ctx) {\n", func_addr);
++/* The static copy of the leaf at start..end (its blr) for the chunk calling it. */
++static void emit_leaf(FILE* out, u32 start, u32 end, bool exact_pc) {
++    const u32 count = (end - start) / 4u + 1u;
++    const PPCInst* insts = &g_section_insts[(start - g_section_addr) / 4u];
++    u8* leader = (u8*)calloc(count, sizeof(u8));
++    u32* block_cost = (u32*)calloc(count, sizeof(u32));
++    u32 i;
++    find_blocks(insts, count, start, leader, block_cost);
++    fprintf(out, "static void dolrecomp_leaf_%08X(CPUState* dolrecomp_ctx_arg) {\n", start);
++    fprintf(out, "    CPUState* const ctx = DOLRECOMP_CTX(dolrecomp_ctx_arg);\n");
++    g_leaf_mode = true;
++    for (i = 0; i < count; i++) {
++        fprintf(out, "label_%08X:\n", insts[i].address);
++        if (leader[i] || exact_pc)
++            fprintf(out, "    ctx->pc = 0x%08Xu;\n", insts[i].address);
++        if (leader[i] && block_cost[i] != 0)
++            fprintf(out, "    ctx->downcount -= %u;\n", block_cost[i]);
++        emit_instruction_with_range(out, &insts[i], start, end + 4u);
++    }
++    g_leaf_mode = false;
++    fprintf(out, "    ctx->pc = 0x%08Xu;\n", end + 4u);
++    fprintf(out, "}\n\n");
++    free(leader);
++    free(block_cost);
++}
++
++void emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
++    u32 i;
++    u32 func_end = func_addr + count * 4u;
++    /* ctx->pc is set at block starts only: every way out of a chunk (branch,
++     * call, exception, fallback) sets it itself, and helpers take the
++     * instruction address as an argument, so a per-instruction store is only
++     * for debug output that prints ctx->pc (DOLRECOMP_EXACT_PC=1 keeps it). */
++    const bool exact_pc = getenv("DOLRECOMP_EXACT_PC") != NULL;
++    const bool no_leaves = getenv("DOLRECOMP_NO_LEAVES") != NULL;
++
++    u8* leader = (u8*)calloc(count ? count : 1u, sizeof(u8));
++    u32* block_cost = (u32*)calloc(count ? count : 1u, sizeof(u32));
++    find_blocks(insts, count, func_addr, leader, block_cost);
++
++    /* The leaves this chunk calls (DOLRECOMP_NO_LEAVES=1: none). */
++    g_leaf_count = 0;
++    for (i = 0; i < count && !no_leaves; i++) {
++        const PPCInst* inst = &insts[i];
++        u32 end;
++        if (!inst->embedded_data && inst->lk &&
++            (inst->op == PPC_OP_B || inst->op == PPC_OP_BC) &&
++            g_leaf_count < MAX_CHUNK_LEAVES && !is_chunk_leaf(inst->branch_target) &&
++            find_leaf(inst->branch_target, &end)) {
++            g_leaves[g_leaf_count] = inst->branch_target;
++            g_leaf_count++;
++            qsort(g_leaves, g_leaf_count, sizeof g_leaves[0], compare_u32);
++        }
++    }
++    for (i = 0; i < g_leaf_count; i++) {
++        u32 end;
++        find_leaf(g_leaves[i], &end);
++        emit_leaf(out, g_leaves[i], end, exact_pc);
++    }
++
 +    fprintf(out, "void func_%08X(CPUState* dolrecomp_ctx_arg) {\n", func_addr);
 +    fprintf(out, "    CPUState* const ctx = DOLRECOMP_CTX(dolrecomp_ctx_arg);\n");
 +    fprintf(out, "    if (dolrecomp_call_depth == 0u) dolrecomp_chain_budget = DOLRECOMP_CHAIN_BUDGET;\n");
@@ -699,15 +896,10 @@ index 4868b4c..0992e94 100644
      fprintf(out, "    switch (ctx->pc) {\n");
      for (i = 0; i < count; i++) {
          fprintf(out, "    case 0x%08Xu: goto label_%08X;\n",
-@@ -1924,13 +2302,46 @@ void emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
+@@ -1924,16 +2447,45 @@ void emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
      fprintf(out, "    default: return;\n");
      fprintf(out, "    }\n");
  
-+    /* ctx->pc is set at block starts only: every way out of a chunk (branch,
-+     * call, exception, fallback) sets it itself, and helpers take the
-+     * instruction address as an argument, so a per-instruction store is only
-+     * for debug output that prints ctx->pc (DOLRECOMP_EXACT_PC=1 keeps it). */
-+    const bool exact_pc = getenv("DOLRECOMP_EXACT_PC") != NULL;
 +    /* Local calls: is_callee marks each local bl target. A blr's function is
 +     * taken to start at the nearest callee at or before it. */
 +    u8* is_callee = (u8*)calloc(count ? count : 1u, sizeof(u8));
@@ -747,6 +939,24 @@ index 4868b4c..0992e94 100644
  
      free(leader);
      free(block_cost);
++    g_leaf_count = 0;
+ 
+     fprintf(out, "    ctx->pc = 0x%08Xu;\n", func_end);
+     fprintf(out, "}\n\n");
+diff --git a/src/backend/emitter.h b/src/backend/emitter.h
+index e491fee..5cc6fdb 100644
+--- a/src/backend/emitter.h
++++ b/src/backend/emitter.h
+@@ -19,6 +19,9 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu);
+ 
+ // emit a single recompiled function as C code
+ void emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr);
++/* The code section emit_function's chunk comes from (thread-local; NULL = none):
++ * leaf functions the chunk calls are emitted into it from here. */
++void emit_set_section(const PPCInst* insts, u32 count, u32 addr);
+ 
+ // emit a single instruction as C code
+ void emit_instruction(FILE* out, const PPCInst* inst);
 diff --git a/src/cpu/cpu.c b/src/cpu/cpu.c
 index 3702bef..5ff845c 100644
 --- a/src/cpu/cpu.c

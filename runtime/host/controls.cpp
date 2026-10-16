@@ -421,8 +421,9 @@ std::string key_label(int action) {
 
 namespace {
 std::string glyph_img(const std::string& file, const std::string& alt) {
-    // Paths are relative to res/ui/menu.rml.
-    return "<img class=\"glyph\" src=\"glyphs/" + file + ".png\" alt=\"" + alt + "\"/>";
+    // Paths are relative to res/ui/menu.rml: the ink versions, drawn for the
+    // parchment (tools/ui/make_ink_glyphs.py).
+    return "<img class=\"glyph\" src=\"glyphs/ink/" + file + ".png\" alt=\"" + alt + "\"/>";
 }
 }  // namespace
 
@@ -435,10 +436,10 @@ std::string pad_glyphs(int action) {
     return out.empty() ? "<span class=\"unbound\">-</span>" : out;
 }
 
-std::string key_glyph(int action) {
-    const int key = g_bindings[action].key;
-    if (key <= 0)
-        return "<span class=\"unbound\">-</span>";
+// The bound key's icon under res/ui/glyphs ("kb/j"), or "" when it has none.
+std::string key_glyph_file(int action) {
+    if (g_bindings[action].key <= 0)
+        return "";
     // SDL's key name to the icon file: "Return" -> return, "Up" -> arrow_up,
     // "Left Shift" -> shift; keys without an icon show their name in a keycap.
     std::string name = key_label(action);
@@ -470,8 +471,17 @@ std::string key_glyph(int action) {
         "numpad_enter", "page_down", "page_up", "return", "shift", "space", "tab"};
     for (const char* icon : kIcons)
         if (file == icon)
-            return glyph_img("kb/" + file, name);
-    return "<span class=\"keycap\">" + name + "</span>";
+            return "kb/" + file;
+    return "";
+}
+
+std::string key_glyph(int action) {
+    if (g_bindings[action].key <= 0)
+        return "<span class=\"unbound\">-</span>";
+    const std::string file = key_glyph_file(action);
+    if (file.empty())
+        return "<span class=\"keycap\">" + key_label(action) + "</span>";
+    return glyph_img(file, key_label(action));
 }
 
 std::string glyph_set() {
@@ -483,13 +493,9 @@ std::string glyph_set() {
 std::string action_glyph(int action, int preference) {
     const std::string set = glyph_set();
     if (set == "kb") {
-        // The key's icon file, from the menu's keycap mapping.
-        const std::string img = key_glyph(action);
-        const size_t at = img.find("glyphs/");
-        if (at == std::string::npos)
-            return "";
-        const size_t end = img.find('"', at);
-        return img.substr(at + 7, end - at - 7);
+        // The key's icon file, as the menu shows it.
+        const std::string file = key_glyph_file(action);
+        return file.empty() ? "" : file + ".png";
     }
     // Face buttons for the face cells; bumpers, then triggers, for the
     // shoulder cells (so menu paging pairs LB with RB); else the first.

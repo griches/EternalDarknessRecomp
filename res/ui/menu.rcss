@@ -200,15 +200,13 @@ body.overlay #hint {
 	color: #d2bf98;
 }
 
-/* Button and key icons (Kenney Input Prompts, CC0), set on a dark ink
-   plate so the light icons read on parchment. */
+/* Button and key icons (Kenney Input Prompts, CC0) in their ink versions
+   (res/ui/glyphs/ink), drawn straight on the parchment. */
 img.glyph {
 	width: 32dp;
 	height: 32dp;
 	margin-left: 4dp;
 	vertical-align: middle;
-	background-color: #2a1810;
-	border-radius: 6dp;
 }
 
 .sep {

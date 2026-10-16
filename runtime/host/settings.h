@@ -9,7 +9,8 @@ extern "C" {
 
 typedef struct {
     bool skip_intros;     // tap through the logo movies and the quote
-    int aspect;           // 0 follow the game, 1 4:3, 2 16:9, 3 stretch
+    int aspect;           // 1 4:3, 2 16:9 (the game's own widescreen view),
+                          // 3 stretch; settings.ini's 0 (follow the game) reads as 16:9
     bool widescreen_hud;  // move the game's widescreen HUD out to the edges
     int render_scale;     // 0 window pixels, 1-4 = 720p, 1080p, 1440p, 4K
     int game_font;        // the game's text: 0 sharp, 1 tome (default), 2 as on the disc

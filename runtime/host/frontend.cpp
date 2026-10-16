@@ -511,7 +511,7 @@ Row vibration_row() {
 }
 
 void build_options() {
-    static const char* const kAspect[] = {"Follow the game", "4:3", "16:9", "Stretch"};
+    static const char* const kAspect[] = {"16:9", "4:3", "16:9", "Stretch"};
     // Each resolution as the pixels it draws at, for the display shape in use:
     // the window's own, or a standard height at 4:3 or 16:9.
     float display_aspect = 4.f / 3.f;
@@ -549,8 +549,14 @@ void build_options() {
     g_rows.push_back(scale);
 
     Row aspect{"Aspect ratio", kAspect[g_settings.aspect]};
-    aspect.note = "Follow the game: 16:9 when its widescreen option is on.";
-    aspect.change = [](int dir) { cycle(g_settings.aspect, 4, dir); changed(); };
+    aspect.note = "16:9 is the game's own widescreen view: more at the sides, not stretched. "
+                  "Changing it in the game's options changes it here too.";
+    aspect.change = [](int dir) {
+        int choice = g_settings.aspect - 1;  // 4:3, 16:9, Stretch
+        cycle(choice, 3, dir);
+        g_settings.aspect = choice + 1;
+        changed();
+    };
     g_rows.push_back(aspect);
 
     Row hud{"Widescreen HUD", g_settings.widescreen_hud ? "Screen edges" : "Centred (4:3)"};

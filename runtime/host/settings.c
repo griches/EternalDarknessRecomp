@@ -12,7 +12,7 @@
 
 Settings g_settings = {
     .skip_intros = false,
-    .aspect = 0,
+    .aspect = 2,  // 16:9
     .widescreen_hud = true,
     .render_scale = 0,
     .game_font = 1,  // Tome
@@ -83,7 +83,7 @@ void settings_load(void) {
         if (strcmp(key, "skip_intros") == 0)
             g_settings.skip_intros = n != 0;
         else if (strcmp(key, "aspect") == 0)
-            g_settings.aspect = clamp_int(n, 0, 3);
+            g_settings.aspect = n == 0 ? 2 : clamp_int(n, 1, 3);
         else if (strcmp(key, "widescreen_hud") == 0)
             g_settings.widescreen_hud = n != 0;
         else if (strcmp(key, "render_scale") == 0)

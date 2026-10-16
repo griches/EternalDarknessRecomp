@@ -4430,9 +4430,12 @@ static void initialize_hle_dispatch(void) {
 }
 
 #ifdef ED_AURORA
+extern CPUState dolrecomp_cpu;  // main.c
+static void sync_widescreen_option(CPUState* cpu);
+
 // Once a game frame (VIFlush): the frames per second in the window title,
-// refreshed each second (ED_NO_FPS=1 leaves the title alone), and the
-// in-game menu.
+// refreshed each second (ED_NO_FPS=1 leaves the title alone), the game's
+// widescreen option, and the in-game menu.
 void hle_frame_boundary(void) {
     static int fps_env = -1;
     static unsigned frames;
@@ -4466,6 +4469,7 @@ void hle_frame_boundary(void) {
             }
         }
     }
+    sync_widescreen_option(&dolrecomp_cpu);
     // Esc / the controller's Back button opens the in-game menu here, at
     // a frame boundary, with the frame just drawn behind it.
     frontend_frame();
@@ -4893,6 +4897,109 @@ static void install_xfb_reader_sync(CPUState* cpu) {
     entry->notify = hle_xfb_reader_notify;
 }
 
+#ifdef ED_AURORA
+// The game's own widescreen option: its camera projects at 16:9 (anamorphic,
+// as for a widescreen TV) while this r13 word is 1 and at 4:3 while it is 0.
+// The PAL disc's options menu flips it, in state 3 of its menu function; the
+// USA disc has it only in a debug menu. The launcher's Aspect ratio drives it,
+// so 16:9 is the game's wider view and never a stretched 4:3 picture: once a
+// frame a value the game wrote anywhere else (boot, a save's options) goes
+// back to the launcher's, and one the player chose in that menu becomes the
+// launcher's. The card is never written here; the game saves what it holds.
+static s32 g_widescreen_offset;        // the word's r13 offset, 0 = not found
+static s32 g_options_state_offset;     // the PAL options menu's state word
+// Calls of that menu in its toggle state, counted on the game thread. The sync
+// runs on the main thread at each present, while the game goes on, so a call
+// counts for the next three presents: the flip may land after the one that saw it.
+static volatile u32 g_options_toggle_calls;
+static int g_widescreen_seen = -1;     // the word as last seen or written
+
+static bool sda_ready(const CPUState* cpu) {
+    const u32 sda = cpu->gpr[13];
+    return sda >= GC_RAM_BASE + 0x8000u && sda - GC_RAM_BASE <= cpu->ram_size - 0x8000u;
+}
+
+static void notify_options_menu(CPUState* cpu) {
+    if (sda_ready(cpu) &&
+        mem_read32(cpu, cpu->gpr[13] + (u32)g_options_state_offset) == 3u)
+        g_options_toggle_calls = g_options_toggle_calls + 1u;
+}
+
+static void find_widescreen_option(CPUState* cpu) {
+    const bool pal = strcmp(ED_GAME_ID, "GEDP01") == 0;
+    // The camera, before C_MTXPerspective: lwz r0, flag(r13) ... cmpwi r0, 1.
+    const u32 camera = pal ? 0x801E4C1Cu : 0x801F0430u;
+    const u32 load = mem_read32(cpu, camera);
+    bool compared = false;
+    for (u32 k = 1; k <= 4u && !compared; k++)
+        compared = mem_read32(cpu, camera + k * 4u) == 0x2C000001u;
+    g_widescreen_offset = 0;
+    g_options_state_offset = 0;
+    g_widescreen_seen = -1;
+    if ((load >> 16) != 0x800Du || !compared) {
+        fprintf(stderr, "[widescreen] the game's option not found: 16:9 stretches its picture\n");
+        return;
+    }
+    g_widescreen_offset = (s16)(load & 0xFFFFu);
+    if (!pal)
+        return;
+    // PAL: the toggle (lwz r0, flag; lwz r3, ...; xori r0, r0, 1; stw r0, flag),
+    // its menu function and the state word the function reads first.
+    const u32 toggle = 0x80116CE8u, menu = 0x80116470u;
+    const u32 state_load = mem_read32(cpu, menu + 0x20u);
+    HleDispatchEntry* entry = hle_dispatch_entry(menu);
+    if (mem_read32(cpu, toggle) != load || (mem_read32(cpu, toggle + 4u) >> 16) != 0x806Du ||
+        mem_read32(cpu, toggle + 8u) != 0x68000001u ||
+        mem_read32(cpu, toggle + 12u) != (0x900D0000u | (load & 0xFFFFu)) ||
+        mem_read32(cpu, menu) != 0x9421FF80u || mem_read32(cpu, menu + 4u) != 0x7C0802A6u ||
+        (state_load >> 16) != 0x800Du || entry == NULL || entry->notify != NULL) {
+        fprintf(stderr, "[widescreen] the options menu's toggle not found: the launcher sets it\n");
+        return;
+    }
+    g_options_state_offset = (s16)(state_load & 0xFFFFu);
+    entry->notify = notify_options_menu;
+}
+
+// The launcher's choice as the game's word: 16:9 on, 4:3 off, Stretch on when
+// the window is wider than 3:2.
+static int launcher_widescreen(void) {
+    if (g_settings.aspect != 3)
+        return g_settings.aspect == 2;
+    uint32_t w = 0, h = 0;
+    dol_aurora_get_display_info(NULL, &w, &h);
+    return h != 0u && (float)w / (float)h > 1.5f;
+}
+
+static void sync_widescreen_option(CPUState* cpu) {
+    static u32 calls_seen;
+    static int menu_presents;
+    const u32 calls = g_options_toggle_calls;
+    if (calls != calls_seen) {
+        calls_seen = calls;
+        menu_presents = 3;
+    } else if (menu_presents > 0) {
+        menu_presents--;
+    }
+    const bool chose = menu_presents > 0;
+    if (g_widescreen_offset == 0 || !sda_ready(cpu))
+        return;
+    const u32 address = cpu->gpr[13] + (u32)g_widescreen_offset;
+    const int value = mem_read32(cpu, address) != 0u;
+    if (g_widescreen_seen >= 0 && value != g_widescreen_seen && chose) {
+        g_settings.aspect = value ? 2 : 1;
+        settings_apply();
+        settings_save();
+        fprintf(stderr, "[widescreen] chosen in the game's options: %s\n", value ? "16:9" : "4:3");
+    }
+    const int want = launcher_widescreen();
+    if (value != want) {
+        mem_write32(cpu, address, (u32)want);
+        fprintf(stderr, "[widescreen] the game's option set to %s\n", want ? "16:9" : "4:3");
+    }
+    g_widescreen_seen = want;
+}
+#endif
+
 static bool callback_pending(u32 address, s32 result) {
     if (g_callback_active && g_irq_callback.pending.address == address &&
         g_irq_callback.pending.result == result)
@@ -5030,6 +5137,9 @@ void hle_install(CPUState* cpu) {
     cpu->host_call = hle_dispatch;
     install_msl_memory_hle(cpu);
     install_xfb_reader_sync(cpu);
+#ifdef ED_AURORA
+    find_widescreen_option(cpu);
+#endif
     publish_codegen_options();
 }
 

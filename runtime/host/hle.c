@@ -198,6 +198,7 @@ static bool g_skip_intro;
 static bool g_skip_intro_done;
 static bool g_skip_intro_armed;
 static unsigned g_skip_intro_memcard_text;
+static u64 g_skip_intro_start_frame;  // first frame it ran (0: not yet)
 
 // The launcher's New game in a running process (frontend.cpp): skip the
 // intro movies or not, as at boot (the boot state it loads resets the rest).
@@ -206,6 +207,7 @@ void hle_set_skip_intro(bool on) {
     g_skip_intro_done = false;
     g_skip_intro_armed = false;
     g_skip_intro_memcard_text = 0;
+    g_skip_intro_start_frame = 0;
 }
 
 static void skip_intro_note_open(const CPUState* cpu, const char* path) {
@@ -225,10 +227,31 @@ static void skip_intro_note_open(const CPUState* cpu, const char* path) {
     }
 }
 
-static bool skip_intro_apply(CPUState* cpu, u16* buttons, u8* analog_a) {
+// The intro's end is spotted from the files it opens, and a New game from the
+// launcher does not always open them in that order: A was then tapped on
+// through play (the gun fired over and over, Steam Deck 2026-10-16). So the
+// player taking over (a button, or the main stick pushed) also ends it, and
+// so does a minute and a half of tapping.
+static bool skip_intro_apply(CPUState* cpu, u16* buttons, s8 stick_x, s8 stick_y,
+                             u8* analog_a) {
     if (!g_skip_intro || g_skip_intro_done)
         return false;
     const u64 frame = cpu->timebase / 675000ull;
+    if (g_skip_intro_start_frame == 0u || frame < g_skip_intro_start_frame)
+        g_skip_intro_start_frame = frame != 0u ? frame : 1u;
+    const u64 elapsed = frame - g_skip_intro_start_frame;
+    const char* why = NULL;
+    // Ignore the first frames: the launcher's A may still be held.
+    if (elapsed > 20u && (*buttons != 0u || abs(stick_x) > 48 || abs(stick_y) > 48))
+        why = "the player took over";
+    else if (elapsed > 90u * 60u)
+        why = "90 s";
+    if (why != NULL) {
+        g_skip_intro_done = true;
+        fprintf(stderr, "[input] skip-intro off at frame %llu (%s)\n",
+                (unsigned long long)frame, why);
+        return false;
+    }
     if (frame < 30u || (frame % 16u) >= 6u)
         return false;
     *buttons |= 0x0100u;
@@ -3428,7 +3451,8 @@ static void hle_PADRead(CPUState* cpu) {
     if (input_script_apply(cpu, &state[0].button, &state[0].stick_x,
                            &state[0].stick_y, &state[0].analog_a))
         state[0].error = 0;
-    if (skip_intro_apply(cpu, &state[0].button, &state[0].analog_a))
+    if (skip_intro_apply(cpu, &state[0].button, state[0].stick_x, state[0].stick_y,
+                         &state[0].analog_a))
         state[0].error = 0;
     mash_to_gameplay_apply(cpu, &state[0].button, &state[0].stick_x,
                            &state[0].analog_a);
@@ -3492,7 +3516,7 @@ static bool headless_scripted_pad(CPUState* cpu,
         }
     }
     (void)input_script_apply(cpu, buttons, stick_x, stick_y, analog_a);
-    (void)skip_intro_apply(cpu, buttons, analog_a);
+    (void)skip_intro_apply(cpu, buttons, *stick_x, *stick_y, analog_a);
     mash_to_gameplay_apply(cpu, buttons, stick_x, analog_a);
     return connected;
 }

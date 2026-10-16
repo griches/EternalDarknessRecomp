@@ -3253,7 +3253,7 @@ index 7af8fca..4c14e34 100644
      g_requested.store(false, std::memory_order_release);
    else
 diff --git a/graphics/aurora/lib/gfx/gxcore_draw.cpp b/graphics/aurora/lib/gfx/gxcore_draw.cpp
-index 71136b9..212ac4b 100644
+index 71136b9..ab39fb8 100644
 --- a/graphics/aurora/lib/gfx/gxcore_draw.cpp
 +++ b/graphics/aurora/lib/gfx/gxcore_draw.cpp
 @@ -1,4 +1,7 @@
@@ -3573,8 +3573,22 @@ index 71136b9..212ac4b 100644
  wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
    const gxc::PipelineKey& key = config.key;
    const std::string wgsl = gxc::generate_wgsl(key.shader);
-@@ -368,7 +605,7 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
-   const uint32_t tex_mask = textured ? gxc::used_texmap_mask(key.shader) : 1u;
+@@ -364,11 +601,19 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+   const bool textured = key.shader.textured != 0;
+   // Multi-texmap: the texture group's layout matches the set of texmaps the WGSL
+   // declares (derived identically from the shader key), so pipeline and bind
+-  // group agree. Untextured draws never use the texture group (layoutCount below).
+-  const uint32_t tex_mask = textured ? gxc::used_texmap_mask(key.shader) : 1u;
++  // group agree. One texmap, whichever it is, is tex0/samp0 at bindings 0/1 in
++  // the WGSL and in the draw's bind group (texture_bind_group_layout(1u)), so
++  // the pipeline's layout must say the same: built from the texmap's own number
++  // (bindings 2t/2t+1), Metal gave the shader sampler slots the bind group never
++  // filled, and a texture on texmap 3 sampled with the previous draw's sampler
++  // (Eternal Darkness's text box: its clamped corner tiled whenever the draw
++  // before used repeat; Vulkan and D3D bind by number and were right by luck).
++  // Untextured draws never use the texture group (layoutCount below).
++  const uint32_t used_mask = textured ? gxc::used_texmap_mask(key.shader) : 1u;
++  const uint32_t tex_mask = gxc::texmap_popcount(used_mask) <= 1u ? 1u : used_mask;
    std::array<wgpu::BindGroupLayout, 4> bindGroupLayouts{
        g_staticBindGroupLayout,
 -      g_uniformBindGroupLayout,
@@ -3582,7 +3596,7 @@ index 71136b9..212ac4b 100644
        tev ? g_uniformBindGroupLayout : texture_bind_group_layout(tex_mask),
        texture_bind_group_layout(tex_mask),
    };
-@@ -427,7 +664,13 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -427,7 +672,13 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
    // vertex FORMAT carries that attribute. A lit/emboss draw whose format omits
    // it reads the cached fallback from the uniform instead (I_CACHED_NORMAL), so
    // the shader does not declare the input and the layout must not provide it.
@@ -3597,7 +3611,7 @@ index 71136b9..212ac4b 100644
        key.shader.has_vertex_normal != 0) {
      attributes.push_back(wgpu::VertexAttribute{
          .format = wgpu::VertexFormat::Float32x3,
-@@ -442,14 +685,14 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -442,14 +693,14 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
          .shaderLocation = 13,
      });
    }
@@ -3614,7 +3628,7 @@ index 71136b9..212ac4b 100644
      attributes.push_back(wgpu::VertexAttribute{
          .format = wgpu::VertexFormat::Float32x3,
          .offset = gxc::kVertexTangentOffset,
-@@ -536,6 +779,10 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -536,6 +787,10 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
    default:
      break; // None here; All was skipped at plan time
    }
@@ -3625,7 +3639,7 @@ index 71136b9..212ac4b 100644
  
    const wgpu::RenderPipelineDescriptor descriptor{
        .label = "GXCore Pipeline",
-@@ -566,10 +813,22 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -566,10 +821,22 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
  
  void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
    if (!bind_pipeline(data.pipeline, pass)) {
@@ -3650,7 +3664,7 @@ index 71136b9..212ac4b 100644
    if (data.tev) {
      // group 2 = PS uniform (same dynamic-uniform bind group, its own offset);
      // group 3 = texture.
-@@ -591,14 +850,27 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
+@@ -591,14 +858,27 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
  
  void reset_texture_cache() {
    g_textureCache.clear();
@@ -3678,7 +3692,7 @@ index 71136b9..212ac4b 100644
  }
  
  const TextureCacheStats& texture_cache_stats() { return g_textureCacheStats; }
-@@ -612,6 +884,8 @@ const TextureCacheStats& texture_cache_stats() { return g_textureCacheStats; }
+@@ -612,6 +892,8 @@ const TextureCacheStats& texture_cache_stats() { return g_textureCacheStats; }
  // color/Z afterwards. The bound draw's geometry is already in the pass (the
  // sink flushed the pending draw before firing this).
  void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
@@ -3687,7 +3701,7 @@ index 71136b9..212ac4b 100644
    // Mirror the copy-clear color/Z (BP 0x4F-0x51 at this copy) into the gx
    // state GXSetCopyClear would have written: begin_frame's pass-0 EFB clear
    // reads g_gxState.clearColor/clearDepth, and in gxcore mode the live gx
-@@ -635,11 +909,25 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -635,11 +917,25 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
    const auto fmt = is_xfb ? GX_TF_RGBA8 : static_cast<GXTexFmt>(cmd.format);
    // Dual dims: EFB source rect stays cmd.height; XFB dest height from
    // byte_size/stride (or cmd.xfb_height if gxcore latched it).
@@ -3714,7 +3728,7 @@ index 71136b9..212ac4b 100644
    });
    // U8: half_scale halves destination dims (TextureEncoder box 2:1).
    const uint32_t scaleShift = cmd.half_scale ? 1u : 0u;
-@@ -660,8 +948,9 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -660,8 +956,9 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
        dstHeight = xfb_h;
    }
  
@@ -3726,7 +3740,7 @@ index 71136b9..212ac4b 100644
        it->second->size.width != dstWidth || it->second->size.height != dstHeight) {
      TextureHandle handle;
      if (!is_xfb && gfx::tex_copy_conv::needs_conversion(fmt)) {
-@@ -670,7 +959,7 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -670,7 +967,7 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
        handle = gfx::new_render_texture(dstWidth, dstHeight, GX_TF_RGBA8,
                                         is_xfb ? "GXCore XFB" : "GXCore Copy");
      }
@@ -3735,7 +3749,7 @@ index 71136b9..212ac4b 100644
    }
    if (!it->second) {
      return;
-@@ -709,11 +998,32 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -709,11 +1006,32 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
    // XFB YUYV into guest RAM from this readback on every display copy, so it
    // must stay armed in product runs too (cost: one EFB readback per display
    // copy, ~1-2/frame).
@@ -3769,7 +3783,7 @@ index 71136b9..212ac4b 100644
    gfx::resolve_pass(it->second, srcRect, do_clear && cmd.color_update,
                      do_clear && cmd.alpha_update,
                      do_clear && cmd.depth_update,
-@@ -723,69 +1033,314 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -723,69 +1041,314 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
                                  static_cast<float>(cmd.clear_a) / 255.f},
                      clearDepthValue, fmt, &filter);
  
@@ -4139,7 +4153,7 @@ index 71136b9..212ac4b 100644
  
    if (plan.viewport_valid) {
      // Raw XF viewport -> logical viewport, the raw path's own formula
-@@ -839,23 +1394,151 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -839,23 +1402,151 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      const uint32_t size = std::min(tsize, available);
      // Hash the actual source texels (+ TLUT for CI) so a content change under an
      // unchanged guest identity is a distinct cache entry — see TextureKey.
@@ -4296,7 +4310,7 @@ index 71136b9..212ac4b 100644
      // gxcore owns the decode for every format: produce tightly-packed RGBA8 and
      // upload it as a pre-decoded PC texture (no substrate re-conversion).
      std::vector<uint8_t> decoded;
-@@ -868,8 +1551,33 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -868,8 +1559,33 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      } else {
        decoded = gxc::decode_texture(format, width, height, bytes, size);
      }
@@ -4331,7 +4345,7 @@ index 71136b9..212ac4b 100644
        handle = new_static_texture_2d(
            width, height, 1, GX_TF_RGBA8_PC,
            ArrayRef<uint8_t>{decoded.data(), decoded.size()}, false,
-@@ -892,7 +1600,98 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -892,7 +1608,98 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    };
  
    BindGroupRef textureBindGroup = 0;
@@ -4430,7 +4444,7 @@ index 71136b9..212ac4b 100644
      if (plan.texmap_mask == 0u) {
        // Single-texmap fast path: primary texture + plan.sampler at binding 0/1.
        if (plan.has_texture) {
-@@ -903,7 +1702,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -903,7 +1710,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
              plan.tlut_data, plan.tlut_available);
          if (bound) {
            const auto sampler =
@@ -4439,7 +4453,7 @@ index 71136b9..212ac4b 100644
            const std::array entries{
                WGPUBindGroupEntry{.binding = 0,
                                   .textureView =
-@@ -919,6 +1718,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -919,6 +1726,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            textureBindGroup = bind_group_ref(descriptor);
          }
        }
@@ -4447,7 +4461,7 @@ index 71136b9..212ac4b 100644
      } else {
        // Multi-texmap: bind each used texmap at 2t (texture) / 2t+1 (sampler),
        // matching the WGSL declarations. Per-texmap PlanSampler from
-@@ -945,14 +1745,16 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -945,14 +1753,16 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
          held.push_back(bound);
          const gxc::PlanSampler& ps =
              pt.sampler.valid ? pt.sampler : plan.samplers[t];
@@ -4466,7 +4480,7 @@ index 71136b9..212ac4b 100644
        const WGPUBindGroupDescriptor descriptor{
            .label = {"GXCore Texture Bind Group", WGPU_STRLEN},
            .layout = texture_bind_group_layout(plan.texmap_mask).Get(),
-@@ -960,6 +1762,239 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -960,6 +1770,239 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            .entries = entries.data(),
        };
        textureBindGroup = bind_group_ref(descriptor);
@@ -4706,7 +4720,7 @@ index 71136b9..212ac4b 100644
      }
    }
  
-@@ -969,27 +2004,13 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -969,27 +2012,13 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    const auto idxRange = push_indices(
        reinterpret_cast<const uint8_t*>(plan.indices.data()),
        plan.indices.size() * sizeof(uint16_t), 4);
@@ -4736,7 +4750,7 @@ index 71136b9..212ac4b 100644
          .pixelUniformRange = pixelUniformRange,
          .indexCount = static_cast<uint32_t>(plan.indices.size()),
          .textureBindGroup = textureBindGroup,
-@@ -1006,6 +2027,8 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -1006,6 +2035,8 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      }
    } else {
      issue_draw();

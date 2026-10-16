@@ -4767,6 +4767,35 @@ static void install_msl_memory_hle(CPUState* cpu) {
             found_memcpy, found_memset, found_forward);
 }
 
+// The prologue's book shows a photo of Alex that the game makes by copying a
+// frame to an XFB and reading it back on the CPU (fn_801F50EC in the USA
+// decomp: YUYV to a texture, r3 = the XFB). Our copies reach RAM a frame or
+// two late, so the photo was an older frame: the book page on the Steam Deck,
+// a flash of the unfinished scene, eyes out of line with the 3D Alex. Before
+// it reads, wait for that copy and write it (twice in the sequence).
+static void hle_xfb_reader_notify(CPUState* cpu) {
+#ifdef ED_AURORA
+    dol_aurora_xfb_ram_sync(cpu->gpr[3]);
+#else
+    (void)cpu;
+#endif
+}
+
+static void install_xfb_reader_sync(CPUState* cpu) {
+    if (getenv("ED_NO_XFB_SYNC") != NULL)
+        return;
+    static const u32 kHead[] = {0x9421FFC0u, 0x7C0802A6u, 0x90010044u, 0xBF010020u,
+                                0x7C982378u, 0x7C7B1B78u, 0x3B800000u};
+    const u32 address = strcmp(ED_GAME_ID, "GEDP01") == 0 ? 0x801E9920u : 0x801F50ECu;
+    HleDispatchEntry* entry = hle_dispatch_entry(address);
+    if (entry == NULL || entry->notify != NULL || !code_matches(cpu, address, kHead, 7)) {
+        fprintf(stderr, "[hle] XFB reader not found at 0x%08X: the book's photo may lag\n",
+                address);
+        return;
+    }
+    entry->notify = hle_xfb_reader_notify;
+}
+
 void hle_install(CPUState* cpu) {
     g_hle_log = getenv("ED_HLE_LOG") != NULL;
     g_dvd_log = g_hle_log || getenv("ED_DVD_LOG") != NULL;
@@ -4858,6 +4887,7 @@ void hle_install(CPUState* cpu) {
 #endif
     cpu->host_call = hle_dispatch;
     install_msl_memory_hle(cpu);
+    install_xfb_reader_sync(cpu);
     publish_codegen_options();
 }
 

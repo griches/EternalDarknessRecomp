@@ -24,6 +24,9 @@ void frontend_frame(void);
 // The disc id this build runs ("GEDE01" or "GEDP01"; main.c).
 const char* ed_game_id(void);
 
+// For AuroraBackendConfig.imgui_init: the FPS counter's font into ImGui.
+void frontend_imgui_init(void);
+
 #ifdef __cplusplus
 }
 #include <string>

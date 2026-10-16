@@ -1,5 +1,5 @@
 diff --git a/backends/aurora/aurora_backend.cpp b/backends/aurora/aurora_backend.cpp
-index d94f811..1700e16 100644
+index d94f811..fdc1d4b 100644
 --- a/backends/aurora/aurora_backend.cpp
 +++ b/backends/aurora/aurora_backend.cpp
 @@ -19,9 +19,25 @@
@@ -1752,7 +1752,18 @@ index d94f811..1700e16 100644
  
  extern "C" {
  
-@@ -937,7 +2443,7 @@ bool dol_aurora_initialize(int argc, char** argv,
+@@ -890,6 +2396,10 @@ bool dol_aurora_initialize(int argc, char** argv,
+                               : defaults.window_height;
+     config.allowTextureDumps = backend_config->allow_texture_dumps;
+     config.logCallback = log_callback;
++    static void (*s_imgui_init)(void) = nullptr;
++    s_imgui_init = backend_config->imgui_init;
++    if (s_imgui_init != nullptr)
++        config.imGuiInitCallback = [](const AuroraWindowSize*) { s_imgui_init(); };
+     config.logLevel = backend_config->info_logging ? LOG_INFO : LOG_ERROR;
+     // The recomp runtime owns guest MEM1/ARAM. Aurora receives translated host
+     // pointers for graphics resources and must not allocate duplicate memory.
+@@ -937,7 +2447,7 @@ bool dol_aurora_initialize(int argc, char** argv,
      g_trace_present_scope_frame = 0ull;
      g_trace_frame_begun = false;
      g_trace_frames_recorded = 0ull;
@@ -1761,7 +1772,7 @@ index d94f811..1700e16 100644
      const char* trace_out = std::getenv("DOL_AURORA_RECOMP_TRACE_OUT");
      if (trace_out != nullptr && trace_out[0] != '\0') {
          g_trace_path = trace_out;
-@@ -1069,7 +2575,11 @@ static void flush_gxcore_gap_counters() {
+@@ -1069,7 +2579,11 @@ static void flush_gxcore_gap_counters() {
  #if GXRUNTIME_HAS_AURORA_RECOMP
      if (!g_gx_core_enabled)
          return;
@@ -1774,7 +1785,7 @@ index d94f811..1700e16 100644
      struct {
          const char* name;
          unsigned long long value;
-@@ -1114,10 +2624,164 @@ void dol_aurora_flush_gap_report(void) {
+@@ -1114,10 +2628,164 @@ void dol_aurora_flush_gap_report(void) {
      flush_gxcore_gap_counters();
  }
  
@@ -1940,7 +1951,7 @@ index d94f811..1700e16 100644
          aurora::gfx::efb_readback::set_continuous(true);
          aurora_request_framebuffer_readback();
      }
-@@ -1169,7 +2833,8 @@ void aurora_backend_present(void) {
+@@ -1169,7 +2837,8 @@ void aurora_backend_present(void) {
      // gxcore accumulates the frame's draws as their spans complete; the final
      // pending draw is only planned at the frame boundary. Submit it into the
      // still-open Aurora frame before end_frame flushes the command list.
@@ -1950,7 +1961,7 @@ index d94f811..1700e16 100644
          g_core_sink.flush_frame();
      // TEMP DIAG: per-frame gxcore gap-counter deltas so a live
      // goal celebration reveals which skip reason dominates (missing_vcd /
-@@ -1201,8 +2866,11 @@ void aurora_backend_present(void) {
+@@ -1201,8 +2870,11 @@ void aurora_backend_present(void) {
          g_frame_open = false;
      }
      // Host EFB fill: push latest present-source snapshot into software backing
@@ -1964,7 +1975,7 @@ index d94f811..1700e16 100644
          const std::uint8_t* rgba = nullptr;
          std::uint32_t w = 0;
          std::uint32_t h = 0;
-@@ -1212,6 +2880,109 @@ void aurora_backend_present(void) {
+@@ -1212,6 +2884,109 @@ void aurora_backend_present(void) {
          }
      }
      ++g_present_count;
@@ -2074,7 +2085,7 @@ index d94f811..1700e16 100644
      if (g_frame_pacing_log &&
          (g_present_count <= 10 || (g_present_count % 60) == 0)) {
          const AuroraStats* stats = aurora_get_stats();
-@@ -1432,6 +3203,7 @@ void aurora_backend_present(void) {
+@@ -1432,6 +3207,7 @@ void aurora_backend_present(void) {
      const unsigned long long present_fifo = g_fifo_bytes;
      g_fifo_bytes = 0;
      poll_events();
@@ -2082,7 +2093,7 @@ index d94f811..1700e16 100644
      if (!g_should_quit) {
          g_frame_open = aurora_begin_frame();
  #if GXRUNTIME_HAS_AURORA_RECOMP
-@@ -1482,7 +3254,13 @@ void aurora_backend_gx_write(u64 value, u8 size) {
+@@ -1482,7 +3258,13 @@ void aurora_backend_gx_write(u64 value, u8 size) {
          return;
      g_fifo_bytes += size;
  #if GXRUNTIME_HAS_AURORA_RECOMP
@@ -2097,7 +2108,7 @@ index d94f811..1700e16 100644
      // Record AFTER the shadow write so MEM_UPDATEs its resolves emitted
      // precede this GX_WRITE in the trace (replay reads them first), and
      // BEFORE the live-Aurora forwarding below so the pristine value is
-@@ -1673,6 +3451,7 @@ void aurora_backend_set_guest_address_resolver(
+@@ -1673,6 +3455,7 @@ void aurora_backend_set_guest_address_resolver(
              &frontend_resolver, frontend_guest_address_resolver_bridge,
              nullptr);
          g_shadow_frontend.reset(&frontend_resolver);
@@ -2105,7 +2116,7 @@ index d94f811..1700e16 100644
          g_shadow_frontend.set_packet_drain_enabled(g_shadow_frontend_enabled);
          g_shadow_packet_sink.reset();
          // Resolve packet guest addresses to host bytes through the frontend's
-@@ -1737,6 +3516,7 @@ void aurora_backend_set_xfb_black(bool black) {
+@@ -1737,6 +3520,7 @@ void aurora_backend_set_xfb_black(bool black) {
  }
  
  bool aurora_backend_pad_init(void) {
@@ -2113,7 +2124,7 @@ index d94f811..1700e16 100644
      if (PADInit() == FALSE)
          return false;
  
-@@ -1780,6 +3560,7 @@ bool aurora_backend_pad_init(void) {
+@@ -1780,6 +3564,7 @@ bool aurora_backend_pad_init(void) {
  }
  
  u32 aurora_backend_pad_read(DolPadState state[4]) {
@@ -2121,7 +2132,7 @@ index d94f811..1700e16 100644
      PADStatus status[4]{};
      const u32 motor_mask = PADRead(status);
      for (u32 i = 0; i < 4; i++) {
-@@ -1796,22 +3577,41 @@ u32 aurora_backend_pad_read(DolPadState state[4]) {
+@@ -1796,22 +3581,41 @@ u32 aurora_backend_pad_read(DolPadState state[4]) {
              .error = status[i].err,
          };
      }
@@ -2163,7 +2174,7 @@ index d94f811..1700e16 100644
      PADSetSpec(spec);
  }
  
-@@ -1841,13 +3641,16 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1841,13 +3645,16 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
          return;
      const int bytes_per_second =
          static_cast<int>(g_audio_sample_rate) * 2 * static_cast<int>(sizeof(s16));
@@ -2182,7 +2193,7 @@ index d94f811..1700e16 100644
      while (queued > max_queued_bytes && waited_ms < 20u) {
          g_audio_throttle_count++;
          if (g_audio_queue_log &&
-@@ -1860,11 +3663,51 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1860,11 +3667,51 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
                           max_queued_bytes);
          SDL_Delay(1);
          waited_ms++;
@@ -2234,7 +2245,7 @@ index d94f811..1700e16 100644
      if (g_audio_queue_log &&
          (g_audio_push_count <= 16 || (g_audio_push_count % 4000) == 0 ||
           (low_queue && g_audio_push_count - g_audio_low_log_push >= 4000))) {
-@@ -1876,6 +3719,21 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1876,6 +3723,21 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
                       g_audio_push_count, queued, queued + bytes,
                       g_audio_playing ? 1u : 0u, g_audio_throttle_count);
      }
@@ -2256,7 +2267,7 @@ index d94f811..1700e16 100644
      if (!SDL_PutAudioStreamData(g_audio_stream, samples, bytes))
          std::fprintf(stderr, "[audio] failed to queue samples: %s\n", SDL_GetError());
      else if (!g_audio_playing && queued + bytes >= prebuffer_bytes) {
-@@ -1886,10 +3744,422 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1886,10 +3748,422 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
      }
  }
  
@@ -2679,7 +2690,7 @@ index d94f811..1700e16 100644
      const DolPlatformOps ops = {
          .should_quit = aurora_backend_should_quit,
          .present = aurora_backend_present,
-@@ -1918,6 +4188,7 @@ void install_platform_ops() {
+@@ -1918,6 +4192,7 @@ void install_platform_ops() {
          .audio_set_sample_rate = aurora_backend_audio_set_sample_rate,
          .audio_push = aurora_backend_audio_push,
      };
@@ -9140,7 +9151,7 @@ index 9c2f7bb..6dd6411 100644
 +
  #endif
 diff --git a/include/gxruntime/aurora_backend.h b/include/gxruntime/aurora_backend.h
-index 6ef4cf4..0176bc6 100644
+index 6ef4cf4..0e56f27 100644
 --- a/include/gxruntime/aurora_backend.h
 +++ b/include/gxruntime/aurora_backend.h
 @@ -5,6 +5,7 @@
@@ -9151,7 +9162,16 @@ index 6ef4cf4..0176bc6 100644
  #include <stdint.h>
  
  #ifdef __cplusplus
-@@ -26,12 +27,23 @@ bool dol_aurora_initialize(int argc, char** argv,
+@@ -20,18 +21,32 @@ typedef struct AuroraBackendConfig {
+     bool info_logging;
+     bool graphics_logging;
+     bool force_untextured;
++    // Called once ImGui exists and before its first frame: the one time a
++    // host can add fonts to ImGui's atlas (NULL: none).
++    void (*imgui_init)(void);
+ } AuroraBackendConfig;
+ 
+ bool dol_aurora_initialize(int argc, char** argv,
                             const AuroraBackendConfig* config);
  void dol_aurora_shutdown(void);
  
@@ -9175,7 +9195,7 @@ index 6ef4cf4..0176bc6 100644
  
  // C2: walk nonzero gxcore GapCounters into the process-global gap_report.
  // Call once before gap_report_write_json on the live Strikers path so
-@@ -40,6 +52,116 @@ void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user);
+@@ -40,6 +55,116 @@ void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user);
  // from shutdown (second call only bumps if counters grew).
  void dol_aurora_flush_gap_report(void);
  

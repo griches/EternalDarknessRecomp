@@ -519,6 +519,7 @@ int main(int argc, char** argv) {
         .graphics_logging = getenv("ED_GFX_LOG") != NULL,
         .force_untextured =
             getenv("ED_GFX_FORCE_UNTEXTURED") != NULL,
+        .imgui_init = frontend_imgui_init,
     };
     // --call mode runs one pure-compute function with no rendering: skip Aurora
     // init so it runs headless (no window), agent-drivable and side-effect-free.

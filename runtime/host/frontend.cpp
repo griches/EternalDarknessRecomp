@@ -11,6 +11,7 @@
 #include "host/texpack.h"
 
 #include <aurora/rmlui.hpp>
+#include <imgui.h>
 
 #include <RmlUi/Core.h>
 #include <RmlUi_Platform_SDL.h>
@@ -28,6 +29,7 @@
 #endif
 
 #include <algorithm>
+#include <cfloat>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -261,7 +263,7 @@ struct Row {
 };
 
 Rml::ElementDocument* g_doc = nullptr;
-Rml::ElementDocument* g_hud = nullptr;  // FPS counter, over the game
+ImFont* g_fps_font = nullptr;  // the FPS counter's (frontend_imgui_init)
 bool g_ui_ready = false;
 Screen g_screen = Screen::Launcher;
 Screen g_options_return = Screen::Launcher;
@@ -979,7 +981,6 @@ bool ensure_ui() {
                              "IMFellEnglishSC-Regular.ttf"})
         if (!Rml::LoadFontFace(res + "/fonts/" + font))
             std::fprintf(stderr, "[frontend] font missing: %s/fonts/%s\n", res.c_str(), font);
-    g_hud = context->LoadDocument(res + "/ui/hud.rml");
     g_doc = context->LoadDocument(res + "/ui/menu.rml");
     if (g_doc == nullptr) {
         std::fprintf(stderr, "[frontend] %s/ui/menu.rml did not load; menus disabled\n",
@@ -1105,6 +1106,18 @@ bool run_menu() {
 
 std::string frontend_res_dir() { return res_dir(); }
 
+// Before ImGui's first frame (its font atlas is locked during one): Fira Sans
+// Bold, the menus' face, baked large so the counter stays sharp at any scale.
+extern "C" void frontend_imgui_init(void) {
+    const std::string path = res_dir() + "/fonts/FiraSans-Bold.ttf";
+    struct stat st;
+    if (stat(path.c_str(), &st) != 0) {
+        std::fprintf(stderr, "[frontend] font missing: %s (FPS counter in ImGui's own)\n", path.c_str());
+        return;
+    }
+    g_fps_font = ImGui::GetIO().Fonts->AddFontFromFileTTF(path.c_str(), 64.f);
+}
+
 extern "C" void frontend_init(int argc, char** argv) {
     g_argc = argc;
     g_argv = argv;
@@ -1159,79 +1172,55 @@ extern "C" bool frontend_run_launcher(const char* default_iso, char* iso_out,
     return true;
 }
 
-// The UI context covers the game picture only, and the picture's bars move
-// from the sides to the top and bottom as the game switches between 4:3 and
-// 16:9 (the book's pages, cutscenes), so the counter jumped with them. Keep it
-// at one place on the screen: inside the corner of both a 4:3 and a 16:9
-// picture (and of any picture seen since), whichever is showing.
-void place_fps_counter() {
-    Rml::Element* fps = g_hud->GetElementById("fps");
-    Rml::Context* context = g_hud->GetContext();
-    int count = 0;
-    SDL_Window** windows = SDL_GetWindows(&count);
-    SDL_Window* window = windows != nullptr && count > 0 ? windows[0] : nullptr;
-    SDL_free(windows);
-    int ww = 0, wh = 0;
-    if (fps == nullptr || context == nullptr || window == nullptr ||
-        !SDL_GetWindowSizeInPixels(window, &ww, &wh) || ww <= 0 || wh <= 0)
-        return;
-    static int s_ww = 0, s_wh = 0, s_barX = 0, s_barY = 0, s_left = -1, s_top = -1;
-    if (ww != s_ww || wh != s_wh) {
-        s_ww = ww;
-        s_wh = wh;
-        s_barX = (ww - std::min(ww, wh * 4 / 3)) / 2;
-        s_barY = (wh - std::min(wh, ww * 9 / 16)) / 2;
-    }
-    const Rml::Vector2i dim = context->GetDimensions();
-    const int barX = std::max(0, (ww - dim.x) / 2);
-    const int barY = std::max(0, (wh - dim.y) / 2);
-    s_barX = std::max(s_barX, barX);
-    s_barY = std::max(s_barY, barY);
-    const float dp = context->GetDensityIndependentPixelRatio();
-    const int left = s_barX - barX + static_cast<int>(14.f * dp + 0.5f);
-    const int top = s_barY - barY + static_cast<int>(10.f * dp + 0.5f);
-    if (left != s_left || top != s_top) {
-        s_left = left;
-        s_top = top;
-        fps->SetProperty("left", std::to_string(left) + "px");
-        fps->SetProperty("top", std::to_string(top) + "px");
-    }
-}
-
 // On-screen frames per second (game frames, i.e. calls here), refreshed each
-// second while the FPS counter option is on.
+// second while the FPS counter option is on. Drawn through Aurora's ImGui,
+// which covers the whole screen: the RmlUi context covers only the game
+// picture, so in 4:3 (and in the game's letterboxed scenes) the counter sat
+// inside the bars, not at the screen's corner.
 void update_fps_counter() {
     static Uint64 mark = 0;
     static unsigned frames = 0;
-    static bool shown = false;
-    if (g_hud == nullptr)
-        return;
+    static int shown_fps = 0;
     if (!g_settings.fps_counter) {
-        if (shown) {
-            g_hud->Hide();
-            shown = false;
-        }
         mark = 0;
+        shown_fps = 0;
         return;
     }
-    place_fps_counter();
     const Uint64 now = SDL_GetTicksNS();
     frames++;
     if (mark == 0) {
         mark = now;
         frames = 0;
-        return;
-    }
-    if (now - mark >= 1000000000ull) {
-        const double fps = frames * 1e9 / static_cast<double>(now - mark);
-        g_hud->GetElementById("fps")->SetInnerRML(std::to_string(static_cast<int>(fps + 0.5)) + " FPS");
+    } else if (now - mark >= 1000000000ull) {
+        shown_fps = static_cast<int>(frames * 1e9 / static_cast<double>(now - mark) + 0.5);
         mark = now;
         frames = 0;
-        if (!shown) {
-            g_hud->Show(Rml::ModalFlag::None, Rml::FocusFlag::None);
-            shown = true;
-        }
     }
+    if (shown_fps <= 0 || ImGui::GetCurrentContext() == nullptr)
+        return;
+    // dp in ImGui's units (window points): the display's content scale, as the
+    // menus use (2 on a 4K PS5, 1 on a Retina Mac whose points are 2 pixels)
+    float dp = 1.f;
+    int count = 0;
+    SDL_Window** windows = SDL_GetWindows(&count);
+    if (windows != nullptr && count > 0) {
+        const float density = SDL_GetWindowPixelDensity(windows[0]);
+        const float display = SDL_GetWindowDisplayScale(windows[0]);
+        if (density > 0.f && display > 0.f)
+            dp = display / density;
+    }
+    SDL_free(windows);
+    ImFont* font = g_fps_font != nullptr ? g_fps_font : ImGui::GetFont();
+    char text[32];
+    std::snprintf(text, sizeof text, "%d FPS", shown_fps);
+    const float size = 18.f * dp;
+    const ImVec2 extent = font->CalcTextSizeA(size, FLT_MAX, 0.f, text);
+    const ImVec2 at{14.f * dp, 10.f * dp};
+    const ImVec2 pad{8.f * dp, 3.f * dp};
+    ImDrawList* draw = ImGui::GetForegroundDrawList();
+    draw->AddRectFilled(at, ImVec2{at.x + extent.x + 2.f * pad.x, at.y + extent.y + 2.f * pad.y},
+                        IM_COL32(0, 0, 0, 0x99), 4.f * dp);
+    draw->AddText(font, size, ImVec2{at.x + pad.x, at.y + pad.y}, IM_COL32(0xf0, 0xe6, 0xc8, 0xff), text);
 }
 
 extern "C" void frontend_frame(void) {

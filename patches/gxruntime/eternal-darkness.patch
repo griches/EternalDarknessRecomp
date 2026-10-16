@@ -3564,7 +3564,7 @@ index 0a23a3f..9f25bbf 100644
  // was unavailable (single-source SrcAlpha fallback). Zero when feature present.
  unsigned long long dst_alpha_fallback_count() noexcept;
 diff --git a/graphics/aurora/lib/gfx/pipeline_cache.cpp b/graphics/aurora/lib/gfx/pipeline_cache.cpp
-index 822a560..068da90 100644
+index 822a560..b44b0c0 100644
 --- a/graphics/aurora/lib/gfx/pipeline_cache.cpp
 +++ b/graphics/aurora/lib/gfx/pipeline_cache.cpp
 @@ -14,6 +14,7 @@
@@ -3575,7 +3575,22 @@ index 822a560..068da90 100644
  #include <condition_variable>
  #include <cstdlib>
  #include <deque>
-@@ -1146,9 +1147,62 @@ PipelineRef find_pipeline(ShaderType type, const rmlui::PipelineConfig& config,
+@@ -597,6 +598,14 @@ static std::string pipeline_cache_seed_path() {
+   if (path.back() != '/' && path.back() != '\\') {
+     path += '/';
+   }
++  // GXRuntime recomp patch: the game's data folder (res/) sits beside the
++  // executable, one level up (a build folder), or in the working directory.
++  for (const std::string& candidate : {path + "res/", path + "../res/", std::string{"res/"}}) {
++    std::error_code ec;
++    if (std::filesystem::exists(candidate + InitialPipelineCacheName, ec)) {
++      return candidate + InitialPipelineCacheName;
++    }
++  }
+   path += InitialPipelineCacheName;
+   return path;
+ }
+@@ -1146,9 +1155,62 @@ PipelineRef find_pipeline(ShaderType type, const rmlui::PipelineConfig& config,
  #endif
  
  #ifdef AURORA_ENABLE_GXCORE
@@ -3639,7 +3654,7 @@ index 822a560..068da90 100644
  }
  #endif
  
-@@ -1221,3 +1275,13 @@ bool get_pipeline(PipelineRef ref, wgpu::RenderPipeline& pipeline) {
+@@ -1221,3 +1283,13 @@ bool get_pipeline(PipelineRef ref, wgpu::RenderPipeline& pipeline) {
  }
  
  } // namespace aurora::gfx

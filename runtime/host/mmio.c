@@ -606,8 +606,45 @@ static void mmio_write(CPUState* cpu, u32 ea, u64 value, u8 size) {
 
 // The generated code's stores to the write-gather pipe (generated.h, when
 // dolrecomp_fast_ram bit 2 is set): straight here, not through mem_write's
-// address lookup and external_write.
+// address lookup and external_write. While the pipe feeds the GPU, with the
+// GX thread running and no FIFO dump or ED_EXP_* experiment, the value goes
+// straight into the game thread's GX queue (what gx_fifo_write_cb ends in).
 void dolrecomp_wgp_write(CPUState* cpu, u32 ea, u64 value, u8 size) {
+#ifdef ED_AURORA
+    static int direct = -1;
+    if (direct < 0)
+        direct = dol_aurora_gx_threaded() && getenv("ED_EXP_NOZ") == NULL &&
+                 getenv("ED_EXP_TEXC") == NULL;
+    if (direct && g_fifo_dump_state != 0 && g_fifo_dump == NULL &&
+        (size == 1u || size == 2u || size == 4u || size == 8u)) {
+        if (!cpu_fifo_feeds_gpu()) {
+            // A RAM target (a display list being recorded): stage the value in
+            // the 32-byte line as gx_fifo_write_cb does, a whole value at a time.
+            if (g_wg_fill + size <= 32u && g_fifo_profile_on == 0) {
+                u8* const p = g_wg_line + g_wg_fill;
+                if (size == 1u) {
+                    p[0] = (u8)value;
+                } else if (size == 2u) {
+                    const u16 v = __builtin_bswap16((u16)value);
+                    memcpy(p, &v, 2u);
+                } else if (size == 4u) {
+                    const u32 v = __builtin_bswap32((u32)value);
+                    memcpy(p, &v, 4u);
+                } else {
+                    const u64 v = __builtin_bswap64(value);
+                    memcpy(p, &v, 8u);
+                }
+                g_wg_fill += size;
+                if (g_wg_fill == 32u)
+                    wg_burst_to_ram(cpu);
+                return;
+            }
+        } else if (g_wg_fill == 0u) {
+            dol_aurora_gx_write_game(value, size);
+            return;
+        }
+    }
+#endif
     mmio_write(cpu, ea, value, size);
 }
 

@@ -1,5 +1,5 @@
 diff --git a/backends/aurora/aurora_backend.cpp b/backends/aurora/aurora_backend.cpp
-index d94f811..d2606d6 100644
+index d94f811..1700e16 100644
 --- a/backends/aurora/aurora_backend.cpp
 +++ b/backends/aurora/aurora_backend.cpp
 @@ -19,9 +19,25 @@
@@ -1705,10 +1705,10 @@ index d94f811..d2606d6 100644
 +    if (!t_game_thread) {
 +        aurora_backend_set_copy_destination_guest(guest_address, data);
 +        return;
-     }
++    }
 +    const CopyDestArgs a{data, guest_address};
 +    append(Op::CopyDest, &a, sizeof a);
- }
++}
 +
 +void set_copy_destination_op(const void* data) {
 +    set_copy_destination_guest_op(0u, data);
@@ -1720,7 +1720,7 @@ index d94f811..d2606d6 100644
 +        aurora_backend_configure_vi(tv_mode, fb_width, efb_height, xfb_height,
 +                                    vi_width, vi_height);
 +        return;
-+    }
+     }
 +    const ViArgs a{tv_mode, fb_width, efb_height, xfb_height, vi_width, vi_height};
 +    append(Op::ConfigureVi, &a, sizeof a);
 +}
@@ -1744,7 +1744,7 @@ index d94f811..d2606d6 100644
 +        append(Op::SetXfbBlack, &black, sizeof black);
 +    else
 +        aurora_backend_set_xfb_black(black);
-+}
+ }
 +
 +} // namespace gxq
  #endif
@@ -2256,7 +2256,7 @@ index d94f811..d2606d6 100644
      if (!SDL_PutAudioStreamData(g_audio_stream, samples, bytes))
          std::fprintf(stderr, "[audio] failed to queue samples: %s\n", SDL_GetError());
      else if (!g_audio_playing && queued + bytes >= prebuffer_bytes) {
-@@ -1886,10 +3744,414 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1886,10 +3744,422 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
      }
  }
  
@@ -2625,6 +2625,14 @@ index d94f811..d2606d6 100644
 +#endif
 +}
 +
++void dol_aurora_gx_write_game(uint64_t value, uint8_t size) {
++#if GXRUNTIME_HAS_AURORA_RECOMP
++    gxq::append_gx(value, size);
++#else
++    aurora_backend_gx_write(value, size);
++#endif
++}
++
 +void dol_aurora_set_frame_hook(void (*hook)(void)) {
 +#if GXRUNTIME_HAS_AURORA_RECOMP
 +    gxq::g_frame_hook = hook;
@@ -2671,7 +2679,7 @@ index d94f811..d2606d6 100644
      const DolPlatformOps ops = {
          .should_quit = aurora_backend_should_quit,
          .present = aurora_backend_present,
-@@ -1918,6 +4180,7 @@ void install_platform_ops() {
+@@ -1918,6 +4188,7 @@ void install_platform_ops() {
          .audio_set_sample_rate = aurora_backend_audio_set_sample_rate,
          .audio_push = aurora_backend_audio_push,
      };
@@ -9132,7 +9140,7 @@ index 9c2f7bb..6dd6411 100644
 +
  #endif
 diff --git a/include/gxruntime/aurora_backend.h b/include/gxruntime/aurora_backend.h
-index 6ef4cf4..0468390 100644
+index 6ef4cf4..0176bc6 100644
 --- a/include/gxruntime/aurora_backend.h
 +++ b/include/gxruntime/aurora_backend.h
 @@ -5,6 +5,7 @@
@@ -9167,7 +9175,7 @@ index 6ef4cf4..0468390 100644
  
  // C2: walk nonzero gxcore GapCounters into the process-global gap_report.
  // Call once before gap_report_write_json on the live Strikers path so
-@@ -40,6 +52,112 @@ void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user);
+@@ -40,6 +52,116 @@ void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user);
  // from shutdown (second call only bumps if counters grew).
  void dol_aurora_flush_gap_report(void);
  
@@ -9211,6 +9219,10 @@ index 6ef4cf4..0468390 100644
 +int dol_aurora_run_game(int (*game)(void*), void* arg);
 +// True while the game runs on its own thread.
 +bool dol_aurora_gx_threaded(void);
++// A GX FIFO write from the game thread while dol_aurora_gx_threaded(): queued
++// directly, without the platform op's indirect call and thread check (size 1,
++// 2, 4 or 8).
++void dol_aurora_gx_write_game(uint64_t value, uint8_t size);
 +// Each VI retrace the game sees (game thread): frames are paced from it.
 +void dol_aurora_note_retrace(void);
 +// Called on the main thread after each frame the game thread presents (the

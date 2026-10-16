@@ -4714,6 +4714,11 @@ u32 dolrecomp_chain_stop_base;
 u32 dolrecomp_chain_stop_count;
 u32 dolrecomp_chain_budget;  // shared by nested chunk calls (generated.h)
 u32 dolrecomp_call_depth;
+// The same table as one byte per word of MEM1, nonzero where a branch may
+// chain, for chunks built with DOLRECOMP_STATIC_CPU (a constant target is one
+// byte test). Only the HLE code range is ever written; the rest stays zero.
+#define CHAIN_TABLE_SIZE 0x600000u  // generated.h DOLRECOMP_CHAIN_TABLE_SIZE
+u8 dolrecomp_chain_table[CHAIN_TABLE_SIZE];
 
 static void chain_stop_at(u32 address) {
     if (address >= HLE_CODE_BASE && address < HLE_CODE_LIMIT)
@@ -4730,6 +4735,8 @@ static void publish_codegen_options(void) {
     dolrecomp_fast_ram = getenv("ED_NO_FASTMEM") != NULL ? 0u
                          : getenv("ED_STORE_WATCH") != NULL ? 5u : 7u;
     dolrecomp_chain_stop = NULL;
+    u8* const chain_ok = &dolrecomp_chain_table[(HLE_CODE_BASE - 0x80000000u) / 4u];
+    memset(chain_ok, 0, HLE_DISPATCH_COUNT);
     if (getenv("ED_NO_CHAIN") != NULL || g_hle_log)
         return;
     for (u32 i = 0; i < HLE_DISPATCH_COUNT; i++)
@@ -4743,6 +4750,8 @@ static void publish_codegen_options(void) {
     dolrecomp_chain_stop_base = HLE_CODE_BASE;
     dolrecomp_chain_stop_count = HLE_DISPATCH_COUNT;
     dolrecomp_chain_stop = g_chain_stop;
+    for (u32 i = 0; i < HLE_DISPATCH_COUNT; i++)
+        chain_ok[i] = g_chain_stop[i] == 0u;
 }
 
 // MSL's memcpy, memset and a forward byte copy sit at the start of text in this

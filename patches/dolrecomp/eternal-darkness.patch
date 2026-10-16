@@ -71,7 +71,7 @@ index 83314bb..0eac038 100644
      fprintf(out, "    DolRecompFunction fn = dolrecomp_find_original(address);\n");
      fprintf(out, "    if (!fn) return 0;\n");
 diff --git a/src/backend/emitter.c b/src/backend/emitter.c
-index 4868b4c..60b085d 100644
+index 4868b4c..fd3689e 100644
 --- a/src/backend/emitter.c
 +++ b/src/backend/emitter.c
 @@ -37,6 +37,19 @@ static void emit_set_cr1_from_fpscr(FILE* out) {
@@ -281,20 +281,35 @@ index 4868b4c..60b085d 100644
  void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
      fprintf(out,
          "// DolRecomp output\n"
-@@ -439,10 +594,309 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
+@@ -439,10 +594,329 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
          "    return dolrecomp_f32_to_bits((f32)value);\n"
          "}\n"
          "\n"
++        "/* DOLRECOMP_STATIC_CPU: the host's globals are linked into the same image\n"
++        " * as the chunks, so chunk code addresses them directly (no GOT). */\n"
++        "#if defined(DOLRECOMP_CHUNK) && defined(DOLRECOMP_STATIC_CPU) && \\\n"
++        "    (defined(__GNUC__) || defined(__clang__))\n"
++        "#define DOLRECOMP_HIDDEN __attribute__((visibility(\"hidden\")))\n"
++        "#else\n"
++        "#define DOLRECOMP_HIDDEN\n"
++        "#endif\n"
++        "\n"
 +        "/* Block chaining (cpu.h): how many branches a chunk may take before it\n"
 +        " * returns to the host's dispatch loop, and whether a target may chain. */\n"
 +        "extern const u8* dolrecomp_chain_stop;\n"
 +        "extern u32 dolrecomp_chain_stop_base;\n"
 +        "extern u32 dolrecomp_chain_stop_count;\n"
++        "/* With DOLRECOMP_STATIC_CPU the host also keeps dolrecomp_chain_table, one\n"
++        " * byte per instruction word of MEM1 (0x80000000, DOLRECOMP_CHAIN_TABLE_SIZE\n"
++        " * entries): nonzero where a branch may chain, zero elsewhere and while\n"
++        " * chaining is off. A branch to a constant target is then one byte test. */\n"
++        "#define DOLRECOMP_CHAIN_TABLE_SIZE 0x600000u\n"
++        "extern DOLRECOMP_HIDDEN u8 dolrecomp_chain_table[DOLRECOMP_CHAIN_TABLE_SIZE];\n"
 +        "/* The branch budget is shared by the chunks one dispatch-loop visit runs\n"
 +        " * (a chunk entered at depth 0 refills it), and calls into another chunk nest\n"
 +        " * as C calls up to DOLRECOMP_MAX_CALL_DEPTH. */\n"
-+        "extern u32 dolrecomp_chain_budget;\n"
-+        "extern u32 dolrecomp_call_depth;\n"
++        "extern DOLRECOMP_HIDDEN u32 dolrecomp_chain_budget;\n"
++        "extern DOLRECOMP_HIDDEN u32 dolrecomp_call_depth;\n"
 +        "\n"
 +        "#ifndef DOLRECOMP_CHAIN_BUDGET\n"
 +        "#define DOLRECOMP_CHAIN_BUDGET 1024u\n"
@@ -304,9 +319,14 @@ index 4868b4c..60b085d 100644
 +        "#endif\n"
 +        "\n"
 +        "static inline int dolrecomp_can_chain(u32 target) {\n"
++        "#if defined(DOLRECOMP_CHUNK) && defined(DOLRECOMP_STATIC_CPU)\n"
++        "    const u32 i = (target - 0x80000000u) >> 2;\n"
++        "    return i < DOLRECOMP_CHAIN_TABLE_SIZE && dolrecomp_chain_table[i] != 0u;\n"
++        "#else\n"
 +        "    const u32 i = (target - dolrecomp_chain_stop_base) >> 2;\n"
 +        "    return dolrecomp_chain_stop != NULL && i < dolrecomp_chain_stop_count &&\n"
 +        "           dolrecomp_chain_stop[i] == 0u;\n"
++        "#endif\n"
 +        "}\n"
 +        "\n"
 +        "#define DOLRECOMP_CHAIN(target) \\\n"
@@ -547,7 +567,7 @@ index 4868b4c..60b085d 100644
 +    fprintf(out, "#define DOLRECOMP_CTX(arg) (arg)\n");
 +    fprintf(out, "#endif\n\n");
 +    fprintf(out, "#if defined(DOLRECOMP_CHUNK) && !defined(DOLRECOMP_NO_FAST_RAM)\n");
-+    fprintf(out, "extern u8 dolrecomp_fast_ram;\n");
++    fprintf(out, "extern DOLRECOMP_HIDDEN u8 dolrecomp_fast_ram;\n");
 +    fprintf(out, "void dolrecomp_wgp_write(CPUState* ctx, u32 ea, u64 value, u8 size);\n");
 +    /* MEM1's size is fixed (cpu_init), so the bound is a constant. */
 +    fprintf(out, "#ifdef GC_MAIN_RAM_SIZE\n#define DOLRECOMP_RAM_SIZE ((u32)GC_MAIN_RAM_SIZE)\n");
@@ -591,7 +611,7 @@ index 4868b4c..60b085d 100644
  }
  
  void emit_header(FILE* out) {
-@@ -456,6 +910,7 @@ void emit_footer(FILE* out) {
+@@ -456,6 +930,7 @@ void emit_footer(FILE* out) {
  static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
                                          u32 func_start, u32 func_end) {
      char disasm[64];
@@ -599,7 +619,7 @@ index 4868b4c..60b085d 100644
      ppc_disasm(disasm, sizeof(disasm), inst);
      fprintf(out, "    // %08X: %s\n", inst->address, disasm);
  
-@@ -465,7 +920,8 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+@@ -465,7 +940,8 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
      }
  
      if (ppc_op_uses_fpu(inst->op))
@@ -609,7 +629,7 @@ index 4868b4c..60b085d 100644
  
      switch (inst->op) {
      case PPC_OP_MULLI:
-@@ -937,23 +1393,27 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+@@ -937,23 +1413,27 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
          break;
  
      case PPC_OP_FADDS:
@@ -645,7 +665,7 @@ index 4868b4c..60b085d 100644
          break;
  
      case PPC_OP_FRES:
-@@ -1047,7 +1507,8 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+@@ -1047,7 +1527,8 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
          break;
  
      case PPC_OP_FRSP:
@@ -655,7 +675,7 @@ index 4868b4c..60b085d 100644
          break;
  
      case PPC_OP_FSEL:
-@@ -1222,76 +1683,68 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+@@ -1222,76 +1703,68 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
          if (inst->rc) emit_set_cr1_from_fpscr(out);
          break;
  
@@ -766,7 +786,7 @@ index 4868b4c..60b085d 100644
          break;
  
      case PPC_OP_PS_CMPU0:
-@@ -1539,7 +1992,8 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+@@ -1539,7 +2012,8 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
      case PPC_OP_B:
          fprintf(out, "    {\n");
          emit_direct_branch(out, inst,
@@ -776,7 +796,7 @@ index 4868b4c..60b085d 100644
          fprintf(out, "    }\n");
          break;
  
-@@ -1548,17 +2002,18 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+@@ -1548,17 +2022,18 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
          emit_branch_condition(out, inst->bo, inst->bi);
          fprintf(out, "        if (ctr_ok && cr_ok) {\n");
          emit_direct_branch(out, inst,
@@ -798,7 +818,7 @@ index 4868b4c..60b085d 100644
          break;
  
      case PPC_OP_TWI:
-@@ -1881,13 +2336,12 @@ static u32 inst_cycle_cost(const PPCInst* inst) {
+@@ -1881,13 +2356,12 @@ static u32 inst_cycle_cost(const PPCInst* inst) {
      }
  }
  
@@ -817,7 +837,7 @@ index 4868b4c..60b085d 100644
      if (count)
          leader[0] = 1;
      for (i = 0; i < count; i++) {
-@@ -1914,8 +2368,77 @@ void emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
+@@ -1914,8 +2388,77 @@ void emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
                  break;
          }
      }
@@ -896,7 +916,7 @@ index 4868b4c..60b085d 100644
      fprintf(out, "    switch (ctx->pc) {\n");
      for (i = 0; i < count; i++) {
          fprintf(out, "    case 0x%08Xu: goto label_%08X;\n",
-@@ -1924,16 +2447,45 @@ void emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
+@@ -1924,16 +2467,45 @@ void emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
      fprintf(out, "    default: return;\n");
      fprintf(out, "    }\n");
  

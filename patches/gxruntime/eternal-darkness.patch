@@ -5195,10 +5195,15 @@ index 7aff76e..7c19543 100644
                .height = size.native_fb_height,
                .presentMode = presentMode,
 diff --git a/graphics/aurora/lib/webgpu/gpu_cache.cpp b/graphics/aurora/lib/webgpu/gpu_cache.cpp
-index acfa041..75ac357 100644
+index acfa041..053f821 100644
 --- a/graphics/aurora/lib/webgpu/gpu_cache.cpp
 +++ b/graphics/aurora/lib/webgpu/gpu_cache.cpp
-@@ -87,6 +87,7 @@ CREATE TABLE cache (
+@@ -1,3 +1,4 @@
++#include <cstdlib>
+ #include <cstring>
+ #include <cstdint>
+ #include <mutex>
+@@ -87,6 +88,7 @@ CREATE TABLE cache (
    compressed INTEGER NOT NULL
  );
  DELETE FROM aurora_schema;
@@ -5206,7 +5211,7 @@ index acfa041..75ac357 100644
  INSERT INTO aurora_schema VALUES ({});)",
        CACHE_SCHEMA);
    ret = sqlite::exec(db, cmd.c_str());
-@@ -99,6 +100,64 @@ INSERT INTO aurora_schema VALUES ({});)",
+@@ -99,6 +101,64 @@ INSERT INTO aurora_schema VALUES ({});)",
    return true;
  }
  
@@ -5271,7 +5276,7 @@ index acfa041..75ac357 100644
  static bool cache_init_core() {
    Log.debug("SQLite version {}", sqlite3_libversion());
  
-@@ -121,6 +180,7 @@ static bool cache_init_core() {
+@@ -121,6 +181,7 @@ static bool cache_init_core() {
      Log.error("Failed to validate schema");
      return false;
    }
@@ -5279,6 +5284,21 @@ index acfa041..75ac357 100644
  
    ret = sqlite3_prepare_v3(db, "SELECT value, size, compressed FROM cache WHERE key = ?", -1, SQLITE_PREPARE_PERSISTENT,
                             &load_stmt, nullptr);
+@@ -355,6 +416,14 @@ void store_to_cache(void const* key, size_t keySize, void const* value, size_t v
+ }
+ 
+ void cache_prune() {
++  // GXRuntime recomp patch: a timing run (AURORA_GPU_TIME_LOG) asks for the
++  // timestamp-query feature, which changes every Dawn cache key. Pruning to
++  // its keys deleted the normal ones, so the next normal start recompiled every
++  // pipeline before boot (70 s on the Steam Deck). Keep both sets.
++  if (std::getenv("AURORA_GPU_TIME_LOG") != nullptr) {
++    Log.info("Skipping Dawn cache prune in a timing run (AURORA_GPU_TIME_LOG)");
++    return;
++  }
+   std::lock_guard lock(cache_mutex);
+   if (!cache_init()) {
+     return;
 diff --git a/graphics/aurora/lib/webgpu/gpu_prof.cpp b/graphics/aurora/lib/webgpu/gpu_prof.cpp
 index c8c9549..6c5eab0 100644
 --- a/graphics/aurora/lib/webgpu/gpu_prof.cpp

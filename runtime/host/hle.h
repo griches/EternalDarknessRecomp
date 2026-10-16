@@ -41,6 +41,9 @@ bool hle_poll_callback(CPUState* cpu);
 size_t hle_state_size(void);
 void hle_state_save(void* out);
 void hle_state_load(const void* in);
+// After a quick load, with guest memory in place: repairs a loaded game that
+// an older build left stuck (disc streams waiting on a read that never comes).
+void hle_state_loaded(CPUState* cpu);
 size_t hle_gx_state_size(void);
 void hle_gx_state_save(void* out);
 void hle_gx_state_load(const void* in);

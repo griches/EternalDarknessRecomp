@@ -171,6 +171,10 @@ static void sync_si_interrupt(void) {
                               dol_si_interrupt_pending(&si));
 }
 
+bool interrupt_wall_clock(void) {
+    return wall_clock;
+}
+
 void interrupt_init(void) {
     dol_interrupts_init(&interrupts);
     dol_si_init(&si);

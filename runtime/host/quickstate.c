@@ -639,6 +639,7 @@ static bool load_state(CPUState* cpu, const char* path) {
             continue;  // nothing of this kind in this build
         k_blobs[i].load(s != NULL ? s->data : NULL);
     }
+    hle_state_loaded(cpu);
 #ifdef ED_AURORA
     // A state without GPU registers (saved headless) keeps the decoder as is:
     // stale, but better than a decoder that knows no vertex formats at all.

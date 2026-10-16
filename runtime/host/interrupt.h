@@ -14,6 +14,9 @@
 // low memory (which the recompiler has no block for).
 
 void interrupt_init(void);
+// True when retraces follow the wall clock (the windowed build), false when
+// they are counted in blocks (headless, ED_FRAME_BLOCKS).
+bool interrupt_wall_clock(void);
 
 // MMIO delegation for the runtime-owned PI/VI/PE interrupt and SI device models.
 bool interrupt_mmio_contains(u32 ea);

@@ -411,6 +411,37 @@ static bool g_callback_active;
 static HleSavedContext g_callback_context;
 static DolMemoryCard* g_memory_card;
 
+// A host DVD read is done the moment it is asked for, but its completion
+// callback waits a little, as a drive's would. Eternal Darkness's disc streams
+// (voices, effects) call DVDReadAsyncPrio and only then mark the read in
+// flight; the callback clears the mark. Run on the call's return, before that
+// store, it left the mark set for good: the stream never read again (its
+// buffer replayed, a door's sound repeating) and never closed (picking up a
+// book waited for it forever). A callback is due once the guest has moved on
+// (dispatch-loop visits: a host stall in that window adds none) and some real
+// time has passed (a retrace taken in the window runs its handler's visits).
+// Block-paced runs count visits only. Not in the quick state: after a load
+// every queued callback waits again (hle_state_load).
+#define DVD_CALLBACK_WALL_NS 2000000ull
+#define DVD_CALLBACK_VISITS 64u
+#define DVD_CALLBACK_BLOCK_VISITS 4096u
+static u64 g_callback_due_visit[HLE_CALLBACK_QUEUE_CAPACITY];
+static u64 g_callback_due_ns[HLE_CALLBACK_QUEUE_CAPACITY];
+static u64 g_callback_visits;
+
+static u64 host_ns(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (u64)now.tv_sec * 1000000000ull + (u64)now.tv_nsec;
+}
+
+static void delay_callback(u32 index) {
+    const bool wall = interrupt_wall_clock();
+    g_callback_due_visit[index] =
+        g_callback_visits + (wall ? DVD_CALLBACK_VISITS : DVD_CALLBACK_BLOCK_VISITS);
+    g_callback_due_ns[index] = wall ? host_ns() + DVD_CALLBACK_WALL_NS : 0u;
+}
+
 static void save_callback_context(HleSavedContext* saved,
                                   const CPUState* cpu) {
     memcpy(saved->gpr, cpu->gpr, sizeof saved->gpr);
@@ -463,7 +494,8 @@ static void restore_callback_context(CPUState* cpu,
     cpu->reserve_valid = saved->reserve_valid;
 }
 
-static bool queue_guest_callback(u32 address, s32 channel, s32 result) {
+static bool queue_guest_callback_after(u32 address, s32 channel, s32 result,
+                                       bool delayed) {
     if (address == 0)
         return true;
     if (g_callback_count == HLE_CALLBACK_QUEUE_CAPACITY) {
@@ -475,6 +507,10 @@ static bool queue_guest_callback(u32 address, s32 channel, s32 result) {
     g_callback_queue[index].address = address;
     g_callback_queue[index].channel = channel;
     g_callback_queue[index].result = result;
+    g_callback_due_visit[index] = 0;
+    g_callback_due_ns[index] = 0;
+    if (delayed)
+        delay_callback(index);
     g_callback_count++;
     if (g_card_log)
         fprintf(stderr,
@@ -483,11 +519,22 @@ static bool queue_guest_callback(u32 address, s32 channel, s32 result) {
     return true;
 }
 
+static bool queue_guest_callback(u32 address, s32 channel, s32 result) {
+    return queue_guest_callback_after(address, channel, result, false);
+}
+
 // A completion callback runs the way the SDK's interrupt dispatcher runs device
 // handlers (__OSDispatchInterrupt): from an exception context with the scheduler
 // held off, then OSEnableScheduler, __OSReschedule and OSLoadContext. A callback
 // that wakes a thread (OSSendMessage from a DVD completion, say) therefore
 // switches threads only once it has finished, never from inside the call.
+// When __OSReschedule does switch, the frame is gone for good, as on the
+// hardware: SelectThread does not save an exception context (its thread later
+// resumes where the callback interrupted it), and from the idle loop there is
+// no thread to save. So the callback is over once __OSReschedule starts; the
+// stage alone recognises a return from it. Left waiting for that return, every
+// later callback queued behind it (a DVD read finishing while the game idled
+// woke the main thread, and the book's movie never got its next read).
 static struct {
     u32 stage;
     u32 context;
@@ -513,6 +560,7 @@ static void continue_irq_callback(CPUState* cpu) {
     case 3:
         cpu->pc = sdk_symbol_address("__OSReschedule");
         cpu->lr = HLE_CALLBACK_RETURN;
+        g_callback_active = false;  // EE stays off until it returns or switches
         break;
     default:
         cpu->gpr[3] = g_irq_callback.context;
@@ -524,9 +572,14 @@ static void continue_irq_callback(CPUState* cpu) {
 }
 
 bool hle_poll_callback(CPUState* cpu) {
+    g_callback_visits++;
     if (cpu == NULL || g_callback_active || g_callback_count == 0 ||
         !(cpu->msr & 0x8000u))  // MSR[EE]: only where an interrupt could land
         return false;
+    if (g_callback_visits < g_callback_due_visit[g_callback_read] ||
+        (g_callback_due_ns[g_callback_read] != 0u &&
+         host_ns() < g_callback_due_ns[g_callback_read]))
+        return false;  // a DVD read not yet "in" (see DVD_CALLBACK_WALL_NS)
     const u32 context = interrupt_enter_exception(cpu);
     if (context == 0)
         return false;
@@ -972,7 +1025,7 @@ static void hle_DVDOpen(CPUState* cpu) {
 // caller's poll loop (DVDGetCommandBlockStatus) then sees DVD_STATE_END.
 // Every host DVD operation finishes at once: mark the block done and run the
 // completion callback, callback(s32 result, DVDCommandBlock* block), the way the
-// driver's interrupt path would.
+// driver's interrupt path would, a moment later (DVD_CALLBACK_WALL_NS).
 static void dvd_complete(CPUState* cpu, u32 block, u32 callback, s32 result,
                          u32 transferred) {
     if (block) {
@@ -980,7 +1033,7 @@ static void dvd_complete(CPUState* cpu, u32 block, u32 callback, s32 result,
         mem_write32(cpu, block + DVD_CB_CURRXFER, transferred);
         mem_write32(cpu, block + DVD_CB_XFERRED, transferred);
     }
-    queue_guest_callback(callback, result, (s32)block);
+    queue_guest_callback_after(callback, result, (s32)block, true);
 }
 
 static void hle_DVDReadAsyncPrio(CPUState* cpu) {
@@ -4391,7 +4444,7 @@ void hle_frame_boundary(void) {
 #endif
 
 static bool hle_dispatch(CPUState* cpu, u32 address) {
-    if (address == HLE_CALLBACK_RETURN && g_callback_active) {
+    if (address == HLE_CALLBACK_RETURN && g_irq_callback.stage != 0u) {
         continue_irq_callback(cpu);
         return true;
     }
@@ -4798,6 +4851,49 @@ static void install_xfb_reader_sync(CPUState* cpu) {
     entry->notify = hle_xfb_reader_notify;
 }
 
+static bool callback_pending(u32 address, s32 result) {
+    if (g_callback_active && g_irq_callback.pending.address == address &&
+        g_irq_callback.pending.result == result)
+        return true;
+    for (u32 i = 0; i < g_callback_count; i++) {
+        const HlePendingCallback* c =
+            &g_callback_queue[(g_callback_read + i) % HLE_CALLBACK_QUEUE_CAPACITY];
+        if (c->address == address && c->result == result)
+            return true;
+    }
+    return false;
+}
+
+// The disc stream slots of DVD_CALLBACK_WALL_NS: three of 132 bytes, each with
+// its DVDFileInfo at +20, "read in flight" at +116 and "close once the read is
+// in" at +120; the read's callback finds its slot by the file info. States
+// saved before reads waited for their callbacks hold slots marked in flight
+// with no read anywhere. Clear the mark: the slot reads again, or closes.
+static void unstick_disc_streams(CPUState* cpu) {
+    const bool pal = strcmp(ED_GAME_ID, "GEDP01") == 0;
+    const u32 callback = pal ? 0x801A294Cu : 0x801AE6B0u;
+    const u32 slots = pal ? 0x805DB410u : 0x8060B430u;
+    // The callback's start, ending in lis/addi of the slot table.
+    const u32 head[] = {0x9421FFF0u, 0x7C0802A6u, 0x90010014u, 0x93E1000Cu, 0x38A00000u,
+                        0x3C600000u | ((slots + 0x8000u) >> 16),
+                        0x38630000u | (slots & 0xFFFFu)};
+    if (!code_matches(cpu, callback, head, 7))
+        return;
+    for (u32 i = 0; i < 3u; i++) {
+        const u32 slot = slots + i * 132u;
+        if (mem_read8(cpu, slot) == 0u || mem_read32(cpu, slot + 116u) == 0u ||
+            callback_pending(callback, (s32)(slot + 20u)))
+            continue;
+        mem_write32(cpu, slot + 116u, 0u);
+        fprintf(stderr, "[hle] disc stream %u: cleared a stuck read (state from an older build)\n",
+                i);
+    }
+}
+
+void hle_state_loaded(CPUState* cpu) {
+    unstick_disc_streams(cpu);
+}
+
 void hle_install(CPUState* cpu) {
     g_hle_log = getenv("ED_HLE_LOG") != NULL;
     g_dvd_log = g_hle_log || getenv("ED_DVD_LOG") != NULL;
@@ -4945,7 +5041,11 @@ void hle_state_load(const void* in) {
     g_callback_count = s.callback_count <= HLE_CALLBACK_QUEUE_CAPACITY
                            ? s.callback_count
                            : 0u;
-    g_callback_active = s.callback_active;
+    for (u32 i = 0; i < HLE_CALLBACK_QUEUE_CAPACITY; i++)
+        delay_callback(i);
+    // Stage 4 is inside __OSReschedule: over (see g_irq_callback), though
+    // older builds saved it as still running.
+    g_callback_active = s.callback_active && s.irq_stage < 4u;
     memcpy(&g_callback_context, &s.callback_context, sizeof g_callback_context);
     g_irq_callback.stage = s.irq_stage;
     g_irq_callback.context = s.irq_context;

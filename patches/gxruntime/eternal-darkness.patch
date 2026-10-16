@@ -3138,10 +3138,19 @@ index b09ef4d..072845a 100644
 +  }
 +}
 diff --git a/graphics/aurora/lib/gfx/common.cpp b/graphics/aurora/lib/gfx/common.cpp
-index a64dd2d..6e67988 100644
+index a64dd2d..1161ecf 100644
 --- a/graphics/aurora/lib/gfx/common.cpp
 +++ b/graphics/aurora/lib/gfx/common.cpp
-@@ -652,6 +652,26 @@ gx::DrawData* get_last_draw_command() {
+@@ -338,6 +338,8 @@ static void wait_for_gpu_progress(std::chrono::nanoseconds sleepDuration) {
+   std::this_thread::sleep_for(sleepDuration);
+ }
+ 
++void pump_gpu_events(uint32_t us) noexcept { wait_for_gpu_progress(std::chrono::microseconds{us}); }
++
+ static void pace_frame_start() {
+   ZoneScopedN("Frame start pacing");
+   if (g_frameSlots.free_count() == FrameSlotCount) {
+@@ -652,6 +654,26 @@ gx::DrawData* get_last_draw_command() {
    return &last.data.draw.gx;
  }
  
@@ -3168,6 +3177,21 @@ index a64dd2d..6e67988 100644
  static void push_draw_command(ShaderDrawCommand data) {
    push_command(CommandType::Draw, Command::Data{.draw = data});
    ++g_drawCallCount;
+diff --git a/graphics/aurora/lib/gfx/common.hpp b/graphics/aurora/lib/gfx/common.hpp
+index 37acf2b..3e9f28f 100644
+--- a/graphics/aurora/lib/gfx/common.hpp
++++ b/graphics/aurora/lib/gfx/common.hpp
+@@ -254,6 +254,10 @@ bool begin_frame();
+ void finish();
+ void end_frame(EndFrameCallback callback);
+ uint32_t current_frame() noexcept;
++// GXRuntime recomp patch: for a thread waiting on a readback between frames
++// (the game reading an XFB back): has the render worker process Dawn's events
++// if it is idle, so a buffer map can complete, then sleeps for us microseconds.
++void pump_gpu_events(uint32_t us) noexcept;
+ void render_pass(const wgpu::RenderPassEncoder& pass, uint32_t idx);
+ void after_submit() noexcept;
+ void gpu_synchronize();
 diff --git a/graphics/aurora/lib/gfx/efb_readback.cpp b/graphics/aurora/lib/gfx/efb_readback.cpp
 index 7af8fca..4c14e34 100644
 --- a/graphics/aurora/lib/gfx/efb_readback.cpp
@@ -3206,7 +3230,7 @@ index 7af8fca..4c14e34 100644
      g_requested.store(false, std::memory_order_release);
    else
 diff --git a/graphics/aurora/lib/gfx/gxcore_draw.cpp b/graphics/aurora/lib/gfx/gxcore_draw.cpp
-index 71136b9..1c397cb 100644
+index 71136b9..89ddf00 100644
 --- a/graphics/aurora/lib/gfx/gxcore_draw.cpp
 +++ b/graphics/aurora/lib/gfx/gxcore_draw.cpp
 @@ -1,4 +1,7 @@
@@ -3404,7 +3428,7 @@ index 71136b9..1c397cb 100644
  static unsigned long long g_xfb_display_copy_count = 0;
  static unsigned long long g_xfb_ram_present_count = 0;
  
-@@ -277,17 +419,87 @@ unsigned long long xfb_display_copy_count() noexcept {
+@@ -277,17 +419,98 @@ unsigned long long xfb_display_copy_count() noexcept {
    return g_xfb_display_copy_count;
  }
  
@@ -3459,11 +3483,22 @@ index 71136b9..1c397cb 100644
 +
 +int xfb_ram_wait_write(uint32_t dest, unsigned long long copy, unsigned timeout_ms) noexcept {
 +  const auto start = std::chrono::steady_clock::now();
-+  std::unique_lock lock{g_xfbRamMutex};
-+  const bool got = g_xfbRamStored.wait_for(lock, std::chrono::milliseconds(timeout_ms), [&] {
++  const auto deadline = start + std::chrono::milliseconds(timeout_ms);
++  const auto stored = [&] {
 +    const auto it = g_xfbRamImages.find(dest);
 +    return it != g_xfbRamImages.end() && it->second.target.copy >= copy;
-+  });
++  };
++  // The readback's buffer map completes when Dawn's events are processed,
++  // which happens as frames end; the game, waiting here, ends none, so the
++  // wait timed out and the photo was an older (black) frame. Pump them.
++  std::unique_lock lock{g_xfbRamMutex};
++  bool got = stored();
++  while (!got && std::chrono::steady_clock::now() < deadline) {
++    lock.unlock();
++    gfx::pump_gpu_events(0);
++    lock.lock();
++    got = g_xfbRamStored.wait_for(lock, std::chrono::microseconds(250), stored);
++  }
 +  const auto it = g_xfbRamImages.find(dest);
 +  if (it != g_xfbRamImages.end())
 +    write_xfb_ram_locked(dest, it->second);  // the newest there is, at worst
@@ -3494,7 +3529,7 @@ index 71136b9..1c397cb 100644
      return &it->second;
  
    const auto dims = aurora::vi::configured_xfb_size();
-@@ -345,6 +557,11 @@ const TextureHandle* lookup_xfb_texture(std::uint32_t physical_address) noexcept
+@@ -345,6 +568,11 @@ const TextureHandle* lookup_xfb_texture(std::uint32_t physical_address) noexcept
    return &slot.handle;
  }
  
@@ -3506,7 +3541,7 @@ index 71136b9..1c397cb 100644
  wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
    const gxc::PipelineKey& key = config.key;
    const std::string wgsl = gxc::generate_wgsl(key.shader);
-@@ -368,7 +585,7 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -368,7 +596,7 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
    const uint32_t tex_mask = textured ? gxc::used_texmap_mask(key.shader) : 1u;
    std::array<wgpu::BindGroupLayout, 4> bindGroupLayouts{
        g_staticBindGroupLayout,
@@ -3515,7 +3550,7 @@ index 71136b9..1c397cb 100644
        tev ? g_uniformBindGroupLayout : texture_bind_group_layout(tex_mask),
        texture_bind_group_layout(tex_mask),
    };
-@@ -427,7 +644,13 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -427,7 +655,13 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
    // vertex FORMAT carries that attribute. A lit/emboss draw whose format omits
    // it reads the cached fallback from the uniform instead (I_CACHED_NORMAL), so
    // the shader does not declare the input and the layout must not provide it.
@@ -3530,7 +3565,7 @@ index 71136b9..1c397cb 100644
        key.shader.has_vertex_normal != 0) {
      attributes.push_back(wgpu::VertexAttribute{
          .format = wgpu::VertexFormat::Float32x3,
-@@ -442,14 +665,14 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -442,14 +676,14 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
          .shaderLocation = 13,
      });
    }
@@ -3547,7 +3582,7 @@ index 71136b9..1c397cb 100644
      attributes.push_back(wgpu::VertexAttribute{
          .format = wgpu::VertexFormat::Float32x3,
          .offset = gxc::kVertexTangentOffset,
-@@ -536,6 +759,10 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -536,6 +770,10 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
    default:
      break; // None here; All was skipped at plan time
    }
@@ -3558,7 +3593,7 @@ index 71136b9..1c397cb 100644
  
    const wgpu::RenderPipelineDescriptor descriptor{
        .label = "GXCore Pipeline",
-@@ -566,10 +793,22 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -566,10 +804,22 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
  
  void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
    if (!bind_pipeline(data.pipeline, pass)) {
@@ -3583,7 +3618,7 @@ index 71136b9..1c397cb 100644
    if (data.tev) {
      // group 2 = PS uniform (same dynamic-uniform bind group, its own offset);
      // group 3 = texture.
-@@ -591,14 +830,26 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
+@@ -591,14 +841,26 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
  
  void reset_texture_cache() {
    g_textureCache.clear();
@@ -3610,7 +3645,7 @@ index 71136b9..1c397cb 100644
  }
  
  const TextureCacheStats& texture_cache_stats() { return g_textureCacheStats; }
-@@ -612,6 +863,8 @@ const TextureCacheStats& texture_cache_stats() { return g_textureCacheStats; }
+@@ -612,6 +874,8 @@ const TextureCacheStats& texture_cache_stats() { return g_textureCacheStats; }
  // color/Z afterwards. The bound draw's geometry is already in the pass (the
  // sink flushed the pending draw before firing this).
  void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
@@ -3619,7 +3654,34 @@ index 71136b9..1c397cb 100644
    // Mirror the copy-clear color/Z (BP 0x4F-0x51 at this copy) into the gx
    // state GXSetCopyClear would have written: begin_frame's pass-0 EFB clear
    // reads g_gxState.clearColor/clearDepth, and in gxcore mode the live gx
-@@ -660,8 +913,9 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -635,11 +899,25 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+   const auto fmt = is_xfb ? GX_TF_RGBA8 : static_cast<GXTexFmt>(cmd.format);
+   // Dual dims: EFB source rect stays cmd.height; XFB dest height from
+   // byte_size/stride (or cmd.xfb_height if gxcore latched it).
++  // A PAL game's NTSC-sized screen copy: a 640x480 texture copy from the top
++  // of a 528-line EFB, which the game then draws over the whole screen
++  // (Eternal Darkness's sepia photo of the live scene in the prologue's book).
++  // On the GameCube that stretches the top 480 lines by 1.1 and Alex drops
++  // out of line with the photo; copy all 528 lines instead, so the full-screen
++  // draw shows the scene where it was. DOL_PAL_COPY_480=1 copies 480 lines.
++  uint32_t srcHeight = cmd.height;
++  {
++    static const bool keep480 = std::getenv("DOL_PAL_COPY_480") != nullptr;
++    const auto [fbW, fbH] = gx::logical_fb_size();
++    if (!is_xfb && !keep480 && cmd.src_x == 0u && cmd.src_y == 0u && cmd.width == fbW &&
++        cmd.height == 480u && fbH == 528u)
++      srcHeight = fbH;
++  }
+   const gfx::ClipRect srcRect = gx::map_logical_scissor(gfx::ClipRect{
+       .x = static_cast<int32_t>(cmd.src_x),
+       .y = static_cast<int32_t>(cmd.src_y),
+       .width = static_cast<int32_t>(cmd.width),
+-      .height = static_cast<int32_t>(cmd.height),
++      .height = static_cast<int32_t>(srcHeight),
+   });
+   // U8: half_scale halves destination dims (TextureEncoder box 2:1).
+   const uint32_t scaleShift = cmd.half_scale ? 1u : 0u;
+@@ -660,8 +938,9 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
        dstHeight = xfb_h;
    }
  
@@ -3631,7 +3693,7 @@ index 71136b9..1c397cb 100644
        it->second->size.width != dstWidth || it->second->size.height != dstHeight) {
      TextureHandle handle;
      if (!is_xfb && gfx::tex_copy_conv::needs_conversion(fmt)) {
-@@ -670,7 +924,7 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -670,7 +949,7 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
        handle = gfx::new_render_texture(dstWidth, dstHeight, GX_TF_RGBA8,
                                         is_xfb ? "GXCore XFB" : "GXCore Copy");
      }
@@ -3640,7 +3702,7 @@ index 71136b9..1c397cb 100644
    }
    if (!it->second) {
      return;
-@@ -709,11 +963,25 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -709,11 +988,25 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
    // XFB YUYV into guest RAM from this readback on every display copy, so it
    // must stay armed in product runs too (cost: one EFB readback per display
    // copy, ~1-2/frame).
@@ -3667,7 +3729,7 @@ index 71136b9..1c397cb 100644
    gfx::resolve_pass(it->second, srcRect, do_clear && cmd.color_update,
                      do_clear && cmd.alpha_update,
                      do_clear && cmd.depth_update,
-@@ -723,69 +991,274 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -723,69 +1016,277 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
                                  static_cast<float>(cmd.clear_a) / 255.f},
                      clearDepthValue, fmt, &filter);
  
@@ -3752,8 +3814,11 @@ index 71136b9..1c397cb 100644
 +                              cmd.height,  xfb_h,       dest_stride,
 +                              g_xfb_display_copy_count, cmd.dest_address};
 +    std::lock_guard lock{g_xfbRamMutex};
-+    if (it->second && g_xfbRamRequests.size() < 8u)
-+      g_xfbRamRequests.push_back(XfbRamRequest{it->second, target});
++    // The read-back source is the EFB snapshot this copy just took (what the
++    // screen shows): this game's per-buffer XFB texture comes out black.
++    const TextureHandle& source = g_lastDisplayCopy ? g_lastDisplayCopy : it->second;
++    if (source && g_xfbRamRequests.size() < 8u)
++      g_xfbRamRequests.push_back(XfbRamRequest{source, target});
 +    g_xfbRamLatestCopy[cmd.dest_address] = g_xfb_display_copy_count;
 +    const auto image = g_xfbRamImages.find(cmd.dest_address);
 +    const bool have = image != g_xfbRamImages.end() && !image->second.yuyv.empty();
@@ -3997,7 +4062,7 @@ index 71136b9..1c397cb 100644
  
    if (plan.viewport_valid) {
      // Raw XF viewport -> logical viewport, the raw path's own formula
-@@ -839,23 +1312,149 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -839,23 +1340,149 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      const uint32_t size = std::min(tsize, available);
      // Hash the actual source texels (+ TLUT for CI) so a content change under an
      // unchanged guest identity is a distinct cache entry — see TextureKey.
@@ -4152,7 +4217,7 @@ index 71136b9..1c397cb 100644
      // gxcore owns the decode for every format: produce tightly-packed RGBA8 and
      // upload it as a pre-decoded PC texture (no substrate re-conversion).
      std::vector<uint8_t> decoded;
-@@ -868,8 +1467,33 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -868,8 +1495,33 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      } else {
        decoded = gxc::decode_texture(format, width, height, bytes, size);
      }
@@ -4187,7 +4252,7 @@ index 71136b9..1c397cb 100644
        handle = new_static_texture_2d(
            width, height, 1, GX_TF_RGBA8_PC,
            ArrayRef<uint8_t>{decoded.data(), decoded.size()}, false,
-@@ -892,7 +1516,98 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -892,7 +1544,98 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    };
  
    BindGroupRef textureBindGroup = 0;
@@ -4286,7 +4351,7 @@ index 71136b9..1c397cb 100644
      if (plan.texmap_mask == 0u) {
        // Single-texmap fast path: primary texture + plan.sampler at binding 0/1.
        if (plan.has_texture) {
-@@ -903,7 +1618,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -903,7 +1646,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
              plan.tlut_data, plan.tlut_available);
          if (bound) {
            const auto sampler =
@@ -4295,7 +4360,7 @@ index 71136b9..1c397cb 100644
            const std::array entries{
                WGPUBindGroupEntry{.binding = 0,
                                   .textureView =
-@@ -919,6 +1634,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -919,6 +1662,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            textureBindGroup = bind_group_ref(descriptor);
          }
        }
@@ -4303,7 +4368,7 @@ index 71136b9..1c397cb 100644
      } else {
        // Multi-texmap: bind each used texmap at 2t (texture) / 2t+1 (sampler),
        // matching the WGSL declarations. Per-texmap PlanSampler from
-@@ -945,14 +1661,16 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -945,14 +1689,16 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
          held.push_back(bound);
          const gxc::PlanSampler& ps =
              pt.sampler.valid ? pt.sampler : plan.samplers[t];
@@ -4322,7 +4387,7 @@ index 71136b9..1c397cb 100644
        const WGPUBindGroupDescriptor descriptor{
            .label = {"GXCore Texture Bind Group", WGPU_STRLEN},
            .layout = texture_bind_group_layout(plan.texmap_mask).Get(),
-@@ -960,6 +1678,239 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -960,6 +1706,239 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            .entries = entries.data(),
        };
        textureBindGroup = bind_group_ref(descriptor);
@@ -4562,7 +4627,7 @@ index 71136b9..1c397cb 100644
      }
    }
  
-@@ -969,27 +1920,13 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -969,27 +1948,13 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    const auto idxRange = push_indices(
        reinterpret_cast<const uint8_t*>(plan.indices.data()),
        plan.indices.size() * sizeof(uint16_t), 4);
@@ -4592,7 +4657,7 @@ index 71136b9..1c397cb 100644
          .pixelUniformRange = pixelUniformRange,
          .indexCount = static_cast<uint32_t>(plan.indices.size()),
          .textureBindGroup = textureBindGroup,
-@@ -1006,6 +1943,8 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -1006,6 +1971,8 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      }
    } else {
      issue_draw();

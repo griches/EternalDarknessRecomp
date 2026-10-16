@@ -208,8 +208,10 @@ int apply_any(const uint8_t* rgba, uint32_t width, uint32_t height, uint8_t** ou
     return fonts_apply(rgba, width, height, out_rgba, out_width, out_height);
 }
 
-uint64_t generation_any() {
-    return generation() ^ (fonts_generation() * 0x9E3779B97F4A7C15ull);
+// Each sheet keys on its own settings, so redrawing the icons (the pause menu
+// opening) leaves the font sheets in the cache.
+uint64_t generation_any(uint32_t format, uint32_t width, uint32_t height) {
+    return claims(format, width, height) ? generation() : fonts_generation();
 }
 
 extern "C" void buttons_init(void) {

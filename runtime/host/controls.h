@@ -42,12 +42,14 @@ std::string controller_name();
 // For the game's own button icons (buttons.cpp): the icon file under
 // res/ui/glyphs for an action, preferring a face button or a shoulder
 // button when the action has one (empty when unbound); with no controller,
-// the action's key. glyph_set() is "xbox", "ps", "switch" or "kb".
+// the action's key. Shoulder cells take a trigger over a bumper in play and
+// a bumper in the game's pause menu, where L and R page it
+// (controls_set_game_menu). glyph_set() is "xbox", "ps", "switch" or "kb".
 enum GlyphPreference { kAnyButton, kFaceButton, kShoulderButton };
 std::string action_glyph(int action, int preference);
 std::string glyph_set();
 // Changes whenever the icons to show would change (layout, bindings,
-// controller family plugged in or out).
+// controller family plugged in or out, the pause menu opening or closing).
 uint64_t glyph_signature();
 
 // Switch layout (Custom starts from the layout in use).
@@ -71,6 +73,8 @@ extern "C" {
 #endif
 // Load the layout from settings and take over pad port 0.
 void controls_init(void);
+// Whether the game's pause menu is open (hle.c, each pad read).
+void controls_set_game_menu(bool open);
 #ifdef __cplusplus
 }
 #endif

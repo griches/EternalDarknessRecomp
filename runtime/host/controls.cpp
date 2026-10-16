@@ -14,6 +14,7 @@
 #include <SDL3/SDL_timer.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -87,6 +88,8 @@ const int kModernPad[kActionCount][2] = {
 
 Binding g_bindings[kActionCount];
 int g_layout = 0;
+// The game's pause menu is open (set on the game thread, read by the icons).
+std::atomic<bool> g_game_menu{false};
 SDL_Gamepad* g_pad = nullptr;
 
 int g_capture = -1;         // action waiting for an input, or -1
@@ -485,6 +488,11 @@ std::string key_glyph(int action) {
 }
 
 std::string glyph_set() {
+    // ED_GLYPHS=xbox, ps, switch or kb: that set whatever is connected (to see
+    // the game's prompts for a controller that is not there).
+    static const char* const forced = std::getenv("ED_GLYPHS");
+    if (forced != nullptr && forced[0] != '\0')
+        return forced;
     if (gamepad() == nullptr || g_keyboard_last)
         return "kb";
     return brand() == kPlayStation ? "ps" : brand() == kNintendo ? "switch" : "xbox";
@@ -497,15 +505,20 @@ std::string action_glyph(int action, int preference) {
         const std::string file = key_glyph_file(action);
         return file.empty() ? "" : file + ".png";
     }
-    // Face buttons for the face cells; bumpers, then triggers, for the
-    // shoulder cells (so menu paging pairs LB with RB); else the first.
+    // Face buttons for the face cells. Shoulder cells: triggers, then
+    // bumpers, in play (Modern's Target is LT, with RB as well); bumpers, then
+    // triggers, in the game's pause menu, so its paging pairs LB with RB.
+    // Else the first.
+    const bool paging = g_game_menu.load(std::memory_order_relaxed);
     auto rank = [&](int n) {
         if (n == kNone)
             return 0;
         if (preference == kFaceButton)
             return n >= kSouth && n <= kNorth ? 3 : 1;
-        if (preference == kShoulderButton)
-            return n == kLB || n == kRB ? 3 : n == kLT || n == kRT ? 2 : 1;
+        if (preference == kShoulderButton) {
+            const bool bumper = n == kLB || n == kRB, trigger = n == kLT || n == kRT;
+            return bumper ? (paging ? 3 : 2) : trigger ? (paging ? 2 : 3) : 1;
+        }
         return 1;
     };
     int pick = kNone;
@@ -523,6 +536,10 @@ uint64_t glyph_signature() {
     };
     mix(glyph_set());
     mix(serialize());
+    // The shoulder icons that change with the pause menu (only those, so
+    // opening it redraws the icons only when one differs).
+    for (int a = 0; a < kActionCount; a++)
+        mix(action_glyph(a, kShoulderButton));
     return h;
 }
 
@@ -618,4 +635,9 @@ extern "C" void controls_init(void) {
         load_preset(g_layout == kCustom ? kOriginal : g_layout);
     dol_aurora_set_pad0_override(read_pad);
     SDL_AddEventWatch(mark_watch, nullptr);
+}
+
+extern "C" void controls_set_game_menu(bool open) {
+    if (controls::g_game_menu.exchange(open, std::memory_order_relaxed) != open)
+        std::fprintf(stderr, "[controls] game's pause menu %s\n", open ? "open" : "closed");
 }

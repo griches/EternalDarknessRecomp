@@ -25,6 +25,7 @@
 #include "host/settings.h"
 #ifdef ED_AURORA
 #include "gxruntime/aurora_backend.h"
+#include "host/controls.h"
 #include "host/frontend.h"
 #endif
 #include "game_data.h"
@@ -3476,10 +3477,29 @@ static void hle_PADInit(CPUState* cpu) {
     hle_set_u32(cpu, dol_platform_pad_init() ? 1u : 0u);
 }
 
+// The game's pause menu (inventory, map, magick, options), where L and R page
+// it: its button icons show bumpers there and triggers in play (controls.cpp).
+// Entering sets a small-data flag and pushes a render state; leaving pops the
+// state and clears the flag, except on the two exits to an area change or a
+// cutscene, which leave the flag set until the next area loads. So the menu is
+// open while both hold. The two r13 offsets come from the code
+// (find_game_menu); 0 when it was not found.
+static s32 g_menu_flag_offset, g_menu_depth_offset;
+
+static bool game_menu_open(CPUState* cpu) {
+    const u32 sda = cpu->gpr[13];
+    if (g_menu_flag_offset == 0 || sda < GC_RAM_BASE + 0x8000u ||
+        sda - GC_RAM_BASE > cpu->ram_size - 0x8000u)
+        return false;  // not found, or before the game set r13
+    return mem_read32(cpu, sda + (u32)g_menu_flag_offset) != 0u &&
+           (s32)mem_read32(cpu, sda + (u32)g_menu_depth_offset) > 0;
+}
+
 static void hle_PADRead(CPUState* cpu) {
     u32 out = hle_arg_u32(cpu, 0);
     DolPadState state[4];
     memset(state, 0, sizeof state);
+    controls_set_game_menu(game_menu_open(cpu));
     u32 motor_mask = dol_platform_pad_read(state);
     if (g_auto_input) {
         const u64 frame = cpu->timebase / 675000ull;
@@ -5000,6 +5020,28 @@ static void sync_widescreen_option(CPUState* cpu) {
 }
 #endif
 
+#ifdef ED_AURORA
+// The pause menu's flag and render-state depth (game_menu_open), from the one
+// setter of the flag (flag = r3 != 0) and the reset of the depth to 0.
+static void find_game_menu(CPUState* cpu) {
+    const bool pal = strcmp(ED_GAME_ID, "GEDP01") == 0;
+    const u32 setter = pal ? 0x800E5A14u : 0x800E7950u;
+    const u32 reset = pal ? 0x801ECCE0u : 0x801F8598u;
+    static const u32 kSetter[] = {0x7C0300D0u, 0x7C001B78u, 0x54000FFEu};  // neg, or, srwi
+    const u32 flag_store = mem_read32(cpu, setter + 12u);  // stw r0, flag(r13)
+    const u32 depth_store = mem_read32(cpu, reset + 4u);   // stw r0, depth(r13)
+    if (!code_matches(cpu, setter, kSetter, 3) || (flag_store >> 16) != 0x900Du ||
+        mem_read32(cpu, setter + 16u) != 0x4E800020u || mem_read32(cpu, reset) != 0x38000000u ||
+        (depth_store >> 16) != 0x900Du || mem_read32(cpu, reset + 8u) != 0x4E800020u) {
+        fprintf(stderr, "[hle] pause menu flag not found: L/R icons show triggers there too\n");
+        return;
+    }
+    g_menu_flag_offset = (s16)(flag_store & 0xFFFFu);
+    g_menu_depth_offset = (s16)(depth_store & 0xFFFFu);
+}
+
+#endif
+
 static bool callback_pending(u32 address, s32 result) {
     if (g_callback_active && g_irq_callback.pending.address == address &&
         g_irq_callback.pending.result == result)
@@ -5139,6 +5181,9 @@ void hle_install(CPUState* cpu) {
     install_xfb_reader_sync(cpu);
 #ifdef ED_AURORA
     find_widescreen_option(cpu);
+#endif
+#ifdef ED_AURORA
+    find_game_menu(cpu);
 #endif
     publish_codegen_options();
 }

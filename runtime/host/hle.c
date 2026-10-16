@@ -991,9 +991,11 @@ static void hle_DVDReadAsyncPrio(CPUState* cpu) {
     u32 callback = hle_arg_u32(cpu, 4);
 
     u32 start = mem_read32(cpu, fi + DVD_FI_STARTADDR);
-    if (g_hle_log)
-        fprintf(stderr, "[dvd] read addr=0x%08X len=%u disc=0x%08X cb=0x%08X\n",
-                addr, length, start + offset, callback);
+    if (g_dvd_log)
+        fprintf(stderr, "[dvd] read fi=0x%08X disc=0x%08X+0x%X len=0x%X (file 0x%X) addr=0x%08X "
+                        "cb=0x%08X lr=0x%08X frame=%llu\n",
+                fi, start, offset, length, mem_read32(cpu, fi + DVD_FI_STARTADDR + 4u), addr,
+                callback, cpu->lr, (unsigned long long)(cpu->timebase / 675000ull));
     watch_host_write(cpu, "DVDReadAsyncPrio", addr, length);
     dvd_read_to_guest(cpu, addr, start + offset, length);
     mem_write32(cpu, fi + DVD_FI_CALLBACK, callback);

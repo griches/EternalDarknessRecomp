@@ -339,6 +339,7 @@ static bool mash_to_gameplay_apply(CPUState* cpu,
 #ifdef ED_AURORA
 #define HLE_DISPLAY_LIST_RETURN 0x7FFF0010u
 #define HLE_GX_BEGIN_RETURN     0x7FFF0020u
+#define HLE_BOOK_RETURN         0x7FFF0030u
 static u32 g_gx_dirty_state_helper;  // __GXSetDirtyState
 static u32 g_gx_flush_prim_helper;   // __GXSendFlushPrim
 #define GX_DATA_SDA_OFFSET      ED_GX_DATA_SDA_OFFSET
@@ -4452,6 +4453,7 @@ static void initialize_hle_dispatch(void) {
 #ifdef ED_AURORA
 extern CPUState dolrecomp_cpu;  // main.c
 static void sync_widescreen_option(CPUState* cpu);
+static bool continue_book_reload(CPUState* cpu);
 
 // Once a game frame (VIFlush): the frames per second in the window title,
 // refreshed each second (ED_NO_FPS=1 leaves the title alone), the game's
@@ -4510,6 +4512,8 @@ static bool hle_dispatch(CPUState* cpu, u32 address) {
         continue_GXBegin(cpu);
         return true;
     }
+    if (address == HLE_BOOK_RETURN && continue_book_reload(cpu))
+        return true;
 #endif
 
     // Call through a NULL (or near-NULL) function pointer. GameCube SDK code
@@ -4945,6 +4949,140 @@ static void notify_options_menu(CPUState* cpu) {
         g_options_toggle_calls = g_options_toggle_calls + 1u;
 }
 
+// The inventory book behind the game's menus comes in two shapes, a file per
+// language for each (UBookIn?.tpl at 4:3, UWideIn?.tpl at 16:9, the same
+// size). The game loads the one the word asks for into ARAM (load, given the
+// language) and copies it into the menu's heap as the menu opens (copy); its
+// options toggle makes both calls straight after the flip. A flip from the
+// launcher only changes the word, so the book kept the other shape. Now when
+// the menu opens, or draws a frame, over a book of the other shape, the game
+// thread first makes the same calls (the copy only while the menu holds the
+// book), then enters the menu function it was calling.
+static struct {
+    u32 load, copy;            // the game's two calls, 0 = not found
+    u32 menu_open, menu_frame;
+    s32 language_offset;       // r13 words: the language load takes,
+    s32 size_offset;           // the size it answers (copy reads it),
+    s32 menu_kind_offset;      // and 3 while the menu holds the book
+    int loaded;                // the word as the book was last loaded, -1 unknown
+    bool active;
+    u32 stage;                 // 1 in load, 2 in copy
+    bool copy_after;
+    u32 resume;                // the menu function, entered at the end
+    HleSavedContext saved;     // its arguments and return address
+} g_book = {.loaded = -1};
+
+static int widescreen_word(CPUState* cpu) {
+    return mem_read32(cpu, cpu->gpr[13] + (u32)g_widescreen_offset) != 0u;
+}
+
+static void notify_book_load(CPUState* cpu) {
+    if (sda_ready(cpu))
+        g_book.loaded = widescreen_word(cpu);
+}
+
+static void book_check(CPUState* cpu, u32 function, bool menu_up) {
+    g_hle_passthrough = true;
+    if (g_book.active || !sda_ready(cpu) || widescreen_word(cpu) == g_book.loaded)
+        return;
+    const u32 sda = cpu->gpr[13];
+    save_callback_context(&g_book.saved, cpu);
+    g_book.active = true;
+    g_book.stage = 1u;
+    g_book.copy_after =
+        menu_up && mem_read32(cpu, sda + (u32)g_book.menu_kind_offset) == 3u;
+    g_book.resume = function;
+    fprintf(stderr, "[widescreen] the menu's book reloaded at %s%s\n",
+            widescreen_word(cpu) ? "16:9" : "4:3", g_book.copy_after ? " (menu open)" : "");
+    g_hle_passthrough = false;
+    g_hle_tail_call = true;
+    cpu->gpr[3] = mem_read32(cpu, sda + (u32)g_book.language_offset);
+    cpu->lr = HLE_BOOK_RETURN;
+    cpu->pc = g_book.load;
+}
+
+static void hle_book_menu_open(CPUState* cpu) {
+    book_check(cpu, g_book.menu_open, false);
+}
+
+static void hle_book_menu_frame(CPUState* cpu) {
+    book_check(cpu, g_book.menu_frame, true);
+}
+
+static bool continue_book_reload(CPUState* cpu) {
+    if (!g_book.active)
+        return false;
+    if (g_book.stage == 1u) {
+        mem_write32(cpu, cpu->gpr[13] + (u32)g_book.size_offset, cpu->gpr[3]);
+        g_book.loaded = widescreen_word(cpu);
+        if (g_book.copy_after) {
+            g_book.stage = 2u;
+            cpu->lr = HLE_BOOK_RETURN;
+            cpu->pc = g_book.copy;
+            return true;
+        }
+    }
+    const HleSavedContext* saved = &g_book.saved;
+    memcpy(cpu->gpr, saved->gpr, sizeof saved->gpr);
+    memcpy(cpu->fpr, saved->fpr, sizeof saved->fpr);
+    memcpy(cpu->ps1, saved->ps1, sizeof saved->ps1);
+    cpu->lr = saved->lr;
+    cpu->ctr = saved->ctr;
+    cpu->cr = saved->cr;
+    cpu->xer = saved->xer;
+    cpu->fpscr = saved->fpscr;
+    cpu->pc = g_book.resume;
+    g_book.active = false;
+    return true;
+}
+
+static u32 bl_target(CPUState* cpu, u32 at) {
+    const u32 word = mem_read32(cpu, at);
+    if ((word & 0xFC000003u) != 0x48000001u)
+        return 0u;
+    s32 offset = (s32)(word & 0x03FFFFFCu);
+    if (offset & 0x02000000)
+        offset -= 0x04000000;
+    return at + (u32)offset;
+}
+
+// PAL: after the toggle's stw come bl load, stw r3, size(r13) and bl copy. The
+// menu opens at 0x80111078 (lwz r0, kind(r13); cmpwi r0, 3; bl to the setup
+// that calls copy) and draws each frame from 0x80111234.
+static void find_book(CPUState* cpu, u32 toggle) {
+    const u32 load = bl_target(cpu, toggle + 16u), copy = bl_target(cpu, toggle + 24u);
+    const u32 keep = mem_read32(cpu, toggle + 20u);
+    const u32 open = 0x80111078u, frame = 0x80111234u;
+    const u32 kind_load = mem_read32(cpu, open + 0x114u);
+    const u32 setup = bl_target(cpu, open + 0x140u);
+    HleDispatchEntry* load_entry = hle_dispatch_entry(load);
+    HleDispatchEntry* open_entry = hle_dispatch_entry(open);
+    HleDispatchEntry* frame_entry = hle_dispatch_entry(frame);
+    if (load == 0u || copy == 0u || (keep >> 16) != 0x906Du ||
+        mem_read32(cpu, load + 0x18u) != (0x800D0000u | ((u32)g_widescreen_offset & 0xFFFFu)) ||
+        mem_read32(cpu, open) != 0x9421FFF0u || mem_read32(cpu, open + 4u) != 0x7C0802A6u ||
+        mem_read32(cpu, frame) != 0x9421FFE0u || mem_read32(cpu, frame + 4u) != 0x7C0802A6u ||
+        (kind_load >> 16) != 0x800Du || mem_read32(cpu, open + 0x128u) != 0x2C000003u ||
+        setup == 0u || bl_target(cpu, setup + 0x44u) != copy || load_entry == NULL ||
+        load_entry->notify != NULL || open_entry == NULL || open_entry->intercept != NULL ||
+        frame_entry == NULL || frame_entry->intercept != NULL) {
+        fprintf(stderr, "[widescreen] the menu's book loader not found: it keeps its shape\n");
+        return;
+    }
+    g_book.load = load;
+    g_book.copy = copy;
+    g_book.menu_open = open;
+    g_book.menu_frame = frame;
+    g_book.language_offset = (s16)(mem_read32(cpu, toggle + 4u) & 0xFFFFu);
+    g_book.size_offset = (s16)(keep & 0xFFFFu);
+    g_book.menu_kind_offset = (s16)(kind_load & 0xFFFFu);
+    g_book.loaded = -1;
+    g_book.active = false;
+    load_entry->notify = notify_book_load;
+    open_entry->intercept = hle_book_menu_open;
+    frame_entry->intercept = hle_book_menu_frame;
+}
+
 static void find_widescreen_option(CPUState* cpu) {
     const bool pal = strcmp(ED_GAME_ID, "GEDP01") == 0;
     // The camera, before C_MTXPerspective: lwz r0, flag(r13) ... cmpwi r0, 1.
@@ -4978,6 +5116,7 @@ static void find_widescreen_option(CPUState* cpu) {
     }
     g_options_state_offset = (s16)(state_load & 0xFFFFu);
     entry->notify = notify_options_menu;
+    find_book(cpu, toggle);
 }
 
 // The launcher's choice as the game's word: 16:9 on, 4:3 off.
@@ -5080,6 +5219,10 @@ void hle_state_loaded(CPUState* cpu) {
     for (u32 i = 0; i < g_callback_count; i++)
         delay_callback(cpu, (g_callback_read + i) % HLE_CALLBACK_QUEUE_CAPACITY);
     unstick_disc_streams(cpu);
+#ifdef ED_AURORA
+    g_book.loaded = -1;  // the state's ARAM holds a book of either shape
+    g_book.active = false;
+#endif
 }
 
 void hle_install(CPUState* cpu) {

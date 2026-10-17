@@ -3258,7 +3258,7 @@ index 7af8fca..4c14e34 100644
      g_requested.store(false, std::memory_order_release);
    else
 diff --git a/graphics/aurora/lib/gfx/gxcore_draw.cpp b/graphics/aurora/lib/gfx/gxcore_draw.cpp
-index 71136b9..3f57df8 100644
+index 71136b9..596ebbd 100644
 --- a/graphics/aurora/lib/gfx/gxcore_draw.cpp
 +++ b/graphics/aurora/lib/gfx/gxcore_draw.cpp
 @@ -1,4 +1,7 @@
@@ -4205,7 +4205,7 @@ index 71136b9..3f57df8 100644
      auto efbIt = g_efbCopyTextures.find(address);
      if (efbIt != g_efbCopyTextures.end() && efbIt->second) {
        ++g_textureCacheStats.hits;
-@@ -839,23 +1438,156 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -839,23 +1438,160 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      const uint32_t size = std::min(tsize, available);
      // Hash the actual source texels (+ TLUT for CI) so a content change under an
      // unchanged guest identity is a distinct cache entry — see TextureKey.
@@ -4213,6 +4213,8 @@ index 71136b9..3f57df8 100644
 -    if (gxc::is_ci_format(format) && has_tlut && tlut_data != nullptr)
 -      content_hash =
 -          XXH3_64bits_withSeed(tlut_data, tlut_available, content_hash);
+-    const TextureKey key{address,     tsize,        format,      width,
+-                         height,      tlut_address, tlut_format, tlut_entries,
 +    const bool hash_tlut =
 +        gxc::is_ci_format(format) && has_tlut && tlut_data != nullptr;
 +    // The palette itself: tlut_available runs to the end of guest RAM, and
@@ -4254,8 +4256,12 @@ index 71136b9..3f57df8 100644
 +            : 0u;
 +    if (pack_generation != 0u)
 +      content_hash ^= (pack_generation + 7u) * 0xC2B2AE3D27D4EB4Full;
-     const TextureKey key{address,     tsize,        format,      width,
-                          height,      tlut_address, tlut_format, tlut_entries,
++    // The palette is part of the identity only for a texture that uses one.
++    const bool ci = gxc::is_ci_format(format);
++    const TextureKey key{address,     tsize,
++                         format,      width,
++                         height,      ci ? tlut_address : 0u,
++                         ci ? tlut_format : 0u, ci ? tlut_entries : 0u,
                           content_hash};
 +    // Pack images are large: swapping many in at once (a title screen, a new
 +    // room) held up the main thread long enough to starve the game thread
@@ -4367,7 +4373,7 @@ index 71136b9..3f57df8 100644
      // gxcore owns the decode for every format: produce tightly-packed RGBA8 and
      // upload it as a pre-decoded PC texture (no substrate re-conversion).
      std::vector<uint8_t> decoded;
-@@ -868,8 +1600,47 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -868,8 +1604,47 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      } else {
        decoded = gxc::decode_texture(format, width, height, bytes, size);
      }
@@ -4416,7 +4422,7 @@ index 71136b9..3f57df8 100644
        handle = new_static_texture_2d(
            width, height, 1, GX_TF_RGBA8_PC,
            ArrayRef<uint8_t>{decoded.data(), decoded.size()}, false,
-@@ -892,7 +1663,98 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -892,7 +1667,98 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    };
  
    BindGroupRef textureBindGroup = 0;
@@ -4515,7 +4521,7 @@ index 71136b9..3f57df8 100644
      if (plan.texmap_mask == 0u) {
        // Single-texmap fast path: primary texture + plan.sampler at binding 0/1.
        if (plan.has_texture) {
-@@ -903,7 +1765,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -903,7 +1769,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
              plan.tlut_data, plan.tlut_available);
          if (bound) {
            const auto sampler =
@@ -4524,7 +4530,7 @@ index 71136b9..3f57df8 100644
            const std::array entries{
                WGPUBindGroupEntry{.binding = 0,
                                   .textureView =
-@@ -919,6 +1781,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -919,6 +1785,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            textureBindGroup = bind_group_ref(descriptor);
          }
        }
@@ -4532,7 +4538,7 @@ index 71136b9..3f57df8 100644
      } else {
        // Multi-texmap: bind each used texmap at 2t (texture) / 2t+1 (sampler),
        // matching the WGSL declarations. Per-texmap PlanSampler from
-@@ -932,12 +1795,15 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -932,12 +1799,15 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
          if ((plan.texmap_mask & (1u << t)) == 0u)
            continue;
          const gxc::PlanTexture& pt = plan.textures[t];
@@ -4549,7 +4555,7 @@ index 71136b9..3f57df8 100644
          if (!bound) {
            complete = false;
            break;
-@@ -945,14 +1811,16 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -945,14 +1815,16 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
          held.push_back(bound);
          const gxc::PlanSampler& ps =
              pt.sampler.valid ? pt.sampler : plan.samplers[t];
@@ -4568,7 +4574,7 @@ index 71136b9..3f57df8 100644
        const WGPUBindGroupDescriptor descriptor{
            .label = {"GXCore Texture Bind Group", WGPU_STRLEN},
            .layout = texture_bind_group_layout(plan.texmap_mask).Get(),
-@@ -960,6 +1828,239 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -960,6 +1832,239 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            .entries = entries.data(),
        };
        textureBindGroup = bind_group_ref(descriptor);
@@ -4808,7 +4814,7 @@ index 71136b9..3f57df8 100644
      }
    }
  
-@@ -969,27 +2070,13 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -969,27 +2074,13 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    const auto idxRange = push_indices(
        reinterpret_cast<const uint8_t*>(plan.indices.data()),
        plan.indices.size() * sizeof(uint16_t), 4);
@@ -4838,7 +4844,7 @@ index 71136b9..3f57df8 100644
          .pixelUniformRange = pixelUniformRange,
          .indexCount = static_cast<uint32_t>(plan.indices.size()),
          .textureBindGroup = textureBindGroup,
-@@ -1006,6 +2093,8 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -1006,6 +2097,8 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      }
    } else {
      issue_draw();
@@ -10085,10 +10091,20 @@ index 2e4c762..fb7c6bb 100644
          DolGuestResolvedRange range;
          memset(&range, 0, sizeof(range));
 diff --git a/src/gx_recomp.c b/src/gx_recomp.c
-index 842e0e6..ec7e60a 100644
+index 842e0e6..9a26776 100644
 --- a/src/gx_recomp.c
 +++ b/src/gx_recomp.c
-@@ -41,9 +41,16 @@ static u32 bp_get(u32 value, u32 size, u32 shift) {
+@@ -19,6 +19,9 @@ static void trace_event(DolGxRecompState* gx, DolGxRecompEventKind kind,
+     event->e = 0u;
+     event->f = 0u;
+     event->g = 0u;
++    event->tlut_address = 0u;
++    event->tlut_format = 0u;
++    event->tlut_entries = 0u;
+ }
+ 
+ static u32 round_up(u32 value, u32 multiple) {
+@@ -41,9 +44,16 @@ static u32 bp_get(u32 value, u32 size, u32 shift) {
  static void note_matrix_index_a(DolGxRecompState* gx, u32 value) {
      if (gx == NULL)
          return;
@@ -10106,7 +10122,7 @@ index 842e0e6..ec7e60a 100644
          gx->current_pn_matrix = 0u;
  }
  
-@@ -955,6 +962,7 @@ bool dol_gx_recomp_capture_xf_transform(DolGxRecompState* gx, u16 base, u8 count
+@@ -955,6 +965,7 @@ bool dol_gx_recomp_capture_xf_transform(DolGxRecompState* gx, u16 base, u8 count
      if (!touches_pn && !touches_tex && !touches_scalar && !touches_window &&
          !touches_light && !touches_normal && !touches_post)
          return false;

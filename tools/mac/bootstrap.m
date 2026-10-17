@@ -181,8 +181,8 @@ static int run_tool(NSArray<NSString*>* args, NSDictionary<NSString*, NSString*>
                                       self.progress(0.04, step);
                               });
     if (prep != 0)
-        return @"This disc image could not be read as Eternal Darkness (USA GEDE01 or "
-               @"European GEDP01).";
+        return @"This disc image is not the European Eternal Darkness disc (GEDP01), the "
+               @"only one supported, or it could not be read.";
     NSString* gameId = read_text([generated stringByAppendingPathComponent:@"game_id.txt"]);
 
     // 2. Compile: the chunks hot in play (profiled, tools/deck/hot-*.txt) at

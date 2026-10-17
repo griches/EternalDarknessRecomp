@@ -4,8 +4,8 @@ Eternal Darkness Recomp - Linux x86-64 / Steam Deck
 This folder holds no game. It turns your own copy of Eternal Darkness:
 Sanity's Requiem into a native Linux game.
 
-1. Put your disc image here: an .iso or .gcm of the USA (GEDE01) or
-   European (GEDP01) GameCube disc.
+1. Put your disc image here: an .iso or .gcm of the European (GEDP01)
+   GameCube disc. The USA disc is not supported.
 2. Run play.sh. On a Steam Deck, in Desktop Mode: Steam > Add a Non-Steam
    Game > Browse > this folder > play.sh. Then play it from Game Mode.
 

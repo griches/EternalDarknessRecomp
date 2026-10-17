@@ -209,8 +209,10 @@ std::vector<Disc> scan_discs(const char* default_iso) {
         for (const Disc& d : discs)
             if (d.path == path)
                 return;
+        // Only the disc this build runs (the European disc is the one
+        // supported): another image in the folder is not offered at all.
         Disc d;
-        if (read_disc(path, &d))
+        if (read_disc(path, &d) && d.id == ed_game_id())
             discs.push_back(d);
     };
     if (default_iso != nullptr && default_iso[0] != '\0')
@@ -325,7 +327,8 @@ Row disc_row() {
     if (g_discs.empty()) {
         disc.value = "None found";
         disc.enabled = false;
-        disc.note = "Put your disc image (.iso) in the dump folder.";
+        disc.note = std::string("Put your ") + region_name(ed_game_id()) + " disc image (" +
+                    ed_game_id() + ", .iso) in the dump folder.";
         return disc;
     }
     const Disc& d = g_discs[g_disc];

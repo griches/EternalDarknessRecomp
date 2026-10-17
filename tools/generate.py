@@ -24,7 +24,11 @@ from pathlib import Path
 from fix_generated import fix_generated_sources
 
 ROOT = Path(__file__).resolve().parent.parent
-GAME_IDS = {b"GEDE01": "USA", b"GEDP01": "Europe"}
+# The European disc is the one supported. ED_ALLOW_USA=1 (development only)
+# still translates the USA disc, whose code paths the runtime keeps.
+GAME_IDS = {b"GEDP01": "Europe"}
+if os.environ.get("ED_ALLOW_USA") == "1":
+    GAME_IDS[b"GEDE01"] = "USA"
 
 
 class Disc:
@@ -64,8 +68,11 @@ class Disc:
 def extract_dol(disc_path, out_path):
     disc = Disc(disc_path)
     game_id = disc.read(0, 6)
+    if game_id == b"GEDE01" and game_id not in GAME_IDS:
+        sys.exit(f"error: {disc_path} is the USA disc (GEDE01): only the European disc (GEDP01) "
+                 "is supported")
     if game_id not in GAME_IDS:
-        sys.exit(f"error: {disc_path} is {game_id!r}, not Eternal Darkness (GEDE01/GEDP01)")
+        sys.exit(f"error: {disc_path} is {game_id!r}, not Eternal Darkness (GEDP01)")
     dol_off = struct.unpack(">I", disc.read(0x420, 4))[0]
     head = disc.read(dol_off, 0x100)
     offs = struct.unpack(">18I", head[0:72])

@@ -1,8 +1,8 @@
 #!/bin/sh
 # Eternal Darkness Recomp (Linux x86-64 / Steam Deck).
 #
-# Put your own Eternal Darkness disc image (.iso or .gcm; USA GEDE01 or Europe
-# GEDP01) in this folder, then run this script, or add it to Steam. The first run
+# Put your own Eternal Darkness disc image (.iso or .gcm of the European disc,
+# GEDP01; the USA disc is not supported) in this folder, then run this script, or add it to Steam. The first run
 # translates the disc and builds the game from it (about half a minute on a
 # Steam Deck). After that the game starts straight away. Nothing from your disc
 # leaves this folder.

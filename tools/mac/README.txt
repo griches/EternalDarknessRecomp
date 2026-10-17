@@ -9,8 +9,8 @@ Sanity's Requiem into a native Mac game.
    then Open again. (Or, in Terminal:
    xattr -dr com.apple.quarantine "/Applications/Eternal Darkness.app")
 3. When it asks, drop your disc image on its window, or click Choose Disc
-   Image: an .iso or .gcm of the USA (GEDE01) or European (GEDP01) GameCube
-   disc.
+   Image: an .iso or .gcm of the European (GEDP01) GameCube disc. The USA
+   disc is not supported.
 
 The first start translates your disc and builds the game from it, which takes
 a minute or two. After that the game starts straight away. Hold Option while

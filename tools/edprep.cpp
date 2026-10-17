@@ -134,15 +134,19 @@ private:
     std::vector<std::optional<uint32_t>> index_;
 };
 
-const std::map<std::string, std::string> kGameIds = {{"GEDE01", "USA"}, {"GEDP01", "Europe"}};
+// The European disc is the one supported (the USA disc's code paths stay in
+// the runtime but it is not offered).
+const std::map<std::string, std::string> kGameIds = {{"GEDP01", "Europe"}};
 
 std::string extract_dol(const fs::path& disc_path, const fs::path& out_path) {
     Disc disc(disc_path);
     const std::vector<uint8_t> id_bytes = disc.read(0, 6);
     const std::string game_id(id_bytes.begin(), id_bytes.end());
+    if (game_id == "GEDE01")
+        fail(disc_path.string() + " is the USA disc (GEDE01): only the European disc (GEDP01) "
+             "is supported");
     if (kGameIds.count(game_id) == 0)
-        fail(disc_path.string() + " is " + game_id +
-             ", not Eternal Darkness (GEDE01/GEDP01)");
+        fail(disc_path.string() + " is " + game_id + ", not Eternal Darkness (GEDP01)");
     const uint32_t dol_off = be32(disc.read(0x420, 4).data());
     const std::vector<uint8_t> head = disc.read(dol_off, 0x100);
     if (head.size() < 0x100)

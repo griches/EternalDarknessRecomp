@@ -7,7 +7,8 @@ game is in this repository. The PS5 version is
 
 ## Quick start
 
-You need your own disc image (`.iso` or `.gcm`): Europe `GEDP01` or USA `GEDE01`.
+You need your own disc image (`.iso` or `.gcm`) of the **European disc**, `GEDP01`. The USA
+disc is not supported.
 
 **Mac (Apple silicon, macOS 13+)**
 1. Unzip `EternalDarkness-mac-....zip` and move **Eternal Darkness.app** to Applications.
@@ -59,7 +60,7 @@ All platforms start the same way:
 ```sh
 tools/setup-deps.sh                           # pinned DolRecomp + GXRuntime, plus our patches
 python3 tools/generate.py /path/to/disc.iso   # ISO or CISO; writes generated/
-cp /path/to/disc.iso dump/GEDP01.iso          # or GEDE01.iso for the USA disc
+cp /path/to/disc.iso dump/GEDP01.iso          # the European disc
 ```
 
 - **Mac**: `cmake -S . -B build-mac -G Ninja && ninja -C build-mac EternalDarkness`,

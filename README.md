@@ -44,8 +44,8 @@ Two downloads, both DDS:
 
 | Download | What it is | Size |
 | --- | --- | --- |
-| **[Eternal Darkness HD Texture Pack](https://mega.nz/file/6m5TQToI#v09Y_gYdtZ24WTT6BlfCeM5uvw1nRs3QozcYZkUVVqg)** by Zombie | The game's textures redrawn at four times the detail | 2.9 GB `.7z` on Mega |
-| **[PAL supplement](https://www.bouncingball.mobi/eternaldarkness/files/ED-PAL-supplement-dds.zip?v=2)** by Eternal Darkness Recomp | What the pack misses on the European disc: the Jump to Game, Options and Language screens and the title menu's words, and highlights without hard edges | 10.7 MB `.zip` |
+| **[Eternal Darkness HD Texture Pack](https://mega.nz/file/6m5TQToI#v09Y_gYdtZ24WTT6BlfCeM5uvw1nRs3QozcYZkUVVqg)** by Zombie, on Mega | The game's textures redrawn at four times the detail | 2.9&nbsp;GB&nbsp;`.7z` |
+| **[PAL supplement](https://www.bouncingball.mobi/eternaldarkness/files/ED-PAL-supplement-dds.zip?v=2)** by Eternal Darkness Recomp | What the pack misses on the European disc: the Jump to Game, Options and Language screens and the title menu's words, and highlights without hard edges | 10.7&nbsp;MB&nbsp;`.zip` |
 
 1. Unpack both. Each one gives you a folder.
 2. Put both folders in a folder called `textures` (make it if it isn't there):
@@ -69,9 +69,11 @@ When you're done, `textures` looks like this:
 
 ```
 textures/
-├── GED DDS 1.0/                   Zombie's pack (any folder name works)
+├── GED DDS 1.0/
 └── Eternal Darkness HD Texture Pack PAL supplement/
 ```
+
+`GED DDS 1.0` is Zombie's pack; the folders' names don't matter.
 
 ### 4. Play
 

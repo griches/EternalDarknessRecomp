@@ -3079,7 +3079,7 @@ index a13ce39..eb4d9fc 100644
   * EFB readback (GXRuntime recomp patch): arm a one-shot copy of the next
   * submitted frame's present source; take returns tightly packed RGBA8 rows
 diff --git a/graphics/aurora/lib/aurora.cpp b/graphics/aurora/lib/aurora.cpp
-index b09ef4d..cc28246 100644
+index b09ef4d..dece612 100644
 --- a/graphics/aurora/lib/aurora.cpp
 +++ b/graphics/aurora/lib/aurora.cpp
 @@ -1,5 +1,15 @@
@@ -3355,7 +3355,7 @@ index b09ef4d..cc28246 100644
      g_config.cachePath = SDL_GetPrefPath(nullptr, g_config.appName);
    } else {
      g_config.cachePath = strdup(g_config.cachePath);
-@@ -248,6 +492,32 @@ bool begin_frame() noexcept {
+@@ -248,6 +492,33 @@ bool begin_frame() noexcept {
    return true;
  }
  
@@ -3366,7 +3366,8 @@ index b09ef4d..cc28246 100644
 +// measured by presenting one picture several times in a row.
 +std::vector<float> g_interpPhases;
 +std::atomic<int64_t> g_presentSpacingNs{0};
-+std::atomic<int> g_refreshProbes{0};
++std::atomic<int> g_refreshProbes{0};  // > 0: measure at the frame it counts down to 1
++std::atomic<int> g_refreshRetries{0};
 +std::atomic<int64_t> g_refreshPeriodNs{0};
 +
 +// Render worker, before each present: at least the spacing since the last
@@ -3388,7 +3389,7 @@ index b09ef4d..cc28246 100644
  void end_frame() noexcept {
    ZoneScoped;
  #ifdef AURORA_ENABLE_GX
-@@ -257,10 +527,38 @@ void end_frame() noexcept {
+@@ -257,10 +528,38 @@ void end_frame() noexcept {
  
    // E7 present-from-XFB: VI current → GPU Virtual-XFB, else YUYV-from-RAM
    // decode, else EFB-direct (Strikers when no RAM XFB / match fails).
@@ -3429,7 +3430,7 @@ index b09ef4d..cc28246 100644
    const uint32_t contentW =
        xfbTex && *xfbTex ? (*xfbTex)->size.width : efbSource.size.width;
    const uint32_t contentH =
-@@ -282,28 +580,37 @@ void end_frame() noexcept {
+@@ -282,28 +581,37 @@ void end_frame() noexcept {
    // Capture XFB handle by value for the worker lambda (shared_ptr).
    gfx::TextureHandle xfbHandle = (xfbTex && *xfbTex) ? *xfbTex : nullptr;
  
@@ -3482,7 +3483,7 @@ index b09ef4d..cc28246 100644
        wgpu::BindGroup presentBindGroup;
        if (rmlBindGroup && !rmlOverlay) {
          presentBindGroup = rmlBindGroup;
-@@ -318,7 +625,7 @@ void end_frame() noexcept {
+@@ -318,7 +626,7 @@ void end_frame() noexcept {
          };
          presentBindGroup = webgpu::create_copy_bind_group(xfbSrc);
        } else {
@@ -3491,7 +3492,7 @@ index b09ef4d..cc28246 100644
          presentBindGroup = webgpu::create_copy_bind_group(resampledSource);
        }
        {
-@@ -333,16 +640,20 @@ void end_frame() noexcept {
+@@ -333,16 +641,20 @@ void end_frame() noexcept {
              .label = xfbHandle ? "XFB present render pass" : "EFB copy render pass",
              .colorAttachmentCount = attachments.size(),
              .colorAttachments = attachments.data(),
@@ -3519,7 +3520,7 @@ index b09ef4d..cc28246 100644
          if (rmlBindGroup && rmlOverlay) {
            pass.SetPipeline(webgpu::g_CopyPremultipliedAlphaPipeline);
            pass.SetBindGroup(0, rmlBindGroup, 0, nullptr);
-@@ -362,67 +673,174 @@ void end_frame() noexcept {
+@@ -362,67 +674,185 @@ void end_frame() noexcept {
              .label = "ImGui render pass",
              .colorAttachmentCount = attachments.size(),
              .colorAttachments = attachments.data(),
@@ -3645,7 +3646,10 @@ index b09ef4d..cc28246 100644
 +      // GXRuntime recomp patch: the screen's refresh, when asked for: the same
 +      // picture presented again and again; each has to wait for the screen,
 +      // so the gaps between them are its refresh period.
-+      if (info.real && g_refreshProbes.exchange(0) > 0 && g_surface) {
++      int pending = g_refreshProbes.load();
++      if (info.real && pending > 1)
++        g_refreshProbes.compare_exchange_strong(pending, pending - 1);
++      else if (info.real && pending == 1 && g_refreshProbes.exchange(0) == 1 && g_surface) {
 +        constexpr int kProbes = 24;
 +        std::vector<int64_t> stamps;
 +        for (int i = 0; i < kProbes; ++i) {
@@ -3665,16 +3669,24 @@ index b09ef4d..cc28246 100644
 +        }
 +        // The first several fill the queue; after that each one waits a whole
 +        // refresh, so their average gap is the screen's period (one gap jitters).
-+        constexpr size_t kSkip = 8;
-+        int64_t period = 0;
-+        if (stamps.size() >= kSkip + 8)
-+          period = (stamps.back() - stamps[kSkip]) / static_cast<int64_t>(stamps.size() - 1 - kSkip);
++        // Both halves must agree: presents that do not wait yet (a compositor
++        // still starting, as the Steam Deck's measured 197 Hz once) are not it.
++        int64_t period = 0, first = 0, second = 0;
++        if (stamps.size() == kProbes) {
++          first = (stamps[16] - stamps[8]) / 8;
++          second = (stamps[23] - stamps[16]) / 7;
++          if (std::llabs(first - second) * 100 <= 3 * std::max(first, second))
++            period = (stamps[23] - stamps[8]) / 15;
++        }
 +        if (period > 2'000'000 && period < 40'000'000) {
 +          g_refreshPeriodNs.store(period);
 +          std::fprintf(stderr, "[display] refresh measured: %.3f ms (%.2f Hz)\n", period / 1e6, 1e9 / period);
 +        } else {
-+          std::fprintf(stderr, "[display] refresh not measured: %zu presents, median gap %.3f ms\n", stamps.size(),
-+                       period / 1e6);
++          std::fprintf(stderr, "[display] refresh not measured: %zu presents, gaps %.3f / %.3f ms\n", stamps.size(),
++                       first / 1e6, second / 1e6);
++          // Again in about a second, three times at most.
++          if (g_refreshRetries.fetch_add(1) < 3)
++            g_refreshProbes.store(60);
 +        }
 +      }
 +    } else if (g_surface && info.present) {
@@ -3713,7 +3725,7 @@ index b09ef4d..cc28246 100644
      gfx::after_submit();
  
      TracyPlotConfig("aurora: lastVertSize", tracy::PlotFormatType::Memory, false, true, 0);
-@@ -440,7 +858,7 @@ void end_frame() noexcept {
+@@ -440,7 +870,7 @@ void end_frame() noexcept {
      TracyPlot("aurora: lastIndexSize", static_cast<int64_t>(gfx::g_stats.lastIndexSize));
      TracyPlot("aurora: lastStorageSize", static_cast<int64_t>(gfx::g_stats.lastStorageSize));
      TracyPlot("aurora: lastTextureUploadSize", static_cast<int64_t>(gfx::g_stats.lastTextureUploadSize));
@@ -3722,7 +3734,7 @@ index b09ef4d..cc28246 100644
  
  #endif
  }
-@@ -475,6 +893,35 @@ void aurora_set_resampler(AuroraSampler sampler) {
+@@ -475,6 +905,38 @@ void aurora_set_resampler(AuroraSampler sampler) {
    (void)sampler;
  #endif
  }
@@ -3732,7 +3744,10 @@ index b09ef4d..cc28246 100644
 +  aurora::g_interpPhases.assign(phases, phases + count);
 +}
 +void aurora_set_present_spacing_ns(int64_t ns) { aurora::g_presentSpacingNs.store(ns); }
-+void aurora_request_refresh_probe(void) { aurora::g_refreshProbes.store(1); }
++void aurora_request_refresh_probe(void) {
++  aurora::g_refreshRetries.store(0);
++  aurora::g_refreshProbes.store(1);
++}
 +int64_t aurora_get_refresh_period_ns(void) { return aurora::g_refreshPeriodNs.load(); }
 +void aurora_get_interp_stats(AuroraInterpStats* out) {
 +  if (out == nullptr)

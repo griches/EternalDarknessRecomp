@@ -1,5 +1,9 @@
 # Eternal Darkness Recomp
 
+[![stars](https://img.shields.io/github/stars/griches/EternalDarknessRecomp?style=flat)](https://github.com/griches/EternalDarknessRecomp/stargazers)
+[![release](https://img.shields.io/github/v/release/griches/EternalDarknessRecomp)](https://github.com/griches/EternalDarknessRecomp/releases/latest)
+[![licence](https://img.shields.io/badge/licence-GPL--3.0-blue)](LICENSE)
+
 **Eternal Darkness: Sanity's Requiem** (GameCube, 2002) as a native game for the Mac,
 Windows and Linux / Steam Deck, built from **your own disc**. Nothing from the game
 is in this repository. The PlayStation 5 version is

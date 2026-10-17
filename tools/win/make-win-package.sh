@@ -16,7 +16,10 @@ SRC=$(cd "$(dirname "$0")/../.." && pwd)
 HERE="$SRC/tools/win"
 STAGE=$(cd "${1:?usage: make-win-package.sh STAGE [OUTDIR]}" && pwd)
 OUTDIR=${2:-$SRC/build/release}
-COMMIT=$(cat "$STAGE/build-commit")
+# The PC writes build-commit with a Windows line ending.
+COMMIT=$(tr -d '\r\n ' < "$STAGE/build-commit")
+git -C "$SRC" rev-parse -q --verify "$COMMIT^{commit}" > /dev/null ||
+    { echo "make-win-package.sh: build-commit '$COMMIT' is not a commit here" >&2; exit 2; }
 STAMP=$(date +%Y%m%d%H%M)
 
 work=$(mktemp -d)

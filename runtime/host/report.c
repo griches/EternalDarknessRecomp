@@ -5,6 +5,9 @@
 // a report carries what led up to the problem on any device (the Mac app,
 // the Deck, the PS5 and the PC have no log file). ED_NO_LOG_TEE=1 leaves
 // them alone.
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE  // glibc: dladdr, for the crash report's image base
+#endif
 #include "host/report.h"
 
 #include "gxruntime/aurora_backend.h"

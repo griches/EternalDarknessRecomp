@@ -496,8 +496,8 @@ Row layout_row() {
     Row layout{"Layout", "\u2039 " + std::string(controls::layout_name(controls::layout())) + " \u203a"};
     static const char* const kLayoutNotes[] = {
         "The GameCube's button positions.",
-        "Attack RT/A, action B, aim LT, sprint L3, creep R3; LB/RB page menus.",
-        "Your own buttons: change them in Button mapping."};
+        "Attack RT/A, action B, aim LT, sprint L3, creep R3. The Tome: A B X Y, LB/RB page.",
+        "Your own buttons (Button mapping). The Tome: A B X Y, LB/RB page."};
     layout.note = kLayoutNotes[controls::layout()];
     layout.change = [](int dir) {
         int l = controls::layout();

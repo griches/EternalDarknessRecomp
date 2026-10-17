@@ -9,6 +9,8 @@
 
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_gamepad.h>
+#include <SDL3/SDL_hints.h>
+#include <SDL3/SDL_joystick.h>
 #include <SDL3/SDL_keyboard.h>
 #include <SDL3/SDL_scancode.h>
 #include <SDL3/SDL_timer.h>
@@ -20,6 +22,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <vector>
 
 namespace controls {
 namespace {
@@ -86,6 +89,17 @@ const int kModernPad[kActionCount][2] = {
     {kDUp, kNone},  {kDDown, kNone}, {kDLeft, kNone}, {kDRight, kNone},
 };
 
+// The Tome (the game's pause menu) in Modern and Custom: the GameCube face
+// buttons where they sit in Original, so its pages' A, B, X and Y are the
+// controller's A, B, X and Y; the bumpers page it (L and R) and either
+// trigger is Z (the map's current floor). Original needs none: it is these
+// positions already. The keyboard keeps its keys.
+const int kTomePad[kActionCount][2] = {
+    {kSouth, kNone}, {kEast, kNone}, {kWest, kNone},  {kNorth, kNone},
+    {kRT, kLT},      {kLB, kNone},   {kRB, kNone},    {kStart, kNone},
+    {kDUp, kNone},   {kDDown, kNone}, {kDLeft, kNone}, {kDRight, kNone},
+};
+
 Binding g_bindings[kActionCount];
 int g_layout = 0;
 // The game's pause menu is open (set on the game thread, read by the icons).
@@ -95,6 +109,16 @@ SDL_Gamepad* g_pad = nullptr;
 int g_capture = -1;         // action waiting for an input, or -1
 Uint64 g_capture_deadline = 0;
 bool g_capture_armed = false;  // every input released since capture began
+
+// The controller inputs an action reads now: the Tome's while it is open
+// (in Modern and Custom), else the action's binding.
+bool tome_buttons() {
+    return g_layout != kOriginal && g_game_menu.load(std::memory_order_relaxed);
+}
+
+const int* pad_inputs(int action) {
+    return tome_buttons() ? kTomePad[action] : g_bindings[action].pad;
+}
 
 SDL_Gamepad* gamepad() {
     if (g_pad != nullptr && SDL_GamepadConnected(g_pad))
@@ -133,6 +157,88 @@ int native_value(SDL_Gamepad* pad, int n) {
     case kDLeft: return button(SDL_GAMEPAD_BUTTON_DPAD_LEFT);
     case kDRight: return button(SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
     default: return 0;
+    }
+}
+
+// Test input without a controller: ED_PAD_SCRIPT=start,end,input;... holds
+// each input (south, rt, lb, start...) from guest frame start to end
+// (timebase / 675000, the frames ED_INPUT_SCRIPT counts) on a virtual Xbox
+// controller, or a DualSense with ED_PAD_BRAND=ps.
+struct ScriptedInput {
+    unsigned long long start, end;
+    int input;
+};
+std::vector<ScriptedInput> g_script;
+SDL_Joystick* g_virtual = nullptr;
+std::atomic<unsigned long long> g_frame{0};
+
+int native_from_id(const std::string& id);
+
+void attach_virtual_pad() {
+    const char* text = std::getenv("ED_PAD_SCRIPT");
+    if (text == nullptr || text[0] == '\0')
+        return;
+    const std::string all = text;
+    for (size_t pos = 0; pos <= all.size();) {
+        size_t end = all.find(';', pos);
+        if (end == std::string::npos)
+            end = all.size();
+        const std::string item = all.substr(pos, end - pos);
+        pos = end + 1;
+        unsigned long long start = 0, stop = 0;
+        char id[16] = {};
+        if (std::sscanf(item.c_str(), "%llu,%llu,%15s", &start, &stop, id) == 3 &&
+            native_from_id(id) != kNone)
+            g_script.push_back({start, stop, native_from_id(id)});
+    }
+    const char* brand = std::getenv("ED_PAD_BRAND");
+    const bool ps = brand != nullptr && std::strcmp(brand, "ps") == 0;
+    // Presses count while the window is in the background (a test run).
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    SDL_VirtualJoystickDesc desc;
+    SDL_INIT_INTERFACE(&desc);
+    desc.type = SDL_JOYSTICK_TYPE_GAMEPAD;
+    desc.naxes = SDL_GAMEPAD_AXIS_COUNT;
+    desc.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
+    desc.vendor_id = ps ? 0x054c : 0x045e;
+    desc.product_id = ps ? 0x0ce6 : 0x0b12;
+    desc.name = ps ? "Scripted DualSense" : "Scripted Xbox controller";
+    const SDL_JoystickID id = SDL_AttachVirtualJoystick(&desc);
+    g_virtual = id != 0 ? SDL_OpenJoystick(id) : nullptr;
+    // A trigger at rest is the axis minimum (0 is half pressed).
+    if (g_virtual != nullptr) {
+        SDL_SetJoystickVirtualAxis(g_virtual, SDL_GAMEPAD_AXIS_LEFT_TRIGGER, SDL_JOYSTICK_AXIS_MIN);
+        SDL_SetJoystickVirtualAxis(g_virtual, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, SDL_JOYSTICK_AXIS_MIN);
+    }
+    std::fprintf(stderr, "[controls] %s, %zu scripted presses%s\n", desc.name, g_script.size(),
+                 g_virtual != nullptr ? "" : " (could not attach)");
+}
+
+void drive_virtual_pad() {
+    if (g_virtual == nullptr)
+        return;
+    const unsigned long long frame = g_frame.load(std::memory_order_relaxed);
+    bool down[kNativeCount] = {};
+    for (const ScriptedInput& press : g_script)
+        if (frame >= press.start && frame < press.end)
+            down[press.input] = true;
+    static const SDL_GamepadButton kButtons[kNativeCount] = {
+        SDL_GAMEPAD_BUTTON_SOUTH,         SDL_GAMEPAD_BUTTON_EAST,
+        SDL_GAMEPAD_BUTTON_WEST,          SDL_GAMEPAD_BUTTON_NORTH,
+        SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER,
+        SDL_GAMEPAD_BUTTON_INVALID,       SDL_GAMEPAD_BUTTON_INVALID,
+        SDL_GAMEPAD_BUTTON_LEFT_STICK,    SDL_GAMEPAD_BUTTON_RIGHT_STICK,
+        SDL_GAMEPAD_BUTTON_START,         SDL_GAMEPAD_BUTTON_DPAD_UP,
+        SDL_GAMEPAD_BUTTON_DPAD_DOWN,     SDL_GAMEPAD_BUTTON_DPAD_LEFT,
+        SDL_GAMEPAD_BUTTON_DPAD_RIGHT};
+    for (int n = 0; n < kNativeCount; n++) {
+        if (n == kLT || n == kRT)
+            SDL_SetJoystickVirtualAxis(g_virtual,
+                                       n == kLT ? SDL_GAMEPAD_AXIS_LEFT_TRIGGER
+                                                : SDL_GAMEPAD_AXIS_RIGHT_TRIGGER,
+                                       down[n] ? SDL_JOYSTICK_AXIS_MAX : SDL_JOYSTICK_AXIS_MIN);
+        else
+            SDL_SetJoystickVirtualButton(g_virtual, kButtons[n], down[n]);
     }
 }
 
@@ -324,9 +430,33 @@ bool SDLCALL mark_watch(void*, SDL_Event* event) {
     return true;
 }
 
+// Inputs held when the Tome's buttons come or go read as let go until they
+// are released, so the button that was attacking does not press its new
+// GameCube button.
+bool g_tome_was = false;
+bool g_held_over[kNativeCount];
+
+int live_value(SDL_Gamepad* pad, int n) {
+    const int v = native_value(pad, n);
+    if (n == kNone || !g_held_over[n])
+        return v;
+    if (v < 64)
+        g_held_over[n] = false;
+    return 0;
+}
+
 bool read_pad(DolPadState* state) {
+    static bool scripted = (attach_virtual_pad(), true);
+    (void)scripted;
+    drive_virtual_pad();
     SDL_Gamepad* pad = gamepad();
     note_last_device(pad);
+    const bool tome = tome_buttons();
+    if (tome != g_tome_was) {
+        for (int n = 0; n < kNativeCount; n++)
+            g_held_over[n] = native_value(pad, n) >= 64;
+        g_tome_was = tome;
+    }
     DolPadState s{};
     // The main stick first: toggled sprint ends when you stop moving.
     int x = stick(pad, SDL_GAMEPAD_AXIS_LEFTX, false);
@@ -345,13 +475,17 @@ bool read_pad(DolPadState* state) {
     for (int a = 0; a < kActionCount; a++) {
         // In toggle mode only the first button and the key toggle; a second
         // button (Modern's bumpers) is a plain hold, so it pages menus once.
-        int v = native_value(pad, g_bindings[a].pad[0]);
-        const int held = native_value(pad, g_bindings[a].pad[1]);
+        // The Tome's buttons are all plain holds (a toggle stays as it was
+        // for when play resumes).
+        const int* inputs = pad_inputs(a);
+        int v = live_value(pad, inputs[0]);
+        const int held = live_value(pad, inputs[1]);
         if (key_down(g_bindings[a].key))
             v = 255;
-        if (!toggle_mode(a))
+        const bool toggles = !tome && toggle_mode(a);
+        if (!toggles)
             v = std::max(v, held);
-        if (toggle_mode(a)) {
+        if (toggles) {
             const bool down = v >= 128;
             if (down && !g_was_down[a]) {
                 g_toggled[a] = !g_toggled[a];
@@ -363,7 +497,7 @@ bool read_pad(DolPadState* state) {
             }
             g_was_down[a] = down;
             v = std::max(g_toggled[a] ? 255 : 0, held);
-        } else {
+        } else if (!tome) {
             g_toggled[a] = false;
         }
         if (a == kSprint || a == kTarget) {
@@ -388,6 +522,13 @@ bool read_pad(DolPadState* state) {
     s.stick_y = static_cast<s8>(y);
     s.substick_x = static_cast<s8>(cx);
     s.substick_y = static_cast<s8>(cy);
+    // ED_PAD_LOG=1: the GameCube buttons the game gets, at each change.
+    static const bool log = std::getenv("ED_PAD_LOG") != nullptr;
+    static unsigned last = 0;
+    if (log && s.button != last)
+        std::fprintf(stderr, "[pad] frame %llu: 0x%04x%s\n", g_frame.load(), s.button,
+                     tome ? " (Tome buttons)" : "");
+    last = s.button;
     *state = s;
     return true;
 }
@@ -505,10 +646,10 @@ std::string action_glyph(int action, int preference) {
         const std::string file = key_glyph_file(action);
         return file.empty() ? "" : file + ".png";
     }
-    // Face buttons for the face cells. Shoulder cells: triggers, then
-    // bumpers, in play (Modern's Target is LT, with RB as well); bumpers, then
-    // triggers, in the game's pause menu, so its paging pairs LB with RB.
-    // Else the first.
+    // The buttons the action reads now (the Tome's while it is open). Face
+    // buttons for the face cells. Shoulder cells: triggers, then bumpers, in
+    // play (Modern's Target is LT, with RB as well); bumpers, then triggers,
+    // in the game's pause menu, so its paging pairs LB with RB. Else the first.
     const bool paging = g_game_menu.load(std::memory_order_relaxed);
     auto rank = [&](int n) {
         if (n == kNone)
@@ -521,10 +662,11 @@ std::string action_glyph(int action, int preference) {
         }
         return 1;
     };
+    const int* inputs = pad_inputs(action);
     int pick = kNone;
-    for (int n : g_bindings[action].pad)
-        if (rank(n) > rank(pick))
-            pick = n;
+    for (int i = 0; i < 2; i++)
+        if (rank(inputs[i]) > rank(pick))
+            pick = inputs[i];
     return pick == kNone ? "" : set + "/" + kNativeIds[pick] + ".png";
 }
 
@@ -536,10 +678,11 @@ uint64_t glyph_signature() {
     };
     mix(glyph_set());
     mix(serialize());
-    // The shoulder icons that change with the pause menu (only those, so
-    // opening it redraws the icons only when one differs).
+    // The icons that change with the pause menu (its shoulder icons, and the
+    // Tome's buttons), so opening it redraws them only when one differs.
     for (int a = 0; a < kActionCount; a++)
-        mix(action_glyph(a, kShoulderButton));
+        for (int preference : {kAnyButton, kFaceButton, kShoulderButton})
+            mix(action_glyph(a, preference));
     return h;
 }
 
@@ -635,6 +778,10 @@ extern "C" void controls_init(void) {
         load_preset(g_layout == kCustom ? kOriginal : g_layout);
     dol_aurora_set_pad0_override(read_pad);
     SDL_AddEventWatch(mark_watch, nullptr);
+}
+
+extern "C" void controls_note_frame(unsigned long long frame) {
+    controls::g_frame.store(frame, std::memory_order_relaxed);
 }
 
 extern "C" void controls_set_game_menu(bool open) {

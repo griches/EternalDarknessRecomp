@@ -3578,6 +3578,7 @@ static void hle_PADRead(CPUState* cpu) {
     DolPadState state[4];
     memset(state, 0, sizeof state);
     controls_set_game_menu(game_menu_open(cpu));
+    controls_note_frame(cpu->timebase / 675000ull);
     u32 motor_mask = dol_platform_pad_read(state);
     if (g_auto_input) {
         const u64 frame = cpu->timebase / 675000ull;

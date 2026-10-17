@@ -75,6 +75,8 @@ extern "C" {
 void controls_init(void);
 // Whether the game's pause menu is open (hle.c, each pad read).
 void controls_set_game_menu(bool open);
+// The guest frame (timebase / 675000) of this pad read, for ED_PAD_SCRIPT.
+void controls_note_frame(unsigned long long frame);
 #ifdef __cplusplus
 }
 #endif

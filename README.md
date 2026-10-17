@@ -10,42 +10,94 @@ Version 0.8.0.
 > **European GameCube disc, `GEDP01`**. The USA disc (`GEDE01`) is not supported:
 > the launcher does not offer it and the installers turn it away.
 
-## Install
+## What you need
+
+- Your own image of the European disc: an `.iso` or `.gcm` file.
+- For the HD textures, a program that opens `.7z` files: 7-Zip on Windows, Keka
+  or The Unarchiver on a Mac, Ark on a Steam Deck's desktop.
+
+## Set it up
+
+### 1. The game
 
 - **Mac** (Apple silicon, macOS 13 or later)
-  1. Download `EternalDarkness-mac-....zip` from the release, unzip it and move
-     **Eternal Darkness.app** to Applications.
+  1. Download `EternalDarkness-mac-....zip` from the
+     [latest release](https://github.com/griches/EternalDarknessRecomp/releases/latest),
+     unzip it and move **Eternal Darkness.app** to Applications.
   2. The first time, right-click the app, choose **Open**, then **Open** again
      (it is not notarised).
-  3. Drop your European disc image on its window. It translates the disc and
-     builds the game from it (a minute or two), then starts. Later starts are
-     instant.
+  3. Drop your disc image on its window. It translates the disc and builds the
+     game from it (a minute or two), then starts. Later starts are instant.
 - **Steam Deck / Linux**
-  1. Build the game folder (`tools/deck/make-deck-package.sh`, see below), copy it
-     somewhere such as `~/Games/EternalDarkness` and put your disc image in it.
+  1. Build the game folder (`tools/deck/make-deck-package.sh`, see
+     [Building from source](#building-from-source)), copy it somewhere such as
+     `~/Games/EternalDarkness` and put your disc image in it.
   2. Run `play.sh`. On a Deck: Desktop Mode, Steam > Add a Non-Steam Game >
      `play.sh`, then play it from Game Mode. The first start builds the game
      (about half a minute).
-- **Windows**: build it from source (below), then run `play.bat`.
+- **Windows**: build it from source ([below](#building-from-source)), put your
+  disc image in `dump/`, then run `play.bat`.
 
-Your saves and settings stay in the game's folder (the Mac app's is
-`~/Library/Application Support/Eternal Darkness`).
+### 2. The HD textures (recommended)
 
-## HD texture pack
+Two downloads, both DDS:
 
-1. Get a Dolphin HD texture pack for Eternal Darkness: a folder of `tex1_....png`
-   or `tex1_....dds` files. DDS packs (BC7) stay compressed on the graphics card,
-   a quarter of the memory of PNG ones.
-2. Copy those files (any subfolders are fine) into a folder called `textures`:
+| Download | What it is | Size |
+| --- | --- | --- |
+| **[Eternal Darkness HD Texture Pack](https://mega.nz/file/6m5TQToI#v09Y_gYdtZ24WTT6BlfCeM5uvw1nRs3QozcYZkUVVqg)** by Zombie | The game's textures redrawn at four times the detail | 2.9 GB `.7z` on Mega |
+| **[PAL supplement](https://www.bouncingball.mobi/eternaldarkness/files/ED-PAL-supplement-dds.zip?v=2)** by Eternal Darkness Recomp | What the pack misses on the European disc: the Jump to Game, Options and Language screens and the title menu's words, and highlights without hard edges | 10.7 MB `.zip` |
+
+1. Unpack both. Each one gives you a folder.
+2. Put both folders in a folder called `textures` (make it if it isn't there):
    - Mac app: `~/Library/Application Support/Eternal Darkness/textures`
-   - everywhere else: `textures/` in the game's folder, next to `res/`
-3. Start the game again: it finds the pack when it starts. **Options > Game >
-   HD textures** turns it on and off while you play.
+     (in Finder, **Go > Go to Folder** and paste the path)
+   - Steam Deck, Linux and Windows: `textures` in the game's folder, next to
+     `res`
 
-Packs can sit side by side in `textures`. Where two have the same texture, a
-folder with *supplement* or *override* in its name wins, so a fix-up pack such
-as the PAL supplement (the European disc's screens and words the main pack
-misses) goes beside the main pack as it is.
+Leave both folders as they are: the supplement replaces some of the pack's
+textures on purpose, and a folder with *supplement* in its name always wins.
+DDS stays compressed on the graphics card, a quarter of the memory PNG takes.
+PNG versions of both are on the
+[website](https://www.bouncingball.mobi/eternaldarkness/#hd) if you need them.
+
+The pack is the work of **Zombie**, shared on the
+[Dolphin forums](https://forums.dolphin-emu.org/Thread-eternal-darkness-hd).
+
+### 3. Check the folder
+
+When you're done, `textures` looks like this:
+
+```
+textures/
+├── GED DDS 1.0/                   Zombie's pack (any folder name works)
+└── Eternal Darkness HD Texture Pack PAL supplement/
+```
+
+### 4. Play
+
+Start the game and choose **New game** in the launcher. The defaults are
+already the best picture: your screen's own resolution, widescreen, HD textures
+on and sharp baked shadows. In **Options > Game**, **HD textures** should say
+**On**, and its note gives the number of textures it found.
+
+### If something's wrong
+
+- **The Mac says the app can't be opened**: right-click it and choose **Open**
+  (step 2 above).
+- **The disc isn't accepted**: only the European disc (`GEDP01`) works, as an
+  `.iso` or `.gcm`.
+- **HD textures says No pack**: the pack isn't inside `textures`. Check the
+  folder against the one above, then start the game again: it looks for the
+  pack as it starts.
+- **Anything else**: send the files in `saves/reports/` with a few words on what
+  you were doing.
+
+### Updating
+
+Put the new build in place of the old one (on a Mac, the new app in
+Applications). Saves, settings and textures stay where they are: in the game's
+folder, or the Mac app's
+`~/Library/Application Support/Eternal Darkness`.
 
 ## What is better than on the GameCube
 
@@ -72,17 +124,20 @@ A controller works as it is; the keyboard works too. Two layouts and your own:
 
 | Action | Modern (default) | Original (GameCube positions) | Keyboard |
 | --- | --- | --- | --- |
-| Move | Left stick | Left stick | W A S D |
-| Attack / Confirm | RT or A | A | J |
-| Action / Cancel | B | B | K |
-| Target / Aim | LT or RB | RT | R |
-| Sprint | Left stick click (toggle), or hold LB | LT | E |
-| Creep | Right stick click (toggle) | X | U |
-| Reload | X | RB | Q |
-| Quickcast | Y | Y | I |
-| Spells | D-pad | D-pad | Arrow keys |
-| Game's pause menu | Start / Menu | Start | Enter |
-| This port's menu (saves, options) | Back / View / Select / Create | same | Esc |
+| Move | <img src="res/ui/glyphs/ink/xbox/stick_l.png" width="30" alt="Left stick"> | <img src="res/ui/glyphs/ink/xbox/stick_l.png" width="30" alt="Left stick"> | <img src="res/ui/glyphs/ink/kb/w.png" width="30" alt="W"><img src="res/ui/glyphs/ink/kb/a.png" width="30" alt="A"><img src="res/ui/glyphs/ink/kb/s.png" width="30" alt="S"><img src="res/ui/glyphs/ink/kb/d.png" width="30" alt="D"> |
+| Attack / Confirm | <img src="res/ui/glyphs/ink/xbox/rt.png" width="30" alt="RT"> or <img src="res/ui/glyphs/ink/xbox/south.png" width="30" alt="A"> | <img src="res/ui/glyphs/ink/xbox/south.png" width="30" alt="A"> | <img src="res/ui/glyphs/ink/kb/j.png" width="30" alt="J"> |
+| Action / Cancel | <img src="res/ui/glyphs/ink/xbox/east.png" width="30" alt="B"> | <img src="res/ui/glyphs/ink/xbox/east.png" width="30" alt="B"> | <img src="res/ui/glyphs/ink/kb/k.png" width="30" alt="K"> |
+| Target / Aim | <img src="res/ui/glyphs/ink/xbox/lt.png" width="30" alt="LT"> or <img src="res/ui/glyphs/ink/xbox/rb.png" width="30" alt="RB"> | <img src="res/ui/glyphs/ink/xbox/rt.png" width="30" alt="RT"> | <img src="res/ui/glyphs/ink/kb/r.png" width="30" alt="R"> |
+| Sprint | <img src="res/ui/glyphs/ink/xbox/l3.png" width="30" alt="Left stick click"> toggle, or hold <img src="res/ui/glyphs/ink/xbox/lb.png" width="30" alt="LB"> | <img src="res/ui/glyphs/ink/xbox/lt.png" width="30" alt="LT"> | <img src="res/ui/glyphs/ink/kb/e.png" width="30" alt="E"> |
+| Creep | <img src="res/ui/glyphs/ink/xbox/r3.png" width="30" alt="Right stick click"> toggle | <img src="res/ui/glyphs/ink/xbox/west.png" width="30" alt="X"> | <img src="res/ui/glyphs/ink/kb/u.png" width="30" alt="U"> |
+| Reload | <img src="res/ui/glyphs/ink/xbox/west.png" width="30" alt="X"> | <img src="res/ui/glyphs/ink/xbox/rb.png" width="30" alt="RB"> | <img src="res/ui/glyphs/ink/kb/q.png" width="30" alt="Q"> |
+| Quickcast | <img src="res/ui/glyphs/ink/xbox/north.png" width="30" alt="Y"> | <img src="res/ui/glyphs/ink/xbox/north.png" width="30" alt="Y"> | <img src="res/ui/glyphs/ink/kb/i.png" width="30" alt="I"> |
+| Spells | <img src="docs/glyphs/dpad.png" width="30" alt="D-pad"> | <img src="docs/glyphs/dpad.png" width="30" alt="D-pad"> | <img src="res/ui/glyphs/ink/kb/arrows.png" width="30" alt="Arrow keys"> |
+| Game's pause menu | <img src="res/ui/glyphs/ink/xbox/start.png" width="30" alt="Menu"> | <img src="res/ui/glyphs/ink/xbox/start.png" width="30" alt="Menu"> | <img src="res/ui/glyphs/ink/kb/enter.png" width="30" alt="Enter"> |
+| This port's menu (saves, options) | <img src="res/ui/glyphs/ink/xbox/back.png" width="30" alt="View"> | <img src="res/ui/glyphs/ink/xbox/back.png" width="30" alt="View"> | <img src="res/ui/glyphs/ink/kb/escape.png" width="30" alt="Esc"> |
+
+PlayStation and Switch controllers use the same buttons in the same places, and
+the game shows your controller's own icons.
 
 In the game's own menus LB and RB page left and right (the GameCube's L and R).
 **Options > Controls** switches layout, makes Sprint, Creep and Target hold or

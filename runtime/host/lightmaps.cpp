@@ -3,11 +3,14 @@
 // originals are CMPR atlases of a few texels per wall, so at 4K a shadow's
 // edge shows the compression's 4x4 blocks and the texels' stair-steps. Each
 // map is evened out (a bilateral filter takes out CMPR's colour steps and
-// keeps real edges), doubled twice by directional cubic convolution (DCCI,
-// Zhou, Fang and Lu 2012: along an edge it interpolates with the edge, not
-// across it), moved so its texel centres sit where the GPU samples them, and
-// lightly sharpened. The work runs on a worker; the original shows until its
-// replacement is ready. An HD texture pack's own version of a map wins.
+// keeps real edges). A big map (a floor) is then doubled twice by
+// directional cubic convolution (DCCI, Zhou, Fang and Lu 2012: along an edge
+// it interpolates with the edge, not across it), moved so its texel centres
+// sit where the GPU samples them, and lightly sharpened; a small one (a
+// wall's strip, a table) is upscaled with the smooth cubic B-spline, so its
+// glows stay round instead of turning lumpy. The work runs on a worker; the
+// original shows until its replacement is ready. An HD texture pack's own
+// version of a map wins.
 // Options > Game > Baked shadows: Sharp (this) or Original;
 // ED_LIGHTMAP_SMOOTH=0 turns it off for a run.
 #include "host/lightmaps.h"
@@ -54,11 +57,11 @@ float lum(const float* p) {
 }
 
 // CMPR keeps four colours a 4x4 block, so a glow comes out in flat steps that
-// the edge-keeping upscale would sharpen into contours: a bilateral filter
-// evens out differences of a few levels and leaves a shadow's edge alone.
-Image deblock(const Image& in) {
+// the upscale would sharpen into contours: a bilateral filter evens out
+// differences under `contrast` levels and leaves a shadow's edge alone.
+Image deblock_pass(const Image& in, float contrast) {
     constexpr int r = 2;
-    constexpr float spatial = 1.2f, contrast = 6.f;
+    constexpr float spatial = 1.2f;
     Image out(in.w, in.h);
     for (int y = 0; y < in.h; y++) {
         for (int x = 0; x < in.w; x++) {
@@ -80,6 +83,13 @@ Image deblock(const Image& in) {
                 o[c] = acc[c] / weights;
         }
     }
+    return out;
+}
+
+Image deblock(const Image& in, float contrast, int passes) {
+    Image out = deblock_pass(in, contrast);
+    for (int i = 1; i < passes; i++)
+        out = deblock_pass(out, contrast);
     return out;
 }
 
@@ -210,17 +220,56 @@ Image align(const Image& in) {
     return b;
 }
 
-// Unsharp mask on the 4x image: a shadow's edge a little steeper.
-void sharpen(Image& img, float amount) {
-    constexpr int r = 4;
-    constexpr float sigma = 1.5f;
-    float k[2 * r + 1];
+// A plain 4x upscale with the cubic B-spline: smooth, never overshooting, with
+// each output pixel sampled where the GPU would (no shift needed after).
+Image bspline4x(const Image& in) {
+    auto weights = [](float t, float w[4]) {
+        const float t2 = t * t, t3 = t2 * t;
+        w[0] = (1 - t) * (1 - t) * (1 - t) / 6.f;
+        w[1] = (3 * t3 - 6 * t2 + 4) / 6.f;
+        w[2] = (-3 * t3 + 3 * t2 + 3 * t + 1) / 6.f;
+        w[3] = t3 / 6.f;
+    };
+    Image a(in.w * 4, in.h), out(in.w * 4, in.h * 4);
+    for (int x = 0; x < a.w; x++) {
+        const float u = (x + 0.5f) / 4.f - 0.5f;
+        const int i = static_cast<int>(std::floor(u));
+        float w[4];
+        weights(u - i, w);
+        for (int y = 0; y < in.h; y++)
+            for (int c = 0; c < 4; c++) {
+                float v = 0;
+                for (int k = 0; k < 4; k++)
+                    v += w[k] * in.clamped(i - 1 + k, y)[c];
+                a.at(x, y)[c] = v;
+            }
+    }
+    for (int y = 0; y < out.h; y++) {
+        const float u = (y + 0.5f) / 4.f - 0.5f;
+        const int i = static_cast<int>(std::floor(u));
+        float w[4];
+        weights(u - i, w);
+        for (int x = 0; x < out.w; x++)
+            for (int c = 0; c < 4; c++) {
+                float v = 0;
+                for (int k = 0; k < 4; k++)
+                    v += w[k] * a.clamped(x, i - 1 + k)[c];
+                out.at(x, y)[c] = v;
+            }
+    }
+    return out;
+}
+
+// Separable Gaussian, edges repeated.
+Image gaussian(const Image& img, float sigma) {
+    const int r = std::max(1, static_cast<int>(std::ceil(3.f * sigma)));
+    std::vector<float> k(2 * r + 1);
     float sum = 0;
     for (int i = -r; i <= r; i++)
         sum += k[i + r] = std::exp(-i * i / (2 * sigma * sigma));
     for (float& v : k)
         v /= sum;
-    Image a(img.w, img.h), blur(img.w, img.h);
+    Image a(img.w, img.h), out(img.w, img.h);
     for (int y = 0; y < img.h; y++)
         for (int x = 0; x < img.w; x++)
             for (int c = 0; c < 4; c++) {
@@ -235,18 +284,37 @@ void sharpen(Image& img, float amount) {
                 float v = 0;
                 for (int i = -r; i <= r; i++)
                     v += k[i + r] * a.clamped(x + i, y)[c];
-                blur.at(x, y)[c] = v;
+                out.at(x, y)[c] = v;
             }
+    return out;
+}
+
+// Unsharp mask on the 4x image: a shadow's edge a little steeper.
+void sharpen(Image& img, float amount) {
+    const Image blur = gaussian(img, 1.5f);
     for (size_t i = 0; i < img.px.size(); i++)
         img.px[i] += amount * (img.px[i] - blur.px[i]);
 }
+
+// A map no more than kSmallMap texels on its short side (a wall's strip, a
+// table, a chair) holds little shape, and edge-keeping doubling turns its
+// CMPR steps into lumps: it is evened out harder and upscaled with the
+// smooth B-spline, so a lamp's glow is a round pool. Bigger maps (the floors)
+// keep the edges: doubled along them and lightly sharpened, so the light
+// through a window keeps its lattice.
+constexpr uint32_t kSmallMap = 40;
 
 uint8_t* upscale4(const uint8_t* rgba, uint32_t width, uint32_t height) {
     Image img(static_cast<int>(width), static_cast<int>(height));
     for (size_t i = 0; i < img.px.size(); i++)
         img.px[i] = rgba[i];
-    Image big = align(dcci2x(dcci2x(deblock(img))));
-    sharpen(big, 1.2f);
+    Image big(0, 0);
+    if (std::min(width, height) <= kSmallMap) {
+        big = bspline4x(deblock(img, 12.f, 2));
+    } else {
+        big = align(dcci2x(dcci2x(deblock(img, 6.f, 1))));
+        sharpen(big, 1.2f);
+    }
     auto* out = static_cast<uint8_t*>(std::malloc(big.px.size()));
     if (out == nullptr)
         return nullptr;

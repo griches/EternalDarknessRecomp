@@ -1,57 +1,120 @@
 # Eternal Darkness Recomp
 
-**Eternal Darkness: Sanity's Requiem** (GameCube) as a native game for Mac,
-Windows and Linux / Steam Deck, built from **your own disc**. Nothing from the
-game is in this repository. The PS5 version is
+**Eternal Darkness: Sanity's Requiem** (GameCube, 2002) as a native game for the Mac,
+Windows and Linux / Steam Deck, built from **your own disc**. Nothing from the game
+is in this repository. The PlayStation 5 version is
 [PS5_EternalDarkness](https://github.com/griches/PS5_EternalDarkness).
+Version 0.8.0.
 
-## Quick start
+> **European disc only.** You need your own image (`.iso` or `.gcm`) of the
+> **European GameCube disc, `GEDP01`**. The USA disc (`GEDE01`) is not supported:
+> the launcher does not offer it and the installers turn it away.
 
-You need your own disc image (`.iso` or `.gcm`) of the **European disc**, `GEDP01`. The USA
-disc is not supported.
+## Install
 
-**Mac (Apple silicon, macOS 13+)**
-1. Unzip `EternalDarkness-mac-....zip` and move **Eternal Darkness.app** to Applications.
-2. The first time, right-click the app, choose **Open**, then **Open** again (it is not notarised).
-3. Drop your disc image on its window. It builds the game from it (a minute or two), then starts.
+- **Mac** (Apple silicon, macOS 13 or later)
+  1. Download `EternalDarkness-mac-....zip` from the release, unzip it and move
+     **Eternal Darkness.app** to Applications.
+  2. The first time, right-click the app, choose **Open**, then **Open** again
+     (it is not notarised).
+  3. Drop your European disc image on its window. It translates the disc and
+     builds the game from it (a minute or two), then starts. Later starts are
+     instant.
+- **Steam Deck / Linux**
+  1. Build the game folder (`tools/deck/make-deck-package.sh`, see below), copy it
+     somewhere such as `~/Games/EternalDarkness` and put your disc image in it.
+  2. Run `play.sh`. On a Deck: Desktop Mode, Steam > Add a Non-Steam Game >
+     `play.sh`, then play it from Game Mode. The first start builds the game
+     (about half a minute).
+- **Windows**: build it from source (below), then run `play.bat`.
 
-**Steam Deck / Linux**
-1. Copy the game folder somewhere (for example `~/Games/EternalDarkness`) and put your disc image in it.
-2. Run `play.sh`. On a Deck: Desktop Mode, Steam > Add a Non-Steam Game > `play.sh`, then play it from Game Mode.
-   The first start builds the game (about half a minute).
+Your saves and settings stay in the game's folder (the Mac app's is
+`~/Library/Application Support/Eternal Darkness`).
 
-**Windows**: build it from source (below), then run `play.bat`.
+## HD texture pack
 
-**HD textures**
-1. Get a Dolphin HD texture pack for Eternal Darkness (a folder of `tex1_....png` files).
+1. Get a Dolphin HD texture pack for Eternal Darkness: a folder of `tex1_....png`
+   files.
 2. Copy those files (any subfolders are fine) into a folder called `textures`:
    - Mac app: `~/Library/Application Support/Eternal Darkness/textures`
-   - Everywhere else: `textures/` in the game folder, next to `res/`
-3. Start the game again. Options > HD textures turns the pack on and off.
+   - everywhere else: `textures/` in the game's folder, next to `res/`
+3. Start the game again: it finds the pack when it starts. **Options > Game >
+   HD textures** turns it on and off while you play.
 
-**Playing**
-- The launcher: **Play** (Continue, New game or a save slot) and **Options**.
-- In the game, **Esc** or the controller's **Back / Select / Create** button opens the pause
-  menu: four save slots, Options, Quit.
-- Keyboard: arrows = d-pad, J = A, K = B, U = X, I = Y, Q = Z, E/R = L/R, Enter = Start.
-  Controllers work as they are.
-- Your saves stay in the game folder (the Mac app's is `~/Library/Application Support/Eternal Darkness`):
-  `saves/` (the pause menu's slots) and `ed-GEDP01-slot-a.dolcard` (the game's memory card;
-  `...-slot-b.dolcard` is slot B).
+## What is better than on the GameCube
 
-**If something goes wrong**: when the game stops responding, stops or crashes it
-writes a report to `saves/reports/` in the game folder (for a hang, with a `.state`
-of that moment). Send those files with a few words on what you were doing.
+- **Sharp picture at any resolution**: drawn at your screen's own resolution, up
+  to 4K, or a fixed 720p, 1080p, 1440p or 4K, with full colour (no 6-bit banding).
+- **Widescreen**: the game's own 16:9 mode (more of the room at the sides, not
+  stretched) with the HUD and prompts at the screen's edges; 4:3 too.
+- **New baked shadows** (below): the rooms' light and shadow redrawn sharp.
+- **Crisp game text**: the game's lettering redrawn in two styles, *Sharp* or
+  *Tome* (old typefaces), or *Original* as on the disc.
+- **HD texture packs** in Dolphin's format.
+- **Modern controls**, remapping, and button prompts that match your controller
+  (Xbox, PlayStation or Switch icons), the game's own prompts included.
+- **Save anywhere**: the pause menu has four save slots that hold the whole moment,
+  besides the game's own memory-card saves (cards in slots A and B both work).
+- **A launcher**: Continue, New game or any save slot straight from the start,
+  and Options for everything here.
+- **Problem reports**: if the game stops responding, stops or crashes, it says
+  so on screen and writes a report to `saves/reports/` to send.
 
-## About
+## Controls
+
+A controller works as it is; the keyboard works too. Two layouts and your own:
+
+| Action | Modern (default) | Original (GameCube positions) | Keyboard |
+| --- | --- | --- | --- |
+| Move | Left stick | Left stick | W A S D |
+| Attack / Confirm | RT or A | A | J |
+| Action / Cancel | B | B | K |
+| Target / Aim | LT or RB | RT | R |
+| Sprint | Left stick click (toggle), or hold LB | LT | E |
+| Creep | Right stick click (toggle) | X | U |
+| Reload | X | RB | Q |
+| Quickcast | Y | Y | I |
+| Spells | D-pad | D-pad | Arrow keys |
+| Game's pause menu | Start / Menu | Start | Enter |
+| This port's menu (saves, options) | Back / View / Select / Create | same | Esc |
+
+In the game's own menus LB and RB page left and right (the GameCube's L and R).
+**Options > Controls** switches layout, makes Sprint, Creep and Target hold or
+toggle, sets the stick deadzone and vibration, and **Button mapping** rebinds any
+action to a button, trigger or key (that layout is *Custom*).
+
+## The new baked shadows
+
+Eternal Darkness lights its rooms with pre-drawn light maps: the window light on
+the floors, the shadows under the furniture, the glow of the lamps. On the disc
+they are small and compressed, so at today's resolutions their edges break up
+into blocks and smears. With **Options > Game > Baked shadows: Sharp** (the
+default) each room's light maps are rebuilt four times larger as the room loads:
+the compression blocks are evened out and edges are doubled along their own
+direction, so light and shadow keep clean edges; the small maps on the walls are
+smoothed instead. **Original** shows them as on the disc. The change shows as soon
+as you switch.
+
+## Playing
+
+- The launcher's **Play** offers Continue (your newest save slot), New game or
+  any slot. **Options** holds the display, sound, controls and game settings.
+- In the game, the menu button (above) or **Esc** opens this port's pause menu:
+  four save slots, Options, Return to title screen, Return to launcher, Quit.
+- Saves: `saves/` (the pause menu's slots) and `ed-GEDP01-slot-a.dolcard` (the
+  game's memory card; a `...-slot-b.dolcard` beside it is slot B).
+- If something goes wrong, send the files in `saves/reports/` with a few words on
+  what you were doing.
+
+## How it works
 
 The game's PowerPC code is translated to C by
-[DolRecomp](https://github.com/ExpansionPak/DolRecomp) and runs on
-[GXRuntime](https://github.com/aharonahdoot/GXRuntime) with the Aurora renderer.
-`generated/` (code translated from your disc) and `dump/` (your disc image)
-stay on your machine. The game plays through with its music, voices, movies and
-effects; widescreen, higher resolutions, HD texture packs, sharper baked shadows
-and remappable controls are in the launcher's Options.
+[DolRecomp](https://github.com/ExpansionPak/DolRecomp) and compiled for your
+machine; it runs on [GXRuntime](https://github.com/aharonahdoot/GXRuntime), which
+supplies the GameCube's CPU state, devices and SDK services, and draws through its
+gxcore renderer (the GameCube's GX graphics, after Dolphin's) on Aurora and Dawn
+(Metal, Direct3D 12 or Vulkan). `generated/` (code translated from your disc) and
+`dump/` (your disc image) stay on your machine.
 
 ## Building from source
 
@@ -73,9 +136,6 @@ cp /path/to/disc.iso dump/GEDP01.iso          # the European disc
 - **Linux / Steam Deck**: build with clang and Ninja (`build-linux`);
   `tools/deck/make-deck-package.sh` makes a folder that builds the game from
   your disc on first start (`tools/deck/README.txt`).
-
-Keyboard: arrows = d-pad, J = A, K = B, U = X, I = Y, Q = Z, E/R = L/R,
-Enter = Start. Controllers work through SDL.
 
 `./play.sh` opens the launcher. The first time, pick the disc (images in
 `dump/` or the project folder; this build runs the disc it was generated from);

@@ -36,7 +36,7 @@ constexpr uint32_t kScale = 4;  // the game's texture without a pack image, enla
 
 // The textures, by Dolphin's name hash (the English ones where they have words).
 enum Art {
-    kMap, kPressA, kLanguage, kBrightness, kQuickY, kQuickDpad, kFaceCard,
+    kMap, kPressA, kPressAPal, kLanguage, kBrightness, kQuickY, kQuickDpad, kFaceCard,
     kNoteA, kNoteY, kNoteB, kNoteX, kSheet, kSheetTorn, kSheetTornLarge,
 };
 struct Texture {
@@ -46,7 +46,8 @@ struct Texture {
 };
 const Texture kTextures[] = {
     {0x09e293e32e372edeull, 432, 480, kMap},       {0x81611b2a3fc494ebull, 432, 480, kMap},
-    {0x069eb3996db5fb97ull, 266, 48, kPressA},     {0x7910715fce98efbfull, 850, 480, kLanguage},
+    {0x069eb3996db5fb97ull, 266, 48, kPressA},     {0xca3c336b53954eaeull, 388, 51, kPressAPal},
+    {0x7910715fce98efbfull, 850, 480, kLanguage},
     {0x9e51063f6b37567aull, 640, 480, kBrightness}, {0x5b2ecb5d1ba4b71aull, 75, 46, kQuickY},
     {0x1e01f71343d270a4ull, 72, 76, kQuickDpad},   {0x145356da7aa6f360ull, 143, 128, kFaceCard},
     {0x643354e7d16f12f6ull, 32, 64, kNoteA},       {0x66baf1041997e1f1ull, 32, 64, kNoteY},
@@ -521,6 +522,10 @@ void redraw(Art art, Canvas& c, const Glyphs& g) {
     case kPressA:
         rub_out(c, 109.5f, 28, 16.5f, 16.5f, 0, false);
         draw(c, {g.play[kAttack]}, 110, 28, 27, colour());
+        break;
+    case kPressAPal:  // the European disc's own lettering, A at another place
+        rub_out(c, 166.5f, 30.5f, 16.5f, 16.5f, 0, false);
+        draw(c, {g.play[kAttack]}, 166.5f, 30.5f, 32, colour());
         break;
     case kLanguage:
         rub_out(c, 394, 408, 14.5f, 14.5f, 0, false);

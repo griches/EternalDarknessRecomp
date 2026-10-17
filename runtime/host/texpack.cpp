@@ -35,6 +35,10 @@
 #include <unordered_set>
 #include <vector>
 
+#define BCDEC_IMPLEMENTATION
+#define BCDEC_STATIC
+#include "third_party/bcdec.h"
+
 namespace {
 
 struct Key {
@@ -400,3 +404,42 @@ extern "C" void texpack_init(void) {
 }
 
 size_t texpack_count() { return g.files.size(); }
+
+bool texpack_read_rgba(uint32_t format, uint32_t width, uint32_t height, uint64_t hash,
+                       std::vector<uint8_t>* rgba, uint32_t* out_width, uint32_t* out_height) {
+    if (generation() == 0)
+        return false;
+    const auto it = g.files.find(Key{format, width, height, hash});
+    if (it == g.files.end())
+        return false;
+    Loaded img;
+    const std::string& path = it->second;
+    if (!(is_dds(path) ? load_dds(path, &img)
+                       : load_png_rgba(path, &img.rgba, &img.width, &img.height)))
+        return false;
+    const size_t bytes = static_cast<size_t>(img.width) * img.height * 4;
+    if (img.format == DOL_AURORA_PACK_RGBA8) {
+        if (img.rgba.size() < bytes)
+            return false;
+        rgba->assign(img.rgba.begin(), img.rgba.begin() + bytes);
+    } else {
+        // Whole 4x4 blocks (load_dds checked), each decoded into place.
+        rgba->assign(bytes, 0);
+        const uint32_t block = img.format == DOL_AURORA_PACK_BC1 ? 8u : 16u;
+        const uint8_t* src = img.rgba.data();
+        const int pitch = static_cast<int>(img.width * 4);
+        for (uint32_t by = 0; by < img.height; by += 4)
+            for (uint32_t bx = 0; bx < img.width; bx += 4, src += block) {
+                uint8_t* dst = rgba->data() + (static_cast<size_t>(by) * img.width + bx) * 4;
+                switch (img.format) {
+                case DOL_AURORA_PACK_BC1: bcdec_bc1(src, dst, pitch); break;
+                case DOL_AURORA_PACK_BC2: bcdec_bc2(src, dst, pitch); break;
+                case DOL_AURORA_PACK_BC3: bcdec_bc3(src, dst, pitch); break;
+                default: bcdec_bc7(src, dst, pitch); break;
+                }
+            }
+    }
+    *out_width = img.width;
+    *out_height = img.height;
+    return true;
+}

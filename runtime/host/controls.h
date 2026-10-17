@@ -48,6 +48,9 @@ std::string controller_name();
 // (controls_set_game_menu). glyph_set() is "xbox", "ps", "switch" or "kb".
 enum GlyphPreference { kAnyButton, kFaceButton, kShoulderButton };
 std::string action_glyph(int action, int preference);
+// The same for a fixed place rather than the moment: in the Tome (its own
+// buttons, bumpers before triggers) or in play.
+std::string glyph_for(int action, int preference, bool tome);
 std::string glyph_set();
 // For the Tome's controls page (tome.cpp): the controller inputs bound to an
 // action in play, as icon names ("rt", "south"), and the bound key's icon

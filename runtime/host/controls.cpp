@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -639,18 +640,17 @@ std::string glyph_set() {
     return brand() == kPlayStation ? "ps" : brand() == kNintendo ? "switch" : "xbox";
 }
 
-std::string action_glyph(int action, int preference) {
+std::string glyph_for(int action, int preference, bool tome) {
     const std::string set = glyph_set();
     if (set == "kb") {
         // The key's icon file, as the menu shows it.
         const std::string file = key_glyph_file(action);
         return file.empty() ? "" : file + ".png";
     }
-    // The buttons the action reads now (the Tome's while it is open). Face
-    // buttons for the face cells. Shoulder cells: triggers, then bumpers, in
-    // play (Modern's Target is LT, with RB as well); bumpers, then triggers,
-    // in the game's pause menu, so its paging pairs LB with RB. Else the first.
-    const bool paging = g_game_menu.load(std::memory_order_relaxed);
+    // Face buttons for the face cells. Shoulder cells: triggers, then
+    // bumpers, in play (Modern's Target is LT, with RB as well); bumpers, then
+    // triggers, in the game's pause menu, so its paging pairs LB with RB.
+    // Else the first.
     auto rank = [&](int n) {
         if (n == kNone)
             return 0;
@@ -658,11 +658,11 @@ std::string action_glyph(int action, int preference) {
             return n >= kSouth && n <= kNorth ? 3 : 1;
         if (preference == kShoulderButton) {
             const bool bumper = n == kLB || n == kRB, trigger = n == kLT || n == kRT;
-            return bumper ? (paging ? 3 : 2) : trigger ? (paging ? 2 : 3) : 1;
+            return bumper ? (tome ? 3 : 2) : trigger ? (tome ? 2 : 3) : 1;
         }
         return 1;
     };
-    const int* inputs = pad_inputs(action);
+    const int* inputs = tome && g_layout != kOriginal ? kTomePad[action] : g_bindings[action].pad;
     int pick = kNone;
     for (int i = 0; i < 2; i++)
         if (rank(inputs[i]) > rank(pick))
@@ -670,7 +670,23 @@ std::string action_glyph(int action, int preference) {
     return pick == kNone ? "" : set + "/" + kNativeIds[pick] + ".png";
 }
 
+// The buttons the action reads now: the Tome's while it is open.
+std::string action_glyph(int action, int preference) {
+    return glyph_for(action, preference, g_game_menu.load(std::memory_order_relaxed));
+}
+
 uint64_t glyph_signature() {
+    // Asked on every draw of a redrawn sheet: worked out again only when the
+    // controller family, the layout, the bindings or the pause menu change.
+    const bool menu = g_game_menu.load(std::memory_order_relaxed);
+    const std::string key = glyph_set() + "|" + std::to_string(g_layout) + "|" + serialize() +
+                            (menu ? "|menu" : "");
+    static std::mutex mutex;
+    static std::string last_key;
+    static uint64_t last = 0;
+    std::lock_guard<std::mutex> lock(mutex);
+    if (key == last_key)
+        return last;
     uint64_t h = 1469598103934665603ull;
     auto mix = [&](const std::string& text) {
         for (unsigned char c : text)
@@ -682,7 +698,9 @@ uint64_t glyph_signature() {
     // Tome's buttons), so opening it redraws them only when one differs.
     for (int a = 0; a < kActionCount; a++)
         for (int preference : {kAnyButton, kFaceButton, kShoulderButton})
-            mix(action_glyph(a, preference));
+            mix(glyph_for(a, preference, menu));
+    last_key = key;
+    last = h;
     return h;
 }
 

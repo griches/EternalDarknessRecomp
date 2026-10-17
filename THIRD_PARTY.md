@@ -22,6 +22,7 @@ sound and music still come from the player's disc.
 | [SDL 3](https://libsdl.org) | Zlib | Window, input, audio |
 | [RmlUi](https://github.com/mikke89/RmlUi) | MIT | Launcher and in-game menus |
 | [Dear ImGui](https://github.com/ocornut/imgui) | MIT | FPS counter, debug overlays; its copy of stb_truetype writes the Tome controls page |
+| [bcdec](https://github.com/iOrange/bcdec) | MIT or Unlicense | Reads HD pack BC images back on the CPU for the redrawn button pictures (`runtime/third_party/bcdec.h`) |
 | [Abseil](https://abseil.io) | Apache-2.0 | Containers used by the renderer |
 | [xxHash](https://github.com/Cyan4973/xxHash) | BSD-2-Clause | Texture and pipeline hashes |
 | [{fmt}](https://github.com/fmtlib/fmt) | MIT | Text formatting |

@@ -43,7 +43,8 @@ constexpr float kInkAlpha = 0.86f;
 struct Image {
     uint32_t w = 0, h = 0;
     std::vector<uint8_t> rgba;
-    bool mixed = false;  // white and coloured parts (a d-pad with its lit direction)
+    bool mixed = false;  // white and coloured parts (a PlayStation symbol, a d-pad)
+    bool dpad = false;   // a d-pad and its lit direction
 };
 
 struct Row {
@@ -237,8 +238,8 @@ const Font& hand() {
 }
 
 constexpr float kTextPx = 116.f;  // the hand's size, ascender to descender
-constexpr int kBold = 3;  // strokes thickened by this many pixels: the font is
-                          // finer than the page's pen
+constexpr float kBold = 1.4f;  // strokes thickened by this many pixels: the font
+                               // is finer than the page's pen
 
 float text_width(const std::string& s, float px) {
     const Font& f = hand();
@@ -294,18 +295,23 @@ float write(Canvas& page, const std::string& s, float x, float baseline, float p
             pen += stbtt_GetCodepointKernAdvance(&f.info, ch, static_cast<unsigned char>(s[i + 1])) *
                    scale;
     }
-    // Thicken: the most coverage within kBold pixels (a round pen).
+    // Thicken: the most coverage within kBold pixels (a round pen, its edge
+    // soft so a fraction of a pixel counts).
+    constexpr int kReach = static_cast<int>(kBold) + 1;
     std::vector<unsigned char> bold(cover.size(), 0);
     for (int cy = 0; cy < h; cy++)
         for (int cx = 0; cx < w; cx++) {
-            unsigned char m = 0;
-            for (int dy = -kBold; dy <= kBold; dy++)
-                for (int dx = -kBold; dx <= kBold; dx++) {
+            float m = 0;
+            for (int dy = -kReach; dy <= kReach; dy++)
+                for (int dx = -kReach; dx <= kReach; dx++) {
                     const int sx = cx + dx, sy = cy + dy;
-                    if (dx * dx + dy * dy <= kBold * kBold && sx >= 0 && sy >= 0 && sx < w && sy < h)
-                        m = std::max(m, cover[static_cast<size_t>(sy) * w + sx]);
+                    if (sx < 0 || sy < 0 || sx >= w || sy >= h)
+                        continue;
+                    const float reach = std::min(
+                        1.f, std::max(0.f, kBold + 0.5f - std::sqrt(static_cast<float>(dx * dx + dy * dy))));
+                    m = std::max(m, cover[static_cast<size_t>(sy) * w + sx] * reach);
                 }
-            bold[static_cast<size_t>(cy) * w + cx] = m;
+            bold[static_cast<size_t>(cy) * w + cx] = static_cast<unsigned char>(m + 0.5f);
         }
     const int left = static_cast<int>(x - px * 0.25f);
     for (int cy = 0; cy < h; cy++)
@@ -337,6 +343,8 @@ const Image* icon(const std::string& file) {
             if (img.rgba[i + 3] >= 128)
                 (saturated(&img.rgba[i]) ? coloured : white) = true;
         img.mixed = white && coloured;
+        for (const char* d : {"/dup.", "/ddown.", "/dleft.", "/dright."})
+            img.dpad = img.dpad || file.find(d) != std::string::npos;
         it = cache.emplace(file, std::move(img)).first;
     }
     return it->second.rgba.empty() ? nullptr : &it->second;
@@ -345,8 +353,7 @@ const Image* icon(const std::string& file) {
 // Draws icons laid over each other (one, or the d-pad's four directions as a
 // whole d-pad), kIcon pixels square with the left edge at x, centred on cy,
 // as a stamp in the page's ink: its shape, with the letters cut out of it left
-// as paper. In an icon of white and coloured parts (a d-pad and its lit
-// direction) the white is a lighter wash, so the coloured part stands out.
+// as paper.
 void draw_icon(Canvas& page, const std::vector<const Image*>& layers, int x, int cy) {
     const int y = cy - kIcon / 2;
     for (int oy = 0; oy < kIcon; oy++)
@@ -362,7 +369,10 @@ void draw_icon(Canvas& page, const std::vector<const Image*>& layers, int x, int
                 for (uint32_t sy = sy0; sy < sy1; sy++)
                     for (uint32_t sx = sx0; sx < sx1; sx++) {
                         const uint8_t* p = &img->rgba[(static_cast<size_t>(sy) * img->w + sx) * 4];
-                        ink += p[3] * (img->mixed && !saturated(p) ? 0.3f : 1.f);
+                        // A white symbol on a coloured button (PlayStation's)
+                        // stays paper like a cut-out letter; a d-pad's unlit
+                        // arms are a light wash under the lit one.
+                        ink += !img->mixed || saturated(p) ? p[3] : img->dpad ? p[3] * 0.3f : 0.f;
                         n++;
                     }
                 best = std::max(best, ink / n);

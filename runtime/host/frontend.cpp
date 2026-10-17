@@ -782,8 +782,21 @@ void build_in_game() {
     };
     g_rows.push_back(options);
 
+    // A reset: the machine as it booted, so the game starts again through its
+    // logos to the title screen (the launcher's New game, in place).
+    Row title{"Return to title screen"};
+    title.gap = true;
+    title.note = "Unsaved progress is lost.";
+    title.enabled = quickstate_boot_path() != nullptr;
+    title.activate = [] {
+        settings_save();
+        hle_set_skip_intro(false);
+        quickstate_request_load(quickstate_boot_path());
+        g_close = true;
+    };
+    g_rows.push_back(title);
+
     Row launcher{"Return to launcher"};
-    launcher.gap = true;
     launcher.note = "Unsaved progress is lost.";
     launcher.activate = [] {
         settings_save();

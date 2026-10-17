@@ -3,17 +3,19 @@
 # of this project ships, into OUT (one file per component, and THIRD_PARTY.md
 # as README.md). BUILD is the CMake build tree, whose _deps hold the libraries
 # it fetched; ZIG is the Zig folder, for the packages that carry the compiler.
+# DEPS (default: .deps here) is where DolRecomp and GXRuntime were set up.
 set -e
 SRC=$(cd "$(dirname "$0")/.." && pwd)
+DEPS=${DEPS:-$SRC/.deps}
 OUT=$1
 B=$2
 ZIG=$3
 mkdir -p "$OUT"
 cp "$SRC/THIRD_PARTY.md" "$OUT/README.md"
 cp "$SRC/LICENSE" "$OUT/EternalDarknessRecomp.txt"
-cp "$SRC/.deps/DolRecomp/LICENSE" "$OUT/DolRecomp.txt"
-cp "$SRC/.deps/GXRuntime/LICENSE" "$OUT/GXRuntime.txt"
-cp "$SRC/.deps/GXRuntime/graphics/aurora/LICENSE" "$OUT/Aurora.txt"
+cp "$DEPS/DolRecomp/LICENSE" "$OUT/DolRecomp.txt"
+cp "$DEPS/GXRuntime/LICENSE" "$OUT/GXRuntime.txt"
+cp "$DEPS/GXRuntime/graphics/aurora/LICENSE" "$OUT/Aurora.txt"
 cp "$SRC"/licenses/*.txt "$OUT/"
 cp "$SRC"/res/fonts/*-OFL.txt "$OUT/"
 cp "$SRC/res/ui/glyphs/LICENSE-Kenney-CC0.txt" "$OUT/Kenney-Input-Prompts-CC0.txt"

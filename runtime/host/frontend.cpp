@@ -255,6 +255,7 @@ struct Row {
     std::string value;           // empty: an action row
     std::string value_rml;       // markup instead of value (button icons)
     bool enabled = true;
+    bool browse = false;         // left/right still works while disabled (a slot picker on an empty slot)
     std::string note;            // shown under the menu while selected
     std::function<void(int)> change;  // left/right (-1/+1); null: no value
     std::function<void()> activate;   // A / click; null: same as change(+1)
@@ -754,7 +755,8 @@ void build_in_game() {
     Row load{"Load game", "\u2039 Slot " + std::to_string(g_slot) +
                               (slot_used(g_slot) ? " \u203a" : " \u00b7 empty \u203a")};
     load.enabled = slot_used(g_slot);
-    load.change = [](int dir) { g_slot = (g_slot - 1 + dir + 4) % 4 + 1; };
+    load.browse = true;
+    load.change =[](int dir) { g_slot = (g_slot - 1 + dir + 4) % 4 + 1; };
     load.activate = [] {
         quickstate_request_load(slot_path(g_slot).c_str());
         g_close = true;
@@ -1100,7 +1102,7 @@ bool run_menu() {
         }
         if ((pressed[kLeft] || pressed[kRight]) && g_selected < static_cast<int>(g_rows.size())) {
             Row& r = g_rows[g_selected];
-            if (r.change && r.enabled) {
+            if (r.change && (r.enabled || r.browse)) {
                 r.change(pressed[kLeft] ? -1 : +1);
                 dirty = true;
             }

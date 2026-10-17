@@ -10,7 +10,7 @@ Sanity's Requiem into a native Linux game.
    Game > Browse > this folder > play.sh. Then play it from Game Mode.
 
 The first start translates your disc and builds the game from it, which
-takes about half a minute on a Steam Deck. After that it starts straight
+takes about a minute on a Steam Deck. After that it starts straight
 away. If you swap in a different disc image it builds again.
 
 Saves, settings and logs stay in this folder (saves/, settings.ini,

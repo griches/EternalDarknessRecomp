@@ -3,7 +3,7 @@
 #
 # Put your own Eternal Darkness disc image (.iso or .gcm of the European disc,
 # GEDP01; the USA disc is not supported) in this folder, then run this script, or add it to Steam. The first run
-# translates the disc and builds the game from it (about half a minute on a
+# translates the disc and builds the game from it (about a minute on a
 # Steam Deck). After that the game starts straight away. Nothing from your disc
 # leaves this folder.
 cd "$(dirname "$(readlink -f "$0")")" || exit 1
@@ -100,5 +100,7 @@ if [ ! -x EternalDarkness ] || [ "$(cat build.stamp 2>/dev/null)" != "$stamp" ];
   fi
 fi
 
-exec ./EternalDarkness generated/main.dol --iso "$disc" --max-blocks 1000000000000000 "$@" \
+# The disc as the launcher's own folder scan names it ("x.iso", "dump/x.iso"),
+# so it isn't listed twice.
+exec ./EternalDarkness generated/main.dol --iso "${disc#"$HERE"/}" --max-blocks 1000000000000000 "$@" \
   > logs/game.log 2>&1

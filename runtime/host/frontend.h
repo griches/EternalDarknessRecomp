@@ -21,6 +21,10 @@ bool frontend_run_launcher(const char* default_iso, char* iso_out,
 // the game paused until the player resumes.
 void frontend_frame(void);
 
+// A problem page over the game (report.c): heading, the text, and Keep
+// waiting (when can_wait) or Quit. True when the player chose to wait.
+bool frontend_problem(const char* heading, const char* text, bool can_wait);
+
 // The disc id this build runs ("GEDE01" or "GEDP01"; main.c).
 const char* ed_game_id(void);
 

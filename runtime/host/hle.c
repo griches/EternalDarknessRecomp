@@ -28,6 +28,7 @@
 #include "gxruntime/aurora_backend.h"
 #include "host/controls.h"
 #include "host/frontend.h"
+#include "host/report.h"
 #endif
 #include "game_data.h"
 #include "host/dtk.h"
@@ -4540,6 +4541,7 @@ static bool continue_book_reload(CPUState* cpu);
 // refreshed each second (ED_NO_FPS=1 leaves the title alone), the game's
 // widescreen option, and the in-game menu.
 void hle_frame_boundary(void) {
+    report_frame();  // the hang watchdog's sign of life
     static int fps_env = -1;
     static unsigned frames;
     static struct timespec mark;

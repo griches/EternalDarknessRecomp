@@ -7,6 +7,7 @@
 #include "gxruntime/aurora_backend.h"
 #include "host/buttons.h"
 #include "host/controls.h"
+#include "host/report.h"
 #include "host/settings.h"
 #include "host/texpack.h"
 
@@ -247,7 +248,7 @@ std::string region_name(const std::string& id) {
 
 // --- Menu model -------------------------------------------------------------
 
-enum class Screen { Launcher, Play, Options, Controls, Mapping, InGame };
+enum class Screen { Launcher, Play, Options, Controls, Mapping, InGame, Problem };
 
 struct Row {
     std::string label;
@@ -796,6 +797,31 @@ void build_in_game() {
     g_rows.push_back(quit);
 }
 
+// The problem page (frontend_problem).
+std::string g_problem_heading;
+std::string g_problem_text;
+bool g_problem_can_wait = false;
+bool g_problem_wait = false;
+
+void build_problem() {
+    if (g_problem_can_wait) {
+        Row wait{"Keep waiting"};
+        wait.note = g_problem_text;
+        wait.activate = [] {
+            g_problem_wait = true;
+            g_close = true;
+        };
+        g_rows.push_back(wait);
+    }
+    Row quit{"Quit"};
+    quit.note = g_problem_text;
+    quit.activate = [] {
+        g_problem_wait = false;
+        g_close = true;
+    };
+    g_rows.push_back(quit);
+}
+
 void render() {
     if (g_doc == nullptr)
         return;
@@ -804,6 +830,7 @@ void render() {
                           : g_screen == Screen::Options  ? "Options"
                           : g_screen == Screen::Controls ? "Controls"
                           : g_screen == Screen::Mapping  ? "Button Mapping"
+                          : g_screen == Screen::Problem  ? g_problem_heading.c_str()
                                                          : "Paused";
     g_doc->GetElementById("heading")->SetInnerRML(heading);
     std::string rml[2];
@@ -842,16 +869,16 @@ void render() {
     g_doc->GetElementById("note0")->SetInnerRML(note_page == 0 ? note : "");
     g_doc->GetElementById("note1")->SetInnerRML(note_page == 1 ? note : "");
     g_doc->GetElementById("hint")->SetInnerRML(
-        g_screen == Screen::InGame
-            ? "Up/Down choose &#183; Left/Right change &#183; A select &#183; B resume"
-            : "Up/Down choose &#183; Left/Right change &#183; A select &#183; B back");
+        g_screen == Screen::InGame    ? "Up/Down choose &#183; Left/Right change &#183; A select &#183; B resume"
+        : g_screen == Screen::Problem ? "Up/Down choose &#183; A select"
+                                      : "Up/Down choose &#183; Left/Right change &#183; A select &#183; B back");
     g_doc->SetClass("spread", spread);
     // The main menu opens with the emblem instead of a heading.
     g_doc->SetClass("branded", g_screen == Screen::Launcher);
     // The mapping list is long: tighten the rows.
     g_doc->SetClass("compact", g_screen == Screen::Mapping);
     // Over the game the page lies on the dimmed, paused frame.
-    g_doc->SetClass("overlay", g_screen == Screen::InGame ||
+    g_doc->SetClass("overlay", g_screen == Screen::InGame || g_screen == Screen::Problem ||
                                    ((g_screen == Screen::Options ||
                                      g_screen == Screen::Controls ||
                                      g_screen == Screen::Mapping) &&
@@ -867,6 +894,7 @@ void build_rows() {
     case Screen::Controls: build_controls(); break;
     case Screen::Mapping: build_mapping(); break;
     case Screen::InGame: build_in_game(); break;
+    case Screen::Problem: build_problem(); break;
     }
     if (g_selected >= static_cast<int>(g_rows.size()))
         g_selected = 0;
@@ -917,6 +945,7 @@ void go_back() {
         g_close = true;
         break;
     case Screen::Launcher:
+    case Screen::Problem:  // only its rows close it (no quitting by accident)
         break;
     }
 }
@@ -1257,7 +1286,26 @@ extern "C" void frontend_frame(void) {
     g_screen = Screen::InGame;
     g_options_return = Screen::InGame;
     g_selected = 0;
+    report_pause(true);
     if (!run_menu())
         dol_aurora_request_quit();  // window closed while paused
+    report_pause(false);
     menu_was_held = false;
+}
+
+extern "C" bool frontend_problem(const char* heading, const char* text, bool can_wait) {
+    if (!ensure_ui())
+        return false;
+    const Screen screen = g_screen;
+    const int selected = g_selected;
+    g_problem_heading = heading;
+    g_problem_text = text;
+    g_problem_can_wait = can_wait;
+    g_problem_wait = false;
+    g_screen = Screen::Problem;
+    g_selected = 0;
+    const bool open = run_menu();
+    g_screen = screen;
+    g_selected = selected;
+    return open && g_problem_wait;
 }

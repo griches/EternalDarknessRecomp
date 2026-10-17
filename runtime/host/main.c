@@ -28,6 +28,9 @@
 #include "host/hle.h"
 #include "host/interrupt.h"
 #include "host/quickstate.h"
+#ifdef ED_AURORA
+#include "host/report.h"
+#endif
 #include "host/compat.h"
 
 #include <stdio.h>
@@ -104,17 +107,18 @@ static void instruction_fallback(CPUState* ctx, u32 raw, u32 cia) {
 
 // Walk the PPC EABI backchain to reconstruct the guest call stack:
 // [sp] -> caller frame, [caller+4] -> caller's saved return address.
-static void dump_backchain(CPUState* cpu) {
+static void dump_backchain_to(FILE* out, CPUState* cpu) {
     u32 sp = cpu->gpr[1];
-    fprintf(stderr, "[run] guest backchain:\n");
+    fprintf(out, "[run] guest backchain:\n");
     for (int f = 0; f < 16 && sp >= GC_RAM_BASE && sp < GC_RAM_BASE + cpu->ram_size; f++) {
         u32 caller = mem_read32(cpu, sp);
         if (caller <= sp || caller < GC_RAM_BASE) break;
         u32 ret = mem_read32(cpu, caller + 4u);
-        fprintf(stderr, "    #%-2d sp=0x%08X ret=0x%08X\n", f, sp, ret);
+        fprintf(out, "    #%-2d sp=0x%08X ret=0x%08X\n", f, sp, ret);
         sp = caller;
     }
 }
+static void dump_backchain(CPUState* cpu) { dump_backchain_to(stderr, cpu); }
 
 static const char* exception_name(u32 exc) {
     if (exc & PPC_EXC_PROGRAM)       return "PROGRAM";
@@ -127,12 +131,12 @@ static const char* exception_name(u32 exc) {
 
 // Every OS thread on __OSActiveThreadQueue: where it stopped and what it waits
 // on (OSThread layout from dolphin/os/OSThread.h).
-static void dump_threads(CPUState* cpu) {
+static void dump_threads_to(FILE* out, CPUState* cpu) {
     u32 thread = mem_read32(cpu, 0x800000DCu);
     const u32 current = mem_read32(cpu, 0x800000E4u);
     for (int i = 0; i < 64 && thread >= GC_RAM_BASE &&
                     thread < GC_RAM_BASE + cpu->ram_size; i++) {
-        fprintf(stderr,
+        fprintf(out,
                 "[thread] 0x%08X%s state=%u suspend=%d priority=%u queue=0x%08X "
                 "srr0=0x%08X lr=0x%08X sp=0x%08X\n",
                 thread, thread == current ? " (current)" : "",
@@ -144,6 +148,7 @@ static void dump_threads(CPUState* cpu) {
         thread = mem_read32(cpu, thread + 0x2FCu);
     }
 }
+static void dump_threads(CPUState* cpu) { dump_threads_to(stderr, cpu); }
 
 // ED_HEAP_CHECK=N: every N blocks walk the OS heaps' free and allocated cell
 // lists (OSAlloc HeapDesc {size, free, allocated}, Cell {prev, next, size}) and
@@ -200,6 +205,12 @@ typedef struct RunLoop {
     unsigned pc_hist_i;
 } RunLoop;
 
+// The run loop's recent block entries, also read by problem reports while
+// it runs.
+static u32 g_pc_hist[PC_HIST];
+static volatile unsigned g_pc_hist_i;
+static volatile unsigned long long g_blocks_now;
+
 // Run guest code until it stops (window closed, watchdog, a fault). With the
 // GX thread this is the game thread (dol_aurora_run_game).
 static int run_loop(void* user) {
@@ -215,7 +226,7 @@ static int run_loop(void* user) {
     unsigned long long blocks = 0;
     const char* stop_reason = "max-blocks watchdog";
     u32 last_pc = cpu->pc;
-    u32 pc_hist[PC_HIST] = {0};
+    u32* const pc_hist = g_pc_hist;
     unsigned pc_hist_i = 0;
     while (blocks < max_blocks) {
         // --call mode: the function returned (blr jumped to the lr sentinel).
@@ -285,6 +296,7 @@ static int run_loop(void* user) {
 
         u32 pc = cpu->pc;
         pc_hist[pc_hist_i++ % PC_HIST] = pc;
+        g_pc_hist_i = pc_hist_i;
         if (!dolrecomp_call(cpu, pc)) {
             stop_reason = "pc left recompiled code (no host handler)";
             {
@@ -325,6 +337,7 @@ static int run_loop(void* user) {
             break;
         }
         blocks++;
+        g_blocks_now = blocks;
         if (heap_check_every && (blocks % heap_check_every) == 0 &&
             !heap_ok(cpu, blocks))
             heap_check_every = 0;  // report the first break only
@@ -335,7 +348,7 @@ static int run_loop(void* user) {
 
     r->blocks = blocks;
     r->stop_reason = stop_reason;
-    memcpy(r->pc_hist, pc_hist, sizeof pc_hist);
+    memcpy(r->pc_hist, pc_hist, sizeof r->pc_hist);
     r->pc_hist_i = pc_hist_i;
     return 0;
 }
@@ -349,12 +362,36 @@ const char* ed_game_id(void) { return ED_GAME_ID; }
 // through their CPUState argument.
 CPUState dolrecomp_cpu;
 
+#ifdef ED_AURORA
+// For problem reports (report.c), from another thread while the game runs:
+// a snapshot that may be a block out of date, which is fine for a report.
+void main_describe_guest(FILE* out) {
+    CPUState* cpu = &dolrecomp_cpu;
+    fprintf(out, "pc=0x%08X lr=0x%08X r1=0x%08X msr=0x%08X blocks=%llu\n", cpu->pc,
+            cpu->lr, cpu->gpr[1], cpu->msr, g_blocks_now);
+    fprintf(out, "recent blocks (oldest first):");
+    const unsigned at = g_pc_hist_i;
+    for (unsigned k = 0; k < PC_HIST; k++)
+        fprintf(out, " 0x%08X", g_pc_hist[(at + k) % PC_HIST]);
+    fprintf(out, "\n");
+    if (cpu->ram == NULL)
+        return;
+    dump_backchain_to(out, cpu);
+    dump_threads_to(out, cpu);
+}
+
+void main_request_pcdump(void) { g_pcdump_request = 1; }
+#endif
+
 int main(int argc, char** argv) {
     // Keep stdout/stderr unbuffered so diagnostics are not lost when a worker
     // thread calls abort() (e.g. an Aurora FATAL) before buffered output is
     // flushed.
     setvbuf(stderr, NULL, _IONBF, 0);
     setvbuf(stdout, NULL, _IONBF, 0);
+#ifdef ED_AURORA
+    report_init();
+#endif
     gap_report_reset();
     const char* dol_path = DEFAULT_DOL_PATH;
     const char* iso_path = NULL;
@@ -696,12 +733,19 @@ int main(int argc, char** argv) {
         guest_prof_start(&dolrecomp_cpu);
     if (aurora_enabled) {
         dol_aurora_set_frame_hook(hle_frame_boundary);
+        dol_aurora_set_idle_hook(report_idle);
+        report_start_watchdog();
         dol_aurora_run_game(run_loop, &run);
     } else
 #endif
         run_loop(&run);
     const unsigned long long blocks = run.blocks;
     const char* stop_reason = run.stop_reason;
+#ifdef ED_AURORA
+    // The player sees a message, not a window that just vanishes.
+    if (aurora_enabled && strcmp(stop_reason, "window closed") != 0)
+        report_game_stopped(stop_reason);
+#endif
     const u32* pc_hist = run.pc_hist;
     const unsigned pc_hist_i = run.pc_hist_i;
 

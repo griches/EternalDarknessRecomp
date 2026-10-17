@@ -57,7 +57,7 @@ if(ED_ENABLE_AURORA)
     list(APPEND ED_HOST_SOURCES runtime/host/frontend.cpp runtime/host/controls.cpp
          runtime/host/buttons.cpp runtime/host/fonts.cpp runtime/host/lightmaps.cpp
          runtime/host/texpack.cpp
-         runtime/host/guestprof.c)
+         runtime/host/guestprof.c runtime/host/report.c)
 endif()
 
 # ED_SPLIT_HOST (the Mac .app): the host is a shared library, libedhost, and
@@ -108,6 +108,14 @@ check_library_exists(m sqrt "" ED_HAVE_LIBM)
 if(ED_HAVE_LIBM)
     target_link_libraries(EternalDarkness PRIVATE m)
 endif()
+
+# The commit each build is from (ed_build_id.h), for problem reports.
+add_custom_target(ed_build_id
+    COMMAND "${CMAKE_COMMAND}" -DSRC=${CMAKE_SOURCE_DIR}
+            -DOUT=${CMAKE_BINARY_DIR}/ed_build_id.h -P "${CMAKE_SOURCE_DIR}/tools/build_id.cmake"
+    BYPRODUCTS "${CMAKE_BINARY_DIR}/ed_build_id.h")
+add_dependencies(${ED_HOST_TARGET} ed_build_id)
+target_include_directories(${ED_HOST_TARGET} PRIVATE "${CMAKE_BINARY_DIR}")
 
 if(ED_ENABLE_AURORA)
     enable_language(CXX)

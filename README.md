@@ -34,7 +34,8 @@ Your saves and settings stay in the game's folder (the Mac app's is
 ## HD texture pack
 
 1. Get a Dolphin HD texture pack for Eternal Darkness: a folder of `tex1_....png`
-   files.
+   or `tex1_....dds` files. DDS packs (BC7) stay compressed on the graphics card,
+   a quarter of the memory of PNG ones.
 2. Copy those files (any subfolders are fine) into a folder called `textures`:
    - Mac app: `~/Library/Application Support/Eternal Darkness/textures`
    - everywhere else: `textures/` in the game's folder, next to `res/`

@@ -1,12 +1,16 @@
 // HD texture packs in Dolphin's format: a folder of tex1_<w>x<h>[_m]_<hash>_<fmt>.png
-// files, the hash being XXH64 of the texture's base level (the renderer
+// or .dds files, the hash being XXH64 of the texture's base level (the renderer
 // computes it for each texture it decodes and asks here). The folder is
-// indexed by name at start-up; a texture's PNG is decoded on a loader thread
-// the first time it is drawn (with its mip chain), the original showing until
-// it is ready.
+// indexed by name at start-up; a texture's file is read on a loader thread the
+// first time it is drawn, the original showing until it is ready. A PNG is
+// decoded and given a mip chain; a DDS file's BC1/BC2/BC3/BC7 image goes to the
+// GPU compressed, with the mips the file holds (a quarter of the memory).
 //
-// The pack lives in textures/ beside res/ (any layout of subfolders), or
-// ED_TEXTURE_PACK=<folder>. Options > Game > HD textures turns it off.
+// The pack lives in textures/ beside res/ (any layout of subfolders, so packs
+// can sit side by side), or ED_TEXTURE_PACK=<folder>. When two files are the
+// same texture, the one whose path sorts last wins, so a supplement in a folder
+// named after the pack's ("<pack> supplement") overrides it.
+// Options > Game > HD textures turns it off.
 #include "host/texpack.h"
 
 #include "gxruntime/aurora_backend.h"
@@ -48,8 +52,9 @@ struct KeyHash {
 };
 
 struct Loaded {
-    std::vector<uint8_t> rgba;  // every mip level, largest first
+    std::vector<uint8_t> rgba;  // every mip level, largest first (BC blocks for a DDS)
     uint32_t width = 0, height = 0, mips = 1;
+    uint32_t format = DOL_AURORA_PACK_RGBA8;
 };
 
 // A loaded image as the renderer takes it: malloc'd here on the loader thread,
@@ -57,7 +62,116 @@ struct Loaded {
 struct Ready {
     uint8_t* rgba = nullptr;
     uint32_t width = 0, height = 0, mips = 1;
+    uint32_t format = DOL_AURORA_PACK_RGBA8;
 };
+
+uint32_t read_le32(const uint8_t* p) {
+    return p[0] | (p[1] << 8) | (p[2] << 16) | (static_cast<uint32_t>(p[3]) << 24);
+}
+
+// A DDS file as Dolphin packs use them: BC1 (DXT1), BC2 (DXT3), BC3 (DXT5) or
+// BC7 (DX10 header), or uncompressed 32-bit, with or without its mip chain.
+// Uncompressed ones come back as RGBA8 without mips (build_mips adds them).
+bool load_dds(const std::string& path, Loaded* img) {
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (f == nullptr)
+        return false;
+    std::vector<uint8_t> file;
+    if (std::fseek(f, 0, SEEK_END) == 0) {
+        const long size = std::ftell(f);
+        if (size > 128) {
+            file.resize(static_cast<size_t>(size));
+            std::fseek(f, 0, SEEK_SET);
+            if (std::fread(file.data(), 1, file.size(), f) != file.size())
+                file.clear();
+        }
+    }
+    std::fclose(f);
+    if (file.size() <= 128 || std::memcmp(file.data(), "DDS ", 4) != 0 || read_le32(&file[4]) != 124)
+        return false;
+    const uint32_t flags = read_le32(&file[8]);
+    const uint32_t height = read_le32(&file[12]), width = read_le32(&file[16]);
+    uint32_t mips = (flags & 0x20000u) != 0 ? std::max(read_le32(&file[28]), 1u) : 1u;
+    const uint32_t pf_flags = read_le32(&file[80]);
+    const uint32_t fourcc = read_le32(&file[84]);
+    const uint32_t bits = read_le32(&file[88]);
+    size_t at = 128;
+    uint32_t format = DOL_AURORA_PACK_RGBA8;
+    auto cc = [](const char* s) { return read_le32(reinterpret_cast<const uint8_t*>(s)); };
+    if ((pf_flags & 0x4u) != 0 && fourcc == cc("DX10")) {
+        if (file.size() < 148)
+            return false;
+        const uint32_t dxgi = read_le32(&file[128]);
+        at = 148;
+        if (dxgi == 71 || dxgi == 72)
+            format = DOL_AURORA_PACK_BC1;
+        else if (dxgi == 74 || dxgi == 75)
+            format = DOL_AURORA_PACK_BC2;
+        else if (dxgi == 77 || dxgi == 78)
+            format = DOL_AURORA_PACK_BC3;
+        else if (dxgi == 98 || dxgi == 99)
+            format = DOL_AURORA_PACK_BC7;
+        else if (dxgi != 28 && dxgi != 29)  // R8G8B8A8_UNORM(_SRGB)
+            return false;
+    } else if ((pf_flags & 0x4u) != 0) {
+        if (fourcc == cc("DXT1"))
+            format = DOL_AURORA_PACK_BC1;
+        else if (fourcc == cc("DXT3"))
+            format = DOL_AURORA_PACK_BC2;
+        else if (fourcc == cc("DXT5"))
+            format = DOL_AURORA_PACK_BC3;
+        else
+            return false;
+    } else if (bits != 32) {
+        return false;
+    }
+    if (width == 0 || height == 0)
+        return false;
+    img->width = width;
+    img->height = height;
+    if (format == DOL_AURORA_PACK_RGBA8) {
+        const size_t bytes = static_cast<size_t>(width) * height * 4;
+        if (file.size() - at < bytes)
+            return false;
+        img->rgba.assign(file.begin() + at, file.begin() + at + bytes);
+        // Masks tell the channel order: Dolphin writes B8G8R8A8 as often as R8G8B8A8.
+        const bool bgra = at == 128 && read_le32(&file[92]) == 0x00FF0000u;
+        if (bgra)
+            for (size_t i = 0; i < bytes; i += 4)
+                std::swap(img->rgba[i], img->rgba[i + 2]);
+        img->mips = 1;
+        img->format = format;
+        return true;
+    }
+    // BC images go to the GPU as they are: the base level must be whole blocks,
+    // and the file must hold every level it claims (else only those it holds).
+    if (width % 4 != 0 || height % 4 != 0)
+        return false;
+    const uint32_t block = format == DOL_AURORA_PACK_BC1 ? 8u : 16u;
+    size_t bytes = 0;
+    uint32_t levels = 0;
+    for (uint32_t m = 0; m < mips; m++) {
+        const size_t level = static_cast<size_t>((std::max(width >> m, 1u) + 3) / 4) *
+                             ((std::max(height >> m, 1u) + 3) / 4) * block;
+        if (file.size() - at < bytes + level)
+            break;
+        bytes += level;
+        levels++;
+        if ((width >> m) <= 1 && (height >> m) <= 1)
+            break;
+    }
+    if (levels == 0)
+        return false;
+    img->rgba.assign(file.begin() + at, file.begin() + at + bytes);
+    img->mips = levels;
+    img->format = format;
+    return true;
+}
+
+bool is_dds(const std::string& path) {
+    return path.size() > 4 && (path.compare(path.size() - 4, 4, ".dds") == 0 ||
+                               path.compare(path.size() - 4, 4, ".DDS") == 0);
+}
 
 // Append the mip chain down to 1x1: each level the 2x2 average of the last,
 // colour weighted by alpha so cut-out edges do not darken.
@@ -111,21 +225,26 @@ Shared& g = *new Shared;
 std::string g_dir;
 bool g_log = false;
 
-// tex1_<w>x<h>[_m]_<hash16>_<fmt>.png (paletted and per-mip files are skipped).
+// tex1_<w>x<h>[_m]_<hash16>_<fmt>.png or .dds (paletted and per-mip files are
+// skipped).
 bool parse_name(const std::string& name, Key* key) {
+    if (name.size() < 6)
+        return false;
+    const std::string ext = name.substr(name.size() - 4);
+    if (ext != ".png" && ext != ".dds" && ext != ".PNG" && ext != ".DDS")
+        return false;
     unsigned w = 0, h = 0, fmt = 0;
     unsigned long long hash = 0;
     char m[3] = {};
     int used = 0;
     if (std::sscanf(name.c_str(), "tex1_%ux%u_%2[m_]%n", &w, &h, m, &used) == 3 &&
         std::strcmp(m, "m_") == 0) {
-        if (std::sscanf(name.c_str() + used, "%16llx_%u.png", &hash, &fmt) != 2)
+        if (std::sscanf(name.c_str() + used, "%16llx_%u.", &hash, &fmt) != 2)
             return false;
-    } else if (std::sscanf(name.c_str(), "tex1_%ux%u_%16llx_%u.png", &w, &h, &hash, &fmt) != 4) {
+    } else if (std::sscanf(name.c_str(), "tex1_%ux%u_%16llx_%u.", &w, &h, &hash, &fmt) != 4) {
         return false;
     }
-    if (name.find("_mip") != std::string::npos || name.size() < 6 ||
-        name.compare(name.size() - 4, 4, ".png") != 0)
+    if (name.find("_mip") != std::string::npos)
         return false;
     // "_<16 hex>_<fmt>.png" ends the name: a second hash means a palette.
     const size_t tail = name.rfind('_');
@@ -148,12 +267,17 @@ void loader() {
             g.queue.pop_front();
         }
         Loaded img;
-        const bool ok = load_png_rgba(g.files.at(key), &img.rgba, &img.width, &img.height);
+        const std::string& path = g.files.at(key);
+        bool ok = is_dds(path) ? load_dds(path, &img)
+                               : load_png_rgba(path, &img.rgba, &img.width, &img.height);
+        // A GPU without BC textures (none this runs on, so far) keeps the original.
+        if (ok && img.format != DOL_AURORA_PACK_RGBA8 && !dol_aurora_bc_textures_supported())
+            ok = false;
         static const bool mips = [] {
             const char* env = std::getenv("ED_TEXPACK_MIPS");
             return env == nullptr || std::strcmp(env, "0") != 0;
         }();
-        if (ok && mips)
+        if (ok && mips && img.format == DOL_AURORA_PACK_RGBA8)
             build_mips(img);
         Ready ready;
         if (ok) {
@@ -163,6 +287,7 @@ void loader() {
             ready.width = img.width;
             ready.height = img.height;
             ready.mips = img.mips;
+            ready.format = img.format;
         }
         std::lock_guard<std::mutex> lock(g.mutex);
         g.queued.erase(key);
@@ -177,7 +302,7 @@ void loader() {
 }
 
 int lookup(uint32_t format, uint32_t width, uint32_t height, uint64_t hash, uint8_t** out_rgba,
-           uint32_t* out_width, uint32_t* out_height, uint32_t* out_mips) {
+           uint32_t* out_width, uint32_t* out_height, uint32_t* out_mips, uint32_t* out_format) {
     const Key key{format, width, height, hash};
     if (g.files.find(key) == g.files.end())
         return 0;
@@ -188,6 +313,7 @@ int lookup(uint32_t format, uint32_t width, uint32_t height, uint64_t hash, uint
         *out_width = img.width;
         *out_height = img.height;
         *out_mips = img.mips;
+        *out_format = img.format;
         g.ready.erase(it);
         return 1;
     }
@@ -231,10 +357,16 @@ extern "C" void texpack_init(void) {
         if (name.rfind("tex1_", 0) != 0)
             continue;
         Key key;
-        if (parse_name(name, &key))
-            g.files.emplace(key, it->path().string());
-        else
+        if (!parse_name(name, &key)) {
             skipped++;
+            continue;
+        }
+        // The same texture twice (a supplement beside its pack): the path that
+        // sorts last wins, whatever order the folder is listed in.
+        std::string path = it->path().string();
+        auto [found, added] = g.files.emplace(key, path);
+        if (!added && path > found->second)
+            found->second = std::move(path);
     }
     std::fprintf(stderr, "[texpack] %zu textures in %s (%zu skipped)\n", g.files.size(),
                  g_dir.c_str(), skipped);

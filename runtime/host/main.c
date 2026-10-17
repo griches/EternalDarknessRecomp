@@ -39,7 +39,11 @@
 
 #define DEFAULT_DOL_PATH   "generated/main.dol"
 #define DEFAULT_CARD_PATH  "ed-" ED_GAME_ID "-slot-a.dolcard"
-#define DEFAULT_MAX_BLOCKS 50000000ull  // watchdog: HW-wait spins would loop forever
+// --call mode's watchdog: a called function that never returns. A normal run
+// has no block limit (players start the exe without play.bat's --max-blocks,
+// and 50 million blocks ended the game in its intro); the hang watchdog in
+// report.c covers a game that stops making frames.
+#define CALL_MAX_BLOCKS 50000000ull
 // --call mode: lr points here so the run loop detects the function's return
 // (blr -> pc == sentinel). Aligned, well outside any real code range.
 #define CALL_RETURN_SENTINEL 0x0BADF00Cu
@@ -446,7 +450,7 @@ int main(int argc, char** argv) {
     const char* card_path = NULL;
     const char* card_b_path = NULL;
     bool card_enabled = true;
-    unsigned long long max_blocks = DEFAULT_MAX_BLOCKS;
+    unsigned long long max_blocks = 0;  // 0 = not given (see CALL_MAX_BLOCKS)
     unsigned long long trace_every = 0;
     const char* snapshot_out = NULL;   // SIGUSR1 / --snapshot-at-block target
     bool no_launcher = false;          // --no-launcher: boot straight in
@@ -768,8 +772,13 @@ int main(int argc, char** argv) {
     unsigned long long heap_check_every =
         getenv("ED_HEAP_CHECK") ? strtoull(getenv("ED_HEAP_CHECK"), NULL, 0) : 0ull;
     g_heap_array_ptr = ED_GUEST_R13 - 21344u;  // OSAlloc's HeapArray (sbss)
-    printf("[run] starting execution at 0x%08X (max %llu blocks)\n",
-           dolrecomp_cpu.pc, max_blocks);
+    if (max_blocks == 0)
+        max_blocks = call_addr != 0 ? CALL_MAX_BLOCKS : ~0ull;
+    if (max_blocks == ~0ull)
+        printf("[run] starting execution at 0x%08X (no block limit)\n", dolrecomp_cpu.pc);
+    else
+        printf("[run] starting execution at 0x%08X (max %llu blocks)\n",
+               dolrecomp_cpu.pc, max_blocks);
 
     RunLoop run = {
         .cpu = &dolrecomp_cpu,

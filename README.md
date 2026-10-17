@@ -8,7 +8,7 @@
 Windows and Linux / Steam Deck, built from **your own disc**. Nothing from the game
 is in this repository. The PlayStation 5 version is
 [PS5_EternalDarkness](https://github.com/griches/PS5_EternalDarkness).
-Version 0.8.0.
+Version 0.8.1.
 
 > **European disc only.** You need your own image (`.iso` or `.gcm`) of the
 > **European GameCube disc, `GEDP01`**. The USA disc (`GEDE01`) is not supported:

@@ -28,15 +28,25 @@ Version 0.8.0.
      (it is not notarised).
   3. Drop your disc image on its window. It translates the disc and builds the
      game from it (a minute or two), then starts. Later starts are instant.
-- **Steam Deck / Linux**
-  1. Build the game folder (`tools/deck/make-deck-package.sh`, see
-     [Building from source](#building-from-source)), copy it somewhere such as
-     `~/Games/EternalDarkness` and put your disc image in it.
-  2. Run `play.sh`. On a Deck: Desktop Mode, Steam > Add a Non-Steam Game >
-     `play.sh`, then play it from Game Mode. The first start builds the game
-     (about half a minute).
-- **Windows**: build it from source ([below](#building-from-source)), put your
-  disc image in `dump/`, then run `play.bat`.
+- **Windows** (64-bit)
+  1. Download `EternalDarkness-windows-x64-....zip` from the
+     [latest release](https://github.com/griches/EternalDarknessRecomp/releases/latest)
+     and unzip it somewhere you can write to, such as Documents or a Games
+     folder (not Program Files). You get a folder called `EternalDarknessRecomp`.
+  2. Put your disc image in its `dump` folder.
+  3. Double-click `play.bat`. If Windows says it protected your PC, click
+     **More info**, then **Run anyway**. The game's program comes ready-made;
+     its graphics, sound and music come from your disc.
+- **Steam Deck / Linux** (x86-64)
+  1. Download `EternalDarkness-linux-x86_64-....tar.gz` from the
+     [latest release](https://github.com/griches/EternalDarknessRecomp/releases/latest)
+     and unpack it somewhere such as `~/Games` (on a Deck, Ark does it in
+     Desktop Mode). You get a folder called `EternalDarknessRecomp`.
+  2. Put your disc image in that folder.
+  3. Run `play.sh`. On a Deck: Desktop Mode, Steam > Add a Non-Steam Game >
+     Browse > `play.sh`, then play it from Game Mode. The first start
+     translates your disc and builds the game from it (about a minute on a
+     Deck); after that it starts straight away.
 
 ### 2. The HD textures (recommended)
 
@@ -195,7 +205,8 @@ cp /path/to/disc.iso dump/GEDP01.iso          # the European disc
   from it on first start (`tools/mac/README.txt`).
 - **Windows**: configure with clang-cl and Ninja (`build-win`), build
   `EternalDarkness`, copy the DLLs from the build tree next to the exe, then
-  `play.bat`.
+  `play.bat`. For the release folder, `tools/win/stage-win-build.bat` on the
+  PC gathers the build, then `tools/win/make-win-package.sh` on a Mac zips it.
 - **Linux / Steam Deck**: build with clang and Ninja (`build-linux`);
   `tools/deck/make-deck-package.sh` makes a folder that builds the game from
   your disc on first start (`tools/deck/README.txt`).

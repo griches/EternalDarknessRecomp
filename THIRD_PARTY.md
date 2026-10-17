@@ -1,12 +1,15 @@
 # Licences
 
 Eternal Darkness Recomp is GPL-3.0-or-later (`LICENSE`). A build of it holds
-the code and data below. Every package (the Mac app, the Steam Deck folder,
-the PS5 title) carries their licence texts in a `licenses/` folder, made by
+the code and data below. Every package (the Mac app, the Linux / Steam Deck folder,
+the Windows folder, the PS5 title) carries their licence texts in a `licenses/` folder, made by
 `tools/collect-licenses.sh`.
 
-No part of the game is in this repository or in a package: the game's code is
-translated from the player's own disc on their machine.
+No part of the game is in this repository. The Mac app and the Linux / Steam
+Deck folder hold none of it either: they translate the game's code from the
+player's own disc on their machine. The Windows folder and the PS5 title come
+ready-made, with the game's code already translated; the game's graphics,
+sound and music still come from the player's disc.
 
 | Component | Licence | What it is here |
 | --- | --- | --- |
@@ -27,6 +30,8 @@ translated from the player's own disc on their machine.
 | [FreeType](https://freetype.org) | FreeType Licence (FTL) | Font rendering (where the build links its own) |
 | [libpng](http://www.libpng.org/pub/png/libpng.html) | PNG Reference Library Licence v2 | HD texture packs (where the build links its own) |
 | [SQLite](https://sqlite.org) | Public domain | Shader and pipeline caches (`licenses/SQLite.txt`) |
+| [DirectX Shader Compiler](https://github.com/microsoft/DirectXShaderCompiler) | NCSA / MIT; Microsoft's licence for `dxil.dll` | Shader compiler Dawn uses for Direct3D 12 (the Windows folder only; `tools/win/licenses/`) |
+| Microsoft Visual C++ runtime | Visual Studio redistributable code | `msvcp140.dll`, `vcruntime140.dll` and friends beside the Windows game |
 | [Zig](https://ziglang.org) | MIT | The compiler the Mac app and Deck folder build the game with (those packages only) |
 | [Fira Sans](https://github.com/mozilla/Fira), [Alegreya SC](https://github.com/huertatipografica/Alegreya-SC), [IM Fell English](https://iginomarini.com/fell/) | SIL Open Font Licence 1.1 | Menu fonts (`res/fonts/*-OFL.txt`) |
 | [Kenney Input Prompts](https://kenney.nl/assets/input-prompts) | CC0 1.0 | Controller and key icons |

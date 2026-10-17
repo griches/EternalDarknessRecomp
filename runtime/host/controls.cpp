@@ -686,6 +686,21 @@ uint64_t glyph_signature() {
     return h;
 }
 
+std::vector<std::string> pad_input_ids(int action) {
+    std::vector<std::string> ids;
+    for (int n : g_bindings[action].pad)
+        if (n != kNone)
+            ids.push_back(kNativeIds[n]);
+    return ids;
+}
+
+uint64_t bindings_signature() {
+    uint64_t h = 1469598103934665603ull;
+    for (unsigned char c : glyph_set() + "|" + serialize())
+        h = (h ^ c) * 1099511628211ull;
+    return h;
+}
+
 std::string controller_name() {
     SDL_Gamepad* pad = gamepad();
     if (pad == nullptr)

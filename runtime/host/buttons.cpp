@@ -12,6 +12,7 @@
 #include "host/controls.h"
 #include "host/fonts.h"
 #include "host/lightmaps.h"
+#include "host/tome.h"
 #include "host/frontend.h"
 
 #include <png.h>
@@ -197,10 +198,16 @@ bool load_png_rgba(const std::string& path, std::vector<uint8_t>* rgba, uint32_t
 }
 
 // The renderer takes one override: the prompt sheet here, the font sheets in
-// fonts.cpp, and (claimed by how a draw samples them) the light maps in
-// lightmaps.cpp.
+// fonts.cpp, the Tome's controls page in tome.cpp, and (claimed by how a draw
+// samples them) the light maps in lightmaps.cpp.
 bool claims_any(uint32_t format, uint32_t width, uint32_t height) {
-    return claims(format, width, height) || fonts_claims(format, width, height);
+    return claims(format, width, height) || fonts_claims(format, width, height) ||
+           tome_claims(format, width, height);
+}
+
+// Of the Tome's pages, only the controls page (the rest keep the HD pack's).
+bool claims_hash_any(uint32_t format, uint32_t width, uint32_t height, uint64_t hash) {
+    return !tome_claims(format, width, height) || tome_claims_hash(hash);
 }
 
 int apply_any(const uint8_t* rgba, uint32_t width, uint32_t height, uint8_t** out_rgba,
@@ -209,6 +216,8 @@ int apply_any(const uint8_t* rgba, uint32_t width, uint32_t height, uint8_t** ou
         return apply(rgba, width, height, out_rgba, out_width, out_height);
     if (fonts_claims(kCmpr, width, height))
         return fonts_apply(rgba, width, height, out_rgba, out_width, out_height);
+    if (tome_claims(kCmpr, width, height))
+        return tome_apply(rgba, width, height, out_rgba, out_width, out_height);
     return lightmaps_apply(rgba, width, height, out_rgba, out_width, out_height);
 }
 
@@ -217,12 +226,14 @@ int apply_any(const uint8_t* rgba, uint32_t width, uint32_t height, uint8_t** ou
 uint64_t generation_any(uint32_t format, uint32_t width, uint32_t height) {
     if (claims(format, width, height))
         return generation();
-    return fonts_claims(format, width, height) ? fonts_generation() : lightmaps_generation();
+    if (fonts_claims(format, width, height))
+        return fonts_generation();
+    return tome_claims(format, width, height) ? tome_generation() : lightmaps_generation();
 }
 
 extern "C" void buttons_init(void) {
     fonts_preload();
     static const DolAuroraTextureOverride ops = {claims_any, apply_any, generation_any,
-                                                 lightmaps_claims_uv2};
+                                                 lightmaps_claims_uv2, claims_hash_any};
     dol_aurora_set_texture_override(&ops);
 }

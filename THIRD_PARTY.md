@@ -21,7 +21,7 @@ sound and music still come from the player's disc.
 | [Dawn](https://dawn.googlesource.com/dawn) | BSD-3-Clause | WebGPU implementation the renderer draws with (`licenses/Dawn.txt`) |
 | [SDL 3](https://libsdl.org) | Zlib | Window, input, audio |
 | [RmlUi](https://github.com/mikke89/RmlUi) | MIT | Launcher and in-game menus |
-| [Dear ImGui](https://github.com/ocornut/imgui) | MIT | FPS counter, debug overlays |
+| [Dear ImGui](https://github.com/ocornut/imgui) | MIT | FPS counter, debug overlays; its copy of stb_truetype writes the Tome controls page |
 | [Abseil](https://abseil.io) | Apache-2.0 | Containers used by the renderer |
 | [xxHash](https://github.com/Cyan4973/xxHash) | BSD-2-Clause | Texture and pipeline hashes |
 | [{fmt}](https://github.com/fmtlib/fmt) | MIT | Text formatting |
@@ -33,7 +33,7 @@ sound and music still come from the player's disc.
 | [DirectX Shader Compiler](https://github.com/microsoft/DirectXShaderCompiler) | NCSA / MIT; Microsoft's licence for `dxil.dll` | Shader compiler Dawn uses for Direct3D 12 (the Windows folder only; `tools/win/licenses/`) |
 | Microsoft Visual C++ runtime | Visual Studio redistributable code | `msvcp140.dll`, `vcruntime140.dll` and friends beside the Windows game |
 | [Zig](https://ziglang.org) | MIT | The compiler the Mac app and Deck folder build the game with (those packages only) |
-| [Fira Sans](https://github.com/mozilla/Fira), [Alegreya SC](https://github.com/huertatipografica/Alegreya-SC), [IM Fell English](https://iginomarini.com/fell/) | SIL Open Font Licence 1.1 | Menu fonts (`res/fonts/*-OFL.txt`) |
+| [Fira Sans](https://github.com/mozilla/Fira), [Alegreya SC](https://github.com/huertatipografica/Alegreya-SC), [IM Fell English](https://iginomarini.com/fell/), [La Belle Aurore](https://fonts.google.com/specimen/La+Belle+Aurore) | SIL Open Font Licence 1.1 | Menu fonts, and the Tome's handwriting on its controls page (`res/fonts/*-OFL.txt`) |
 | [Kenney Input Prompts](https://kenney.nl/assets/input-prompts) | CC0 1.0 | Controller and key icons |
 | [unending-occlusion](https://github.com/PattyTrish/unending-occlusion) | CC0 1.0 | Function names (`config/GEDE01/symbols.txt`, `licenses/unending-occlusion.txt`) |
 

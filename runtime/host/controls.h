@@ -6,6 +6,7 @@
 #ifdef __cplusplus
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace controls {
 
@@ -48,6 +49,13 @@ std::string controller_name();
 enum GlyphPreference { kAnyButton, kFaceButton, kShoulderButton };
 std::string action_glyph(int action, int preference);
 std::string glyph_set();
+// For the Tome's controls page (tome.cpp): the controller inputs bound to an
+// action in play, as icon names ("rt", "south"), and the bound key's icon
+// ("kb/j", or "" when it has none). bindings_signature() changes when either
+// would (layout, bindings, controller family).
+std::vector<std::string> pad_input_ids(int action);
+std::string key_glyph_file(int action);
+uint64_t bindings_signature();
 // Changes whenever the icons to show would change (layout, bindings,
 // controller family plugged in or out, the pause menu opening or closing).
 uint64_t glyph_signature();

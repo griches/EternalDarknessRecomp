@@ -626,6 +626,13 @@ void build_options() {
     hd.change = [](int) { g_settings.hd_textures = !g_settings.hd_textures; };
     g_rows.push_back(hd);
 
+    Row shadows{"Baked shadows", g_settings.sharp_shadows ? "Sharp" : "Original"};
+    shadows.page = 1;
+    shadows.note = "The rooms' light and shadow: Sharp upscales it as each room loads, "
+                   "Original keeps the disc's soft, blocky maps.";
+    shadows.change = [](int) { g_settings.sharp_shadows = !g_settings.sharp_shadows; };
+    g_rows.push_back(shadows);
+
     Row skip{"Skip intros", on_off(g_settings.skip_intros)};
     skip.page = 1;
     skip.note = "Skip the logo movies and the opening quote (next start).";

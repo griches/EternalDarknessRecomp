@@ -12,8 +12,8 @@ disc) and `dump/` (your disc image) stay on your machine.
 Platforms: Mac (Apple silicon), Windows and Linux / Steam Deck, all from this
 repository. Supported discs: Europe `GEDP01` and USA `GEDE01`. The game plays
 through with its music, voices, movies and effects; widescreen, higher
-resolutions, HD texture packs and remappable controls are in the launcher's
-Options. The PS5 port is a separate repository.
+resolutions, HD texture packs, sharper baked shadows and remappable controls
+are in the launcher's Options. The PS5 port is a separate repository.
 
 ## Build
 
@@ -50,7 +50,10 @@ launcher. Menus work with the keyboard (arrows, Enter, Esc), a controller
 
 Options (kept in `settings.ini`): skip intros, aspect ratio (4:3 or 16:9, the
 game's own two; it sets the game's widescreen option), widescreen HUD, resolution (each
-choice shows its size), fullscreen, on-screen FPS counter, music and
+choice shows its size), fullscreen, on-screen FPS counter, baked shadows
+(Sharp: each room's light maps are upscaled 4x as it loads, with CMPR's blocks
+evened out and edge-directed doubling, so window light and shadows on the
+walls and floors have clean edges; Original: as on the disc), music and
 sound-effect volumes, audio buffer, and Controls: Original (GameCube
 positions), Modern (attack RT/A, action B, aim LT, sprint and creep on the stick clicks
 as toggles, LB/RB as the GameCube L/R for paging the game's menus, reload

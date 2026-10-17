@@ -11,6 +11,7 @@
 #include "gxruntime/aurora_backend.h"
 #include "host/controls.h"
 #include "host/fonts.h"
+#include "host/lightmaps.h"
 #include "host/frontend.h"
 
 #include <png.h>
@@ -196,7 +197,8 @@ bool load_png_rgba(const std::string& path, std::vector<uint8_t>* rgba, uint32_t
 }
 
 // The renderer takes one override: the prompt sheet here, the font sheets in
-// fonts.cpp.
+// fonts.cpp, and (claimed by how a draw samples them) the light maps in
+// lightmaps.cpp.
 bool claims_any(uint32_t format, uint32_t width, uint32_t height) {
     return claims(format, width, height) || fonts_claims(format, width, height);
 }
@@ -205,17 +207,22 @@ int apply_any(const uint8_t* rgba, uint32_t width, uint32_t height, uint8_t** ou
               uint32_t* out_width, uint32_t* out_height) {
     if (claims(kCmpr, width, height))
         return apply(rgba, width, height, out_rgba, out_width, out_height);
-    return fonts_apply(rgba, width, height, out_rgba, out_width, out_height);
+    if (fonts_claims(kCmpr, width, height))
+        return fonts_apply(rgba, width, height, out_rgba, out_width, out_height);
+    return lightmaps_apply(rgba, width, height, out_rgba, out_width, out_height);
 }
 
 // Each sheet keys on its own settings, so redrawing the icons (the pause menu
 // opening) leaves the font sheets in the cache.
 uint64_t generation_any(uint32_t format, uint32_t width, uint32_t height) {
-    return claims(format, width, height) ? generation() : fonts_generation();
+    if (claims(format, width, height))
+        return generation();
+    return fonts_claims(format, width, height) ? fonts_generation() : lightmaps_generation();
 }
 
 extern "C" void buttons_init(void) {
     fonts_preload();
-    static const DolAuroraTextureOverride ops = {claims_any, apply_any, generation_any};
+    static const DolAuroraTextureOverride ops = {claims_any, apply_any, generation_any,
+                                                 lightmaps_claims_uv2};
     dol_aurora_set_texture_override(&ops);
 }

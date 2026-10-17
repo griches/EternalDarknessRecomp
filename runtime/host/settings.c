@@ -17,6 +17,7 @@ Settings g_settings = {
     .render_scale = 0,
     .game_font = 1,  // Tome
     .hd_textures = true,
+    .sharp_shadows = true,
     .fullscreen = true,
     .fps_counter = true,
     .music_volume = 100,
@@ -92,6 +93,8 @@ void settings_load(void) {
             g_settings.game_font = clamp_int(n, 0, 2);
         else if (strcmp(key, "hd_textures") == 0)
             g_settings.hd_textures = n != 0;
+        else if (strcmp(key, "sharp_shadows") == 0)
+            g_settings.sharp_shadows = n != 0;
         else if (strcmp(key, "fullscreen") == 0)
             g_settings.fullscreen = n != 0;
         else if (strcmp(key, "fps_counter") == 0)
@@ -134,6 +137,7 @@ void settings_save(void) {
     fprintf(f, "render_scale = %d\n", g_settings.render_scale);
     fprintf(f, "game_font = %d\n", g_settings.game_font);
     fprintf(f, "hd_textures = %d\n", g_settings.hd_textures ? 1 : 0);
+    fprintf(f, "sharp_shadows = %d\n", g_settings.sharp_shadows ? 1 : 0);
     fprintf(f, "fullscreen = %d\n", g_settings.fullscreen ? 1 : 0);
     fprintf(f, "fps_counter = %d\n", g_settings.fps_counter ? 1 : 0);
     fprintf(f, "music_volume = %d\n", g_settings.music_volume);

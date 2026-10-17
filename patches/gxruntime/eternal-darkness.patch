@@ -10091,7 +10091,7 @@ index 2e4c762..fb7c6bb 100644
          DolGuestResolvedRange range;
          memset(&range, 0, sizeof(range));
 diff --git a/src/gx_recomp.c b/src/gx_recomp.c
-index 842e0e6..9a26776 100644
+index 842e0e6..773b844 100644
 --- a/src/gx_recomp.c
 +++ b/src/gx_recomp.c
 @@ -19,6 +19,9 @@ static void trace_event(DolGxRecompState* gx, DolGxRecompEventKind kind,
@@ -10122,7 +10122,30 @@ index 842e0e6..9a26776 100644
          gx->current_pn_matrix = 0u;
  }
  
-@@ -955,6 +965,7 @@ bool dol_gx_recomp_capture_xf_transform(DolGxRecompState* gx, u16 base, u8 count
+@@ -458,11 +468,18 @@ void dol_gx_recomp_init(DolGxRecompState* gx,
+ }
+ 
+ bool dol_gx_recomp_push_fifo(DolGxRecompState* gx, const void* data, u32 size) {
+-    if (gx == NULL || data == NULL || size == 0u ||
+-        size > DOL_GX_RECOMP_MAX_FIFO_BYTES - gx->fifo.size)
++    if (gx == NULL || data == NULL || size == 0u)
+         return false;
+-    memcpy(gx->fifo.bytes + gx->fifo.size, data, size);
+-    gx->fifo.size += size;
++    // The byte record is for tests and traces only. When it is full it starts
++    // again, and a display list larger than all of it is not kept: failing here
++    // failed the whole stream, and the renderer stopped for good (Eternal
++    // Darkness, a room's display list after a door: black screen, game stuck).
++    if (size > DOL_GX_RECOMP_MAX_FIFO_BYTES - gx->fifo.size)
++        gx->fifo.size = 0u;
++    if (size <= DOL_GX_RECOMP_MAX_FIFO_BYTES) {
++        memcpy(gx->fifo.bytes + gx->fifo.size, data, size);
++        gx->fifo.size += size;
++    }
+     trace_event(gx, DOL_GX_RECOMP_EVENT_FIFO_BYTES, size, gx->fifo.size, 0, 0);
+     return true;
+ }
+@@ -955,6 +972,7 @@ bool dol_gx_recomp_capture_xf_transform(DolGxRecompState* gx, u16 base, u8 count
      if (!touches_pn && !touches_tex && !touches_scalar && !touches_window &&
          !touches_light && !touches_normal && !touches_post)
          return false;

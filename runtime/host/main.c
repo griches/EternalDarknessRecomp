@@ -383,6 +383,54 @@ void main_describe_guest(FILE* out) {
 void main_request_pcdump(void) { g_pcdump_request = 1; }
 #endif
 
+// main.dol out of a disc image, for a build that ships without one: the disc
+// header gives the DOL's offset (0x420) and the DOL's section table its size.
+// Written to `out`, its folder made if need be.
+static bool extract_dol(const char* iso, const char* out) {
+    FILE* in = fopen(iso, "rb");
+    if (in == NULL)
+        return false;
+    unsigned char disc[0x440], head[0x100];
+    unsigned char* dol = NULL;
+    u32 size = 0;
+    if (fread(disc, 1, sizeof disc, in) == sizeof disc && memcmp(disc, ED_GAME_ID, 6) == 0) {
+        const u32 at = read_be32(disc + 0x420);
+        if (fseek(in, (long)at, SEEK_SET) == 0 && fread(head, 1, sizeof head, in) == sizeof head) {
+            size = sizeof head;
+            for (int i = 0; i < 18; i++) {  // 7 text and 11 data sections
+                const u32 offset = read_be32(head + i * 4), length = read_be32(head + 0x90 + i * 4);
+                if (length != 0 && offset + length > size)
+                    size = offset + length;
+            }
+            if (size <= 0x1800000u && (dol = malloc(size)) != NULL &&
+                (fseek(in, (long)at, SEEK_SET) != 0 || fread(dol, 1, size, in) != size)) {
+                free(dol);
+                dol = NULL;
+            }
+        }
+    }
+    fclose(in);
+    if (dol == NULL)
+        return false;
+    char dir[1024];
+    snprintf(dir, sizeof dir, "%s", out);
+    char* slash = strrchr(dir, '/');
+    if (slash != NULL) {
+        *slash = '\0';
+        mkdir(dir, 0755);
+    }
+    FILE* f = fopen(out, "wb");
+    bool ok = f != NULL && fwrite(dol, 1, size, f) == size;
+    if (f != NULL && fclose(f) != 0)
+        ok = false;
+    free(dol);
+    if (ok)
+        fprintf(stderr, "[dol] %s read from %s (%u bytes)\n", out, iso, size);
+    else
+        remove(out);
+    return ok;
+}
+
 int main(int argc, char** argv) {
     // Keep stdout/stderr unbuffered so diagnostics are not lost when a worker
     // thread calls abort() (e.g. an Aurora FATAL) before buffered output is
@@ -542,6 +590,17 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    if (iso_path == NULL)
+        iso_path = getenv("ED_ISO");
+    if (iso_path == NULL || iso_path[0] == '\0')
+        iso_path = "dump/" ED_GAME_ID ".iso";
+    // A ready-made build has no main.dol of its own: take it from the disc.
+    FILE* have_dol = fopen(dol_path, "rb");
+    if (have_dol != NULL)
+        fclose(have_dol);
+    else if (!extract_dol(iso_path, dol_path))
+        fprintf(stderr, "[dol] no %s, and none could be read from %s\n", dol_path, iso_path);
+
     DolLayout layout;
     if (!dol_load_into_ram(&dolrecomp_cpu, dol_path, &layout)) {
         cpu_free(&dolrecomp_cpu);
@@ -610,10 +669,6 @@ int main(int argc, char** argv) {
         mmio_set_sram_path(sram_path);
     }
     hle_install(&dolrecomp_cpu);
-    if (iso_path == NULL)
-        iso_path = getenv("ED_ISO");
-    if (iso_path == NULL || iso_path[0] == '\0')
-        iso_path = "dump/" ED_GAME_ID ".iso";
     dvd_open_image(iso_path);  // disc image backing the file system
     dtk_init(iso_path);        // disc music streams, read from the same image
     mmio_set_disc_present(dvd_image_ready());

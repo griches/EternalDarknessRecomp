@@ -42,6 +42,11 @@ Your saves and settings stay in the game's folder (the Mac app's is
 3. Start the game again: it finds the pack when it starts. **Options > Game >
    HD textures** turns it on and off while you play.
 
+Packs can sit side by side in `textures`. Where two have the same texture, a
+folder with *supplement* or *override* in its name wins, so a fix-up pack such
+as the PAL supplement (the European disc's screens and words the main pack
+misses) goes beside the main pack as it is.
+
 ## What is better than on the GameCube
 
 - **Sharp picture at any resolution**: drawn at your screen's own resolution, up

@@ -8,8 +8,8 @@
 //
 // The pack lives in textures/ beside res/ (any layout of subfolders, so packs
 // can sit side by side), or ED_TEXTURE_PACK=<folder>. When two files are the
-// same texture, the one whose path sorts last wins, so a supplement in a folder
-// named after the pack's ("<pack> supplement") overrides it.
+// same texture, one under a folder named with "supplement" or "override" wins
+// (a fix-up pack beside the main one), and otherwise the path that sorts last.
 // Options > Game > HD textures turns it off.
 #include "host/texpack.h"
 
@@ -166,6 +166,19 @@ bool load_dds(const std::string& path, Loaded* img) {
     img->mips = levels;
     img->format = format;
     return true;
+}
+
+// 1 for a file under a folder whose name says it fixes up a pack.
+int overrides(const std::string& path, const std::string& root) {
+    std::string lower = std::filesystem::path(path).parent_path().string();
+    if (lower.size() > root.size())
+        lower.erase(0, root.size());  // the pack folder's own path does not count
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return lower.find("supplement") != std::string::npos ||
+                   lower.find("override") != std::string::npos
+               ? 1
+               : 0;
 }
 
 bool is_dds(const std::string& path) {
@@ -361,12 +374,16 @@ extern "C" void texpack_init(void) {
             skipped++;
             continue;
         }
-        // The same texture twice (a supplement beside its pack): the path that
-        // sorts last wins, whatever order the folder is listed in.
+        // The same texture twice (a supplement beside its pack): the one in a
+        // supplement or override folder, else the path that sorts last,
+        // whatever order the folder is listed in.
         std::string path = it->path().string();
         auto [found, added] = g.files.emplace(key, path);
-        if (!added && path > found->second)
-            found->second = std::move(path);
+        if (!added) {
+            const int mine = overrides(path, g_dir), theirs = overrides(found->second, g_dir);
+            if (mine > theirs || (mine == theirs && path > found->second))
+                found->second = std::move(path);
+        }
     }
     std::fprintf(stderr, "[texpack] %zu textures in %s (%zu skipped)\n", g.files.size(),
                  g_dir.c_str(), skipped);

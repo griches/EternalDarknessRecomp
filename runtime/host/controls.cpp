@@ -105,13 +105,13 @@ Binding g_bindings[kActionCount];
 int g_layout = 0;
 // The game's pause menu is open (set on the game thread, read by the icons).
 std::atomic<bool> g_game_menu{false};
-// A cutscene is playing (set on the game thread), where holding RB
-// fast-forwards it; RB pressed in play does not count until let go (held on
-// from one scene, it goes on into the next).
+// A cutscene is playing (set on the game thread), where holding RB or Tab
+// fast-forwards it; pressed in play, they do not count until let go (held on
+// from one scene, they go on into the next).
 std::atomic<bool> g_cutscene{false};
 std::atomic<bool> g_fast_forward{false};
-bool g_rb_was = false;
-bool g_rb_from_play = false;
+bool g_ff_was = false;
+bool g_ff_from_play = false;
 SDL_Gamepad* g_pad = nullptr;
 
 int g_capture = -1;         // action waiting for an input, or -1
@@ -465,16 +465,19 @@ bool read_pad(DolPadState* state) {
             g_held_over[n] = native_value(pad, n) >= 64;
         g_tome_was = tome;
     }
-    // Fast-forward (not in the pause menu). The game does not see RB while it
-    // runs: held over, RB reads as let go until it is.
+    // Fast-forward (not in the pause menu). The game does not see RB or Tab
+    // while it runs: held over, RB reads as let go until it is.
     const bool cutscene = g_cutscene.load(std::memory_order_relaxed);
-    const bool rb = native_value(pad, kRB) >= 128;
-    if (rb && !g_rb_was && !cutscene)
-        g_rb_from_play = true;
-    if (!rb)
-        g_rb_from_play = false;
-    g_rb_was = rb;
-    const bool fast = cutscene && rb && !g_rb_from_play &&
+    // Tab on its own: with Alt, Cmd or Ctrl it is switching windows.
+    const bool tab = key_down(SDL_SCANCODE_TAB) &&
+                     (SDL_GetModState() & (SDL_KMOD_ALT | SDL_KMOD_GUI | SDL_KMOD_CTRL)) == 0;
+    const bool held = native_value(pad, kRB) >= 128 || tab;
+    if (held && !g_ff_was && !cutscene)
+        g_ff_from_play = true;
+    if (!held)
+        g_ff_from_play = false;
+    g_ff_was = held;
+    const bool fast = cutscene && held && !g_ff_from_play &&
                       !g_game_menu.load(std::memory_order_relaxed);
     if (fast)
         g_held_over[kRB] = true;
@@ -504,7 +507,7 @@ bool read_pad(DolPadState* state) {
         const int* inputs = pad_inputs(a);
         int v = live_value(pad, inputs[0]);
         const int held = live_value(pad, inputs[1]);
-        if (key_down(g_bindings[a].key))
+        if (key_down(g_bindings[a].key) && !(fast && g_bindings[a].key == SDL_SCANCODE_TAB))
             v = 255;
         const bool toggles = !tome && toggle_mode(a);
         if (!toggles)
@@ -667,7 +670,7 @@ std::string fast_forward_glyph() {
     if (!g_cutscene.load(std::memory_order_relaxed))
         return "";
     const std::string set = glyph_set();
-    return set == "kb" ? "" : "ink/" + set + "/rb.png";
+    return "ink/" + set + (set == "kb" ? "/tab.png" : "/rb.png");
 }
 
 bool fast_forwarding() {

@@ -63,8 +63,8 @@ uint64_t bindings_signature();
 // controller family plugged in or out, the pause menu opening or closing).
 uint64_t glyph_signature();
 // The fast-forward prompt (frontend.cpp): RB's icon under res/ui/glyphs while
-// a cutscene plays ("ink/xbox/rb.png"), "" when there is none to show (no
-// cutscene, or no controller); and whether RB is fast-forwarding now.
+// a cutscene plays ("ink/xbox/rb.png"), Tab's on the keyboard, "" when no
+// cutscene plays; and whether RB or Tab is fast-forwarding now.
 std::string fast_forward_glyph();
 bool fast_forwarding();
 
@@ -92,7 +92,8 @@ void controls_init(void);
 // Whether the game's pause menu is open (hle.c, each pad read).
 void controls_set_game_menu(bool open);
 // Whether a cutscene is playing (hle.c, each pad read), and whether the player
-// is fast-forwarding it (RB held there): the game then runs at four times speed.
+// is fast-forwarding it (RB or Tab held there): the game then runs at up to
+// four times speed.
 void controls_set_cutscene(bool playing);
 bool controls_fast_forward(void);
 // The guest frame (timebase / 675000) of this pad read, for ED_PAD_SCRIPT.

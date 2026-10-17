@@ -3585,7 +3585,7 @@ static bool game_menu_open(CPUState* cpu) {
            (s32)mem_read32(cpu, sda + (u32)g_menu_depth_offset) > 0;
 }
 
-// A cutscene, where RB fast-forwards (controls.cpp): one of the movies is
+// A cutscene, where RB or Tab fast-forwards (controls.cpp): one of the movies is
 // open, or a scene plays in the letterbox bars. The game's scene flag is set
 // while one plays, and the bars' height is a float it keeps at 60 while they
 // show (also on the title screen, where the flag is clear) and 0 in play,
@@ -5321,7 +5321,7 @@ static void find_letterbox(CPUState* cpu) {
     if ((load >> 16) != 0x806Du || mem_read32(cpu, getter + 4u) != 0x4E800020u ||
         (high >> 16) != 0x3C80u || (mem_read32(cpu, at + 4u) >> 16) != 0x3C60u ||
         (low >> 16) != 0x3884u || mem_read32(cpu, at + 12u) != 0x38000001u) {
-        fprintf(stderr, "[hle] letterbox not found: RB fast-forwards only the movies\n");
+        fprintf(stderr, "[hle] letterbox not found: only the movies fast-forward\n");
         return;
     }
     g_scene_flag_offset = (s16)(load & 0xFFFFu);

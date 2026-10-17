@@ -1355,8 +1355,8 @@ void update_fps_counter() {
 }
 
 // While a cutscene plays, the fast-forward prompt at the screen's bottom right
-// (in the letterbox bar): RB's icon and a fast-forward sign, which brightens
-// while RB is held. Through ImGui, as the FPS counter.
+// (in the letterbox bar): RB's icon (Tab's on the keyboard) and a
+// fast-forward sign, which brightens while it is held. Through ImGui, as the FPS counter.
 void update_fast_forward_prompt() {
     const std::string file = controls::fast_forward_glyph();
     if (file.empty() || ImGui::GetCurrentContext() == nullptr)

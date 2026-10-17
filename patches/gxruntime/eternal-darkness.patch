@@ -7787,7 +7787,7 @@ index 4d14391..4acd5f5 100644
  };
  
 diff --git a/graphics/gxcore/include/gxruntime/gxcore/shader.hpp b/graphics/gxcore/include/gxruntime/gxcore/shader.hpp
-index b9bfd5d..091bfb6 100644
+index b9bfd5d..ad4cd71 100644
 --- a/graphics/gxcore/include/gxruntime/gxcore/shader.hpp
 +++ b/graphics/gxcore/include/gxruntime/gxcore/shader.hpp
 @@ -12,6 +12,10 @@
@@ -7801,7 +7801,20 @@ index b9bfd5d..091bfb6 100644
  #include <string>
  #include <type_traits>
  #include <vector>
-@@ -501,21 +505,21 @@ static_assert(std::has_unique_object_representations_v<PipelineKey>);
+@@ -352,7 +356,11 @@ struct TevStageKey {
+   std::uint8_t ind_utclod = 0;        // lb_utclod
+   std::uint8_t ind_addprev = 0;       // fb_addprev
+   std::uint8_t ind_active = 0;        // IsActive(): bs!=Off || matrix_index!=Off
+-  std::uint8_t pad0 = 0;
++  // GXRuntime recomp patch: sample this stage's texture at the centre of the
++  // EFB pixel the fragment falls in (plan.cpp alias_screen_texgens), for a
++  // screen texgen that moves a large part of the texture per EFB pixel. Was
++  // pad0, so the key keeps its size and old cached keys read 0 (off).
++  std::uint8_t snap_efb_pixel = 0;
+ };
+ static_assert(std::has_unique_object_representations_v<TevStageKey>);
+ 
+@@ -501,21 +509,21 @@ static_assert(std::has_unique_object_representations_v<PipelineKey>);
  
  // --- Uniform block (Dolphin VertexShaderConstants shape, slice subset) ------
  
@@ -7838,7 +7851,7 @@ index b9bfd5d..091bfb6 100644
  
  struct VertexShaderConstants {
    float posnormalmatrix[6][4]{};    // rows 0-2 current pos mtx, 3-5 normal
-@@ -523,11 +527,9 @@ struct VertexShaderConstants {
+@@ -523,11 +531,9 @@ struct VertexShaderConstants {
    // Per texgen: 3 rows resolved via matidx. Sized for full GC 8 gens (U7);
    // WGSL array length must match so later field offsets stay aligned.
    float texmatrices[3 * kMaxTexGens][4]{};
@@ -7853,7 +7866,7 @@ index b9bfd5d..091bfb6 100644
    std::int32_t materials[4][4]{};
    // Cached vertex attributes (Dolphin ConstantManager cached_normal/tangent/
    // binormal): the last-decoded vertex's RAW object-space N/B/T, substituted
-@@ -536,21 +538,15 @@ struct VertexShaderConstants {
+@@ -536,21 +542,15 @@ struct VertexShaderConstants {
    float cached_normal[4]{0.f, 0.f, 0.f, 0.f};
    float cached_tangent[4]{0.f, 0.f, 0.f, 0.f};
    float cached_binormal[4]{0.f, 0.f, 0.f, 0.f};
@@ -7879,7 +7892,7 @@ index b9bfd5d..091bfb6 100644
  
  // Pixel-shader uniforms (Dolphin PixelShaderConstants subset): the four TEV
  // color registers (I_COLORS: [0] prev seed, [1..3] c0/c1/c2), the four konst
-@@ -629,6 +625,18 @@ inline std::uint32_t texmap_popcount(std::uint32_t v) {
+@@ -629,6 +629,29 @@ inline std::uint32_t texmap_popcount(std::uint32_t v) {
    return n;
  }
  
@@ -7895,10 +7908,21 @@ index b9bfd5d..091bfb6 100644
 +  return false;
 +}
 +
++// GXRuntime recomp patch: a TEV stage samples at EFB pixel centres
++// (TevStageKey.snap_efb_pixel), so the shaders carry the EFB position.
++inline bool efb_snap_any(const ShaderKey& key) {
++  if (key.tev_valid == 0u)
++    return false;
++  for (std::uint32_t n = 0; n < key.num_tev_stages && n < kMaxTevStages; ++n)
++    if (key.tev_stages[n].snap_efb_pixel != 0u)
++      return true;
++  return false;
++}
++
  // Bit t set => an enabled TEV stage samples texmap t, or an active indirect
  // stage's IREF map references t. Non-TEV textured draws use texmap 0. A result
  // with <=1 bit is the single-texmap fast path.
-@@ -688,14 +696,44 @@ struct PlanTexture {
+@@ -688,14 +711,44 @@ struct PlanTexture {
  
  // packed uniforms, the pipeline key, and the bound texture's guest identity +
  // host bytes (converted by the substrate's GX codecs at upload).
@@ -7946,7 +7970,7 @@ index b9bfd5d..091bfb6 100644
    std::uint32_t vertex_count = 0;
    // Viewport, raw XF values (wd/2, -ht/2, zmax*2^24, xorig+342, yorig+342,
    // farz*2^24) — the submission layer maps these through the substrate's
-@@ -750,6 +788,13 @@ struct DrawPlan {
+@@ -750,6 +803,13 @@ struct DrawPlan {
    float zslope_dfdy = 0.f;
    float zslope_f0 = 0.f;
  };
@@ -7960,7 +7984,7 @@ index b9bfd5d..091bfb6 100644
  
  // --- EFB copy-to-texture (S16) ------------------------------------------------
  
-@@ -838,6 +883,9 @@ struct EfbCopyFilterUniforms {
+@@ -838,6 +898,9 @@ struct EfbCopyFilterUniforms {
  // reversed-Z (graphics/aurora lib/gx/gx.hpp UseReversedZ); bind groups are
  // group(1)=dynamic uniform, group(2)=texture+sampler.
  std::string generate_wgsl(const ShaderKey& key);
@@ -8365,10 +8389,10 @@ index 2584cb9..c1bf0b0 100644
    }
    emit(out, "        }\n");
 diff --git a/graphics/gxcore/src/plan.cpp b/graphics/gxcore/src/plan.cpp
-index c3d1557..84f7b34 100644
+index c3d1557..5f0785c 100644
 --- a/graphics/gxcore/src/plan.cpp
 +++ b/graphics/gxcore/src/plan.cpp
-@@ -3,8 +3,14 @@
+@@ -3,8 +3,17 @@
  
  #include "gxruntime/gxcore/gxcore.hpp"
  
@@ -8377,13 +8401,16 @@ index c3d1557..84f7b34 100644
 +#include <cmath>
 +#include <cstdlib>
  #include <cstring>
++#include <cstdio>
++#include <string>
++#include <unordered_set>
 +#include <new>
  #include <limits>
 +#include <memory>
  
  // DrawPlan construction: vertex layout/decode (Dolphin VertexLoader semantics),
  // matrices, ShaderKey derivation (TEV/texgen/lighting register decode),
-@@ -17,6 +23,33 @@ namespace ar = gxruntime::aurora_recomp;
+@@ -17,6 +26,33 @@ namespace ar = gxruntime::aurora_recomp;
  
  namespace {
  
@@ -8417,7 +8444,7 @@ index c3d1557..84f7b34 100644
  // --- Vertex decode (Dolphin VertexLoader semantics) ---------------------------
  
  // One payload element in GC attribute order. attr uses CP array numbering
-@@ -391,14 +424,15 @@ const ar::ConsumedArrayInput* find_array(const ar::ConsumedDraw& draw,
+@@ -391,14 +427,15 @@ const ar::ConsumedArrayInput* find_array(const ar::ConsumedDraw& draw,
  // Matrix-memory row -> 4 floats, from the draw's captured XF matrix state.
  // Rows 0-29 live in position_matrices (3 rows per matrix), rows 30-62 in
  // tex_matrices. Returns false when any word of the row was never written.
@@ -8436,7 +8463,7 @@ index c3d1557..84f7b34 100644
      return (mask & (1u << matrix)) != 0u;
    }
    if (row < 63u) {
-@@ -407,8 +441,8 @@ bool load_matrix_row(const ar::ConsumedDraw& draw, std::uint32_t row,
+@@ -407,8 +444,8 @@ bool load_matrix_row(const ar::ConsumedDraw& draw, std::uint32_t row,
      const std::uint32_t base = (rel % 3u) * 4u;
      bool valid = true;
      for (std::uint32_t w = 0; w < 4; ++w) {
@@ -8447,7 +8474,7 @@ index c3d1557..84f7b34 100644
          valid = false;
      }
      return valid;
-@@ -424,18 +458,119 @@ void identity_rows(float rows[3][4]) {
+@@ -424,18 +461,205 @@ void identity_rows(float rows[3][4]) {
    rows[2][2] = 1.f;
  }
  
@@ -8462,16 +8489,67 @@ index c3d1557..84f7b34 100644
 +// periods out of the per-pixel gradient and the matrix gives the same sample
 +// at every native pixel centre, smooth in between.
 +// DOL_GXCORE_NO_TEXGEN_ALIAS=1 keeps the game's matrix as it is.
-+void alias_screen_texgens(const ShaderKey& key, const ar::ConsumedDraw& draw,
++void alias_screen_texgens(ShaderKey& key, const ar::ConsumedDraw& draw,
 +                          const PlanSampler samplers[8],
 +                          VertexShaderConstants& c) {
 +  static const bool off = std::getenv("DOL_GXCORE_NO_TEXGEN_ALIAS") != nullptr;
++  static const bool snap_off = std::getenv("DOL_GXCORE_NO_EFB_SNAP") != nullptr;
++  // DOL_GXCORE_TEXGEN_LOG=1: each different ortho draw with a texgen from
++  // position, once: its matrix, samplers and what happened to it.
++  static const bool log = std::getenv("DOL_GXCORE_TEXGEN_LOG") != nullptr;
++  std::string note;
++  const char* why[kMaxTexGens];
++  char why_text[kMaxTexGens][160];
++  for (auto& w : why)
++    w = "aliased";
++  auto say = [&]() {
++    if (!log || draw.projection_type != 1u)
++      return;
++    static std::unordered_set<std::string> seen;
++    char line[512];
++    for (std::uint32_t i = 0; i < key.num_tex_gens && i < kMaxTexGens; ++i) {
++      const TexGenKey& tg = key.tex_gens[i];
++      if (tg.sourcerow != 0u)
++        continue;
++      const float* r0 = c.texmatrices[3u * i];
++      const float* r1 = c.texmatrices[3u * i + 1u];
++      std::string wraps;
++      for (std::uint32_t n = 0; n < key.num_tev_stages && n < kMaxTevStages; ++n) {
++        const TevStageKey& st = key.tev_stages[n];
++        if (st.tevorders_enable == 0u || st.tevorders_texcoord != i)
++          continue;
++        const PlanSampler& smp = samplers[st.tevorders_texmap & 7u];
++        wraps += " s" + std::to_string(n) + "map" + std::to_string(st.tevorders_texmap) + "wrap" +
++                 std::to_string(smp.wrap_s) + "/" + std::to_string(smp.wrap_t) +
++                 (st.ind_active != 0u ? "ind" : "");
++      }
++      std::snprintf(line, sizeof line,
++                    "[texgen] %s: tg%u type=%u proj=%u mtxidx=%u posidx=%u vp=%u "
++                    "rows=[%.4g %.4g %.4g %.4g | %.4g %.4g %.4g %.4g] pm=[%.4g %.4g | %.4g %.4g]%s",
++                    why[i], i, tg.texgentype, tg.projection, (key.tex_mtx_idx_mask >> i) & 1u,
++                    key.has_pos_mtx_idx,
++                    (draw.transform_flags & ar::kDrawTransformViewportValid) != 0u, r0[0], r0[1],
++                    r0[2], r0[3], r1[0], r1[1], r1[2], r1[3], c.posnormalmatrix[0][0],
++                    c.posnormalmatrix[0][1], c.posnormalmatrix[1][0], c.posnormalmatrix[1][1],
++                    wraps.c_str());
++      if (seen.insert(line).second && seen.size() < 2000u)
++        std::fprintf(stderr, "%s\n", line);
++    }
++  };
++  struct Said {
++    decltype(say)& f;
++    ~Said() { f(); }
++  } said{say};
++  auto all = [&](const char* w) {
++    for (auto& x : why)
++      x = w;
++  };
 +  if (off || draw.projection_type != 1u || key.has_pos_mtx_idx != 0u ||
 +      (draw.transform_flags & ar::kDrawTransformViewportValid) == 0u)
-+    return;
++    return all("skipped: off, pos matrix index or no viewport");
 +  const float (*const pm)[4] = c.posnormalmatrix;
 +  if (std::fabs(pm[0][2]) > 1e-6f || std::fabs(pm[1][2]) > 1e-6f)
-+    return;
++    return all("skipped: z feeds x/y");
 +  // EFB pixels per model unit (Dolphin: x = ndc.x * wd + xOrig - 342).
 +  const float sx = draw.viewport[0] * draw.projection[0];
 +  const float sy = draw.viewport[1] * draw.projection[2];
@@ -8479,7 +8557,7 @@ index c3d1557..84f7b34 100644
 +  const float j10 = sy * pm[1][0], j11 = sy * pm[1][1];
 +  const float det = j00 * j11 - j01 * j10;
 +  if (!(std::fabs(det) > 1e-9f))
-+    return;
++    return all("skipped: degenerate");
 +  const float i00 = j11 / det, i01 = -j01 / det, i10 = -j10 / det, i11 = j00 / det;
 +  // EFB position of the model origin.
 +  const float ox = draw.viewport[0] * (draw.projection[0] * pm[0][3] + draw.projection[1]) +
@@ -8489,20 +8567,26 @@ index c3d1557..84f7b34 100644
 +  for (std::uint32_t i = 0; i < key.num_tex_gens && i < kMaxTexGens; ++i) {
 +    const TexGenKey& tg = key.tex_gens[i];
 +    if (tg.texgentype != 0u || tg.sourcerow != 0u || tg.projection != 0u ||
-+        ((key.tex_mtx_idx_mask >> i) & 1u) != 0u)
++        ((key.tex_mtx_idx_mask >> i) & 1u) != 0u) {
++      why[i] = "skipped: texgen kind or per-vertex matrix";
 +      continue;
-+    if (key.dualtex_enabled != 0u && (tg.postmtx_index != 61u || tg.postmtx_normalize != 0u))
++    }
++    if (key.dualtex_enabled != 0u && (tg.postmtx_index != 61u || tg.postmtx_normalize != 0u)) {
++      why[i] = "skipped: post matrix";
 +      continue;
++    }
 +    // The period every stage reading this texcoord samples with: 1 repeat,
 +    // 2 mirror; a clamped or indirect use keeps the matrix.
 +    float period[2] = {0.f, 0.f};
 +    bool ok = key.tev_valid != 0u;
++    bool indirect = false;
 +    for (std::uint32_t n = 0; ok && n < key.num_tev_stages && n < kMaxTevStages; ++n) {
 +      const TevStageKey& st = key.tev_stages[n];
 +      if (st.tevorders_enable == 0u || st.tevorders_texcoord != i)
 +        continue;
 +      if (st.ind_active != 0u) {
 +        ok = false;
++        indirect = true;
 +        break;
 +      }
 +      const PlanSampler& smp = samplers[st.tevorders_texmap & 7u];
@@ -8514,29 +8598,58 @@ index c3d1557..84f7b34 100644
 +        period[a] = p;
 +      }
 +    }
-+    if (!ok || period[0] == 0.f)
-+      continue;
 +    float* const rows[2] = {c.texmatrices[3u * i], c.texmatrices[3u * i + 1u]};
-+    float k[2][2];
-+    bool any = false;
++    // Texture coordinate per EFB pixel: d(s,t)/d(efb x,y) = R_xy * J^-1.
++    float g[2][2];
 +    for (int r = 0; r < 2; ++r) {
-+      // Texture coordinate per EFB pixel: d(s,t)/d(efb x,y) = R_xy * J^-1.
-+      const float gx = rows[r][0] * i00 + rows[r][1] * i10;
-+      const float gy = rows[r][0] * i01 + rows[r][1] * i11;
-+      k[r][0] = period[r] * std::round(gx / period[r]);
-+      k[r][1] = period[r] * std::round(gy / period[r]);
-+      any = any || k[r][0] != 0.f || k[r][1] != 0.f;
++      g[r][0] = rows[r][0] * i00 + rows[r][1] * i10;
++      g[r][1] = rows[r][0] * i01 + rows[r][1] * i11;
 +    }
-+    if (!any)
-+      continue;
-+    for (int r = 0; r < 2; ++r) {
-+      // R'_xy = (G - K) * J, and the constant keeps every pixel centre's
-+      // value the same up to whole periods.
-+      const float gx = rows[r][0] * i00 + rows[r][1] * i10 - k[r][0];
-+      const float gy = rows[r][0] * i01 + rows[r][1] * i11 - k[r][1];
-+      rows[r][0] = gx * j00 + gy * j10;
-+      rows[r][1] = gx * j01 + gy * j11;
-+      rows[r][3] += k[r][0] * (0.5f - ox) + k[r][1] * (0.5f - oy);
++    float k[2][2] = {{0.f, 0.f}, {0.f, 0.f}};
++    bool any = false;
++    if (ok && period[0] != 0.f) {
++      for (int r = 0; r < 2; ++r) {
++        k[r][0] = period[r] * std::round(g[r][0] / period[r]);
++        k[r][1] = period[r] * std::round(g[r][1] / period[r]);
++        any = any || k[r][0] != 0.f || k[r][1] != 0.f;
++      }
++    }
++    if (any) {
++      for (int r = 0; r < 2; ++r) {
++        // R'_xy = (G - K) * J, and the constant keeps every pixel centre's
++        // value the same up to whole periods.
++        const float gx = g[r][0] - k[r][0];
++        const float gy = g[r][1] - k[r][1];
++        rows[r][0] = gx * j00 + gy * j10;
++        rows[r][1] = gx * j01 + gy * j11;
++        rows[r][3] += k[r][0] * (0.5f - ox) + k[r][1] * (0.5f - oy);
++      }
++    }
++    // What is left can still move a quarter of the texture or more per EFB
++    // pixel: natively each pixel then reads an effectively unrelated texel
++    // (Eternal Darkness's volume bar steps 0.4 of its glow noise a pixel, with
++    // no change down a column), and above native resolution the samples in
++    // between show as streaks a fraction of a pixel wide. Sampled at the
++    // centre of each EFB pixel instead, it reads as the GameCube's picture.
++    // DOL_GXCORE_NO_EFB_SNAP=1 leaves such draws as they are.
++    float left = 0.f;
++    for (int r = 0; r < 2; ++r)
++      for (int a = 0; a < 2; ++a)
++        left = std::max(left, std::fabs(g[r][a] - k[r][a]));
++    const bool snap = !snap_off && !indirect && key.tev_valid != 0u && left >= 0.25f;
++    if (snap)
++      for (std::uint32_t n = 0; n < key.num_tev_stages && n < kMaxTevStages; ++n) {
++        TevStageKey& st = key.tev_stages[n];
++        if (st.tevorders_enable != 0u && st.tevorders_texcoord == i)
++          st.snap_efb_pixel = 1u;
++      }
++    if (log) {
++      std::snprintf(why_text[i], sizeof why_text[i],
++                    "%s%s, per pixel [%.3g %.3g | %.3g %.3g] left %.3g",
++                    any ? "aliased" : ok ? "under half a period" : "clamped, mixed or indirect",
++                    snap ? " + snapped to EFB pixels" : "", g[0][0], g[0][1], g[1][0], g[1][1],
++                    left);
++      why[i] = why_text[i];
 +    }
 +  }
 +}
@@ -8569,7 +8682,7 @@ index c3d1557..84f7b34 100644
    };
  
    if (draw.cull_all) {
-@@ -472,9 +607,25 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -472,9 +696,25 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
        ++counters.alpha_compare_ignored;
    }
  
@@ -8598,7 +8711,7 @@ index c3d1557..84f7b34 100644
      ++counters.vertex_decode_failures;
      return skip("VCD/VAT walk underivable");
    }
-@@ -489,8 +640,8 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -489,8 +729,8 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
        static_cast<std::uint8_t>(bits(gen_mode, 1, 8) != 0u ? 1u : 0u);
    const std::uint32_t xf_numtexgens_reg = 0x103Fu - 0x1018u;
    std::uint32_t num_tex_gens = 0;
@@ -8609,7 +8722,7 @@ index c3d1557..84f7b34 100644
    else
      num_tex_gens = bits(gen_mode, 4, 0);
    if (num_tex_gens > kMaxTexGens) {
-@@ -518,9 +669,9 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -518,9 +758,9 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
    // lightMask4_7@11. chan_regs slot = xf_addr - 0x1009: [0]=numColorChans,
    // [1..4]=amb0/amb1/mat0/mat1, [5..8]=color0/color1/alpha0/alpha1 ctrl.
    auto lit_chan = [&](std::uint32_t slot, LightChanKey& ch) {
@@ -8621,7 +8734,7 @@ index c3d1557..84f7b34 100644
      ch.matsource = static_cast<std::uint8_t>(bits(v, 1, 0));
      ch.enablelighting = static_cast<std::uint8_t>(bits(v, 1, 1));
      ch.ambsource = static_cast<std::uint8_t>(bits(v, 1, 6));
-@@ -537,10 +688,10 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -537,10 +777,10 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
    // litchan 0..3). A captured channel selecting MatSource::Register drives the
    // material register; an unconfigured channel stays vertex-color passthrough.
    for (std::uint32_t j = 0; j < 4u; ++j)
@@ -8635,7 +8748,7 @@ index c3d1557..84f7b34 100644
      if (n > 2u)
        n = 2u;
      key.num_color_chans = static_cast<std::uint8_t>(n);
-@@ -558,21 +709,21 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -558,21 +798,21 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
    // Only count normals/lighting as ignored when we fall back to passthrough.
    if (walk.has_normal && key.lit_valid == 0u)
      ++counters.normals_ignored;
@@ -8662,7 +8775,7 @@ index c3d1557..84f7b34 100644
        // XFMemory.h TexMtxInfo bitfields.
        tg.projection = static_cast<std::uint8_t>(bits(info, 1, 1));
        tg.inputform = static_cast<std::uint8_t>(bits(info, 1, 2));
-@@ -589,8 +740,8 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -589,8 +829,8 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
      // base post-matrix row) + normalize (bit 8). Applied by the WGSL only for
      // Regular texgens under dualtex_enabled (Dolphin VertexShaderGen).
      const std::uint32_t post_reg = (0x1050u - 0x1018u) + i;
@@ -8673,7 +8786,7 @@ index c3d1557..84f7b34 100644
        tg.postmtx_index = static_cast<std::uint8_t>(bits(pinfo, 6, 0));
        tg.postmtx_normalize = static_cast<std::uint8_t>(bits(pinfo, 1, 8));
      }
-@@ -773,6 +924,18 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -773,6 +1013,18 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
      plan.pe_control_valid = pe.valid;
      plan.efb_pixel_format = pe.pixel_format;
      plan.efb_z_format = pe.z_format;
@@ -8692,7 +8805,7 @@ index c3d1557..84f7b34 100644
      plan.early_ztest = pe.early_ztest;
      if (!pe.valid)
        ++counters.efb_format_defaulted;
-@@ -780,10 +943,12 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -780,10 +1032,12 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
      const bool zfreeze = bits(gen_mode, 1, 19) != 0u;
      key.zfreeze = static_cast<std::uint8_t>(zfreeze ? 1u : 0u);
      key.efb_pixel_format = pe.pixel_format;
@@ -8708,7 +8821,7 @@ index c3d1557..84f7b34 100644
      const bool dither_bit = bits(cmode0, 1, 2) != 0u;
      key.dither = static_cast<std::uint8_t>(
          (dither_bit && key.rgba6_format != 0u) ? 1u : 0u);
-@@ -795,7 +960,7 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -795,7 +1049,7 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
          bp_valid_[0x42] ? bp_regs_[0x42] : 0u;
      const bool dst_alpha_en = bits(cmode1, 1, 8) != 0u;
      const bool use_dst_alpha =
@@ -8717,7 +8830,7 @@ index c3d1557..84f7b34 100644
      key.use_dst_alpha = static_cast<std::uint8_t>(use_dst_alpha ? 1u : 0u);
      // NoOp logic + dst-alpha: alpha write only when dst-alpha active.
      if (bits(cmode0, 1, 1) != 0u && pipe.blend_enable == 0u &&
-@@ -842,9 +1007,22 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -842,9 +1096,22 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
    const bool is_line_point =
        prim_op == 0xA8u || prim_op == 0xB0u || prim_op == 0xB8u;
    if (!is_line_point) {
@@ -8743,7 +8856,7 @@ index c3d1557..84f7b34 100644
      if (index_count == 0u) {
        ++counters.vertex_decode_failures;
        return skip("unknown primitive topology");
-@@ -1006,11 +1184,24 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1006,11 +1273,24 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
  
    // Uniforms.
    VertexShaderConstants& c = plan.constants;
@@ -8771,7 +8884,7 @@ index c3d1557..84f7b34 100644
    // Normal matrix (XF 0x400): matrix M = current_pn_matrix, 3 rows of
    // 3 (Dolphin VertexShaderManager normalMatrices[3*(PosNormalMtxIdx&31)] == our
    // per-matrix [M] slot). Fall back to the position rows when it was never
-@@ -1019,56 +1210,37 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1019,56 +1299,37 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
      const std::uint32_t m = draw.current_pn_matrix;
      const bool nm_valid =
          m < DOL_GX_RECOMP_NORMAL_MATRIX_COUNT &&
@@ -8839,7 +8952,7 @@ index c3d1557..84f7b34 100644
                                      : 0u;
        unpack_rgba8(col, c.materials[m]);
      }
-@@ -1082,10 +1254,10 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1082,10 +1343,10 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
    // MatrixIndexA/B defaults to IDENTITY the same way. Residual is only a
    // non-identity index whose 3 rows were never captured.
    constexpr std::uint32_t kGxIdentityRow = 60u;
@@ -8854,7 +8967,7 @@ index c3d1557..84f7b34 100644
    for (std::uint32_t i = 0; i < key.num_tex_gens; ++i) {
      std::uint32_t row = kGxIdentityRow;
      if (i < 4u && mat_idx_a_valid)
-@@ -1096,9 +1268,17 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1096,9 +1357,17 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
      if (row == kGxIdentityRow) {
        identity_rows(rows);
      } else {
@@ -8874,7 +8987,7 @@ index c3d1557..84f7b34 100644
        if (!resolved) {
          identity_rows(rows);
          ++counters.unresolved_tex_matrix;
-@@ -1108,18 +1288,12 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1108,18 +1377,12 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
        std::memcpy(c.texmatrices[3u * i + k], rows[k], sizeof rows[k]);
    }
  
@@ -8898,7 +9011,7 @@ index c3d1557..84f7b34 100644
      for (std::uint32_t i = 0; i < key.num_tex_gens; ++i) {
        if (static_cast<TexGenType>(key.tex_gens[i].texgentype) !=
            TexGenType::Regular)
-@@ -1128,7 +1302,7 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1128,7 +1391,7 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
        bool resolved = true;
        for (std::uint32_t k = 0; k < 3u; ++k) {
          const std::uint32_t row = (base + k) & 0x3fu;
@@ -8907,7 +9020,7 @@ index c3d1557..84f7b34 100644
            resolved = false;
        }
        if (!resolved)
-@@ -1165,7 +1339,10 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1165,7 +1428,10 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
  
    // U4: scissor + scissor-offset (BP 0x20/0x21/0x59). Decode into EFB-space
    // half-open rects (multi-rect wrap cases included). Missing TL/BR counts as
@@ -8919,7 +9032,7 @@ index c3d1557..84f7b34 100644
    {
      const bool tl_valid = bp_valid_[0x20];
      const bool br_valid = bp_valid_[0x21];
-@@ -1174,7 +1351,8 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1174,7 +1440,8 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
        ++counters.scissor_defaulted;
      const std::uint32_t tl = tl_valid ? bp_regs_[0x20] : 0u;
      const std::uint32_t br = br_valid ? bp_regs_[0x21] : 0u;
@@ -8929,7 +9042,7 @@ index c3d1557..84f7b34 100644
      plan.scissor_valid = tl_valid && br_valid;
      const std::uint32_t n = compute_scissor_rects(
          tl, br, off, plan.scissor_rects,
-@@ -1185,22 +1363,41 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1185,22 +1452,41 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
        ++counters.scissor_multi_rect;
    }
    if (key.textured != 0u) {
@@ -8984,7 +9097,7 @@ index c3d1557..84f7b34 100644
      // U2: decode sampler state for every used texmap from TX_SETMODE0/1.
      // Count sampler_defaulted when mode0 was never written for a live texmap
      // (plan falls back to BP-zero defaults: clamp/near/no-mip).
-@@ -1341,6 +1538,9 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1341,6 +1627,9 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
                   bp_valid_[0x42] ? bp_regs_[0x42] : 0u, bp_valid_[0x42],
                   plan.pixel_constants.alpha_ref);
  
@@ -8994,7 +9107,7 @@ index c3d1557..84f7b34 100644
    // U3: pack indtexscale / indtexmtx / texdims into the pixel-constant tail.
    // Scales: BP TEXSCALE 0x25/0x26 (ss0,ts0,ss1,ts1 per pair). Matrices: IND_MTX
    // A/B/C at 0x06+3i / 0x07+3i / 0x08+3i; scale = s0|(s1<<2)|(s2<<4), .w=17-scale
-@@ -1479,10 +1679,12 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1479,10 +1768,12 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
    // object-space value (Dolphin writes the cache on the loader's m_remaining==0
    // vertex). N/B/T are appended in the fixed vertex layout at these float slots.
    if (cached != nullptr) {
@@ -9010,7 +9123,7 @@ index c3d1557..84f7b34 100644
      }
      if (plan.vertex_count > 0u) {
        const float* last =
-@@ -1498,6 +1700,20 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1498,6 +1789,20 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
          }
        }
      }
@@ -9031,7 +9144,7 @@ index c3d1557..84f7b34 100644
    }
  
    // U6: CPU-side line/point expansion into triangle lists (WebGPU has no
-@@ -1509,7 +1725,7 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1509,7 +1814,7 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
      decode_lp_size(bp_valid_[0x22] ? bp_regs_[0x22] : 0u, bp_valid_[0x22],
                     bp_regs_, bp_valid_, key.num_tex_gens, &lp);
      const bool use_pn = key.has_pos_mtx_idx == 0u;
@@ -9040,7 +9153,7 @@ index c3d1557..84f7b34 100644
                                 plan.viewport_valid, key.num_tex_gens,
                                 plan.texcoords, &plan.vertices,
                                 &plan.vertex_count, &plan.indices) ||
-@@ -1559,7 +1775,7 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1559,7 +1864,7 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
          std::uint32_t pos_row = 0;
          std::memcpy(&pos_row, v + 3, sizeof pos_row);
          const bool use_pn = key.has_pos_mtx_idx == 0u;
@@ -9049,7 +9162,7 @@ index c3d1557..84f7b34 100644
                              view_off_y, screen + 3 * k);
        }
        float dfdx = 0.f, dfdy = 0.f, f0 = 0.f;
-@@ -1584,6 +1800,8 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1584,6 +1889,8 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
          plan.pixel_constants.zslope[3] = 0.f;
          plan.pixel_constants.efbscale[0] = 1.f;
          plan.pixel_constants.efbscale[1] = 1.f;
@@ -9058,7 +9171,7 @@ index c3d1557..84f7b34 100644
        } else {
          ++counters.zfreeze_ignored;
          // Can't emit plane depth without a slope — drop per_pixel_depth so
-@@ -1594,6 +1812,14 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1594,6 +1901,14 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
      } else if (zslope != nullptr) {
        // Always recompute on non-frozen draws (Dolphin CalculateZSlope path).
        (void)capture_slope(zslope);
@@ -9073,7 +9186,7 @@ index c3d1557..84f7b34 100644
      }
    }
  
-@@ -1614,7 +1840,80 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
+@@ -1614,7 +1929,80 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
  
    plan.ok = true;
    ++counters.draws_planned;
@@ -9302,10 +9415,69 @@ index 10b1a33..c431379 100644
        vat_valid_[state.index] |= static_cast<std::uint8_t>(1u << state.aux0);
      }
 diff --git a/graphics/gxcore/src/tev.cpp b/graphics/gxcore/src/tev.cpp
-index 2c074d7..bc31d92 100644
+index 2c074d7..aebae64 100644
 --- a/graphics/gxcore/src/tev.cpp
 +++ b/graphics/gxcore/src/tev.cpp
-@@ -506,6 +506,11 @@ void emit_tev_fragment(std::string& out, const ShaderKey& key) {
+@@ -177,6 +177,46 @@ void emit_tev_fragment(std::string& out, const ShaderKey& key) {
+   // U8: dual-source when use_dst_alpha (const alpha @loc0, blend alpha @loc1
+   // @blend_src(1)); substrate must enable dual-source-blending (impl-b).
+   const bool dual_src = key.use_dst_alpha != 0u;
++  // GXRuntime recomp patch: a stage sampling at EFB pixel centres moves its
++  // (affine, screen-space) texcoord to the centre of the EFB pixel the
++  // fragment falls in, with the texture's derivatives per EFB pixel, as the
++  // GameCube samples it (plan.cpp alias_screen_texgens).
++  // DOL_GXCORE_EFB_SNAP_POINT=1: one sample at the EFB pixel's centre (the
++  // GameCube's picture, pixel for pixel); otherwise the mean of a 2x2 block
++  // of EFB pixels around the fragment, as a TV shows such per-pixel
++  // alternation: an even, flowing glow without stripes.
++  static const bool point = std::getenv("DOL_GXCORE_EFB_SNAP_POINT") != nullptr;
++  if (efb_snap_any(key)) {
++    emit(out, "fn efb_snap_sample(t: texture_2d<f32>, s: sampler, uv: vec2f, e: vec2f) -> vec4f {\n"
++              "    let ex = dpdx(e.x);\n"
++              "    let ey = dpdy(e.y);\n"
++              "    let ux = select(vec2f(0.0), dpdx(uv) / ex, abs(ex) > 1e-6);\n"
++              "    let uy = select(vec2f(0.0), dpdy(uv) / ey, abs(ey) > 1e-6);\n");
++    if (point)
++      emit(out, "    let d = floor(e) + vec2f(0.5) - e;\n"
++                "    return textureSampleGrad(t, s, uv + ux * d.x + uy * d.y, ux, uy);\n");
++    else
++      // The EFB pixels around the fragment, each sampled at its centre, each
++      // averaged with its right, lower and lower-right neighbours, then
++      // blended bilinearly between EFB pixel centres: the GameCube's picture
++      // as a TV blurs it.
++      emit(out, "    let q = e - vec2f(0.5);\n"
++                "    let c0 = floor(q) + vec2f(0.5);\n"
++                "    let f = q - floor(q);\n"
++                "    let base = uv + ux * (c0.x - e.x) + uy * (c0.y - e.y);\n"
++                "    var px: array<vec4f, 9>;\n"
++                "    for (var j = 0; j < 3; j++) {\n"
++                "        for (var i = 0; i < 3; i++) {\n"
++                "            px[j * 3 + i] = textureSampleGrad(t, s, base + ux * f32(i) + uy * f32(j), ux, uy);\n"
++                "        }\n"
++                "    }\n"
++                "    let b00 = 0.25 * (px[0] + px[1] + px[3] + px[4]);\n"
++                "    let b10 = 0.25 * (px[1] + px[2] + px[4] + px[5]);\n"
++                "    let b01 = 0.25 * (px[3] + px[4] + px[6] + px[7]);\n"
++                "    let b11 = 0.25 * (px[4] + px[5] + px[7] + px[8]);\n"
++                "    return mix(mix(b00, b10, f.x), mix(b01, b11, f.x), f.y);\n");
++    emit(out, "}\n");
++  }
+   if (key.per_pixel_depth != 0u || dual_src) {
+     emit(out, "struct FragOut {\n"
+               "    @location(0) color: vec4f,\n");
+@@ -437,6 +477,11 @@ void emit_tev_fragment(std::string& out, const ShaderKey& key) {
+                 "rawtextemp = vec4i(round(textureSample(tex%u, samp%u, uv) * "
+                 "255.0)); }\n",
+                 texcoord, texcoord, texunit, texunit);
++        else if (s.snap_efb_pixel != 0u)
++          emitf(out,
++                "    rawtextemp = vec4i(round(efb_snap_sample(tex%u, samp%u, "
++                "in.uv%u.xy, in.efbpos) * 255.0));\n",
++                texunit, texunit, texcoord);
+         else
+           emitf(out,
+                 "    { let uv = in.uv%u.xy; rawtextemp = "
+@@ -506,6 +551,11 @@ void emit_tev_fragment(std::string& out, const ShaderKey& key) {
    const std::string c1 = alpha_cond(key.alpha_comp1, "psc.alpha_ref.y");
    emitf(out, "    if (!( %s%s%s )) { discard; }\n", c0.c_str(),
          kAlphaLogic[key.alpha_logic], c1.c_str());
@@ -9318,7 +9490,7 @@ index 2c074d7..bc31d92 100644
    // U5/U8: emit zCoord before fog when per_pixel_depth or ztex-for-fog so
    // fog reuses it (Dolphin order). Fog alone still owns the classic body.
 diff --git a/graphics/gxcore/src/wgsl.cpp b/graphics/gxcore/src/wgsl.cpp
-index bbefbee..8d581a9 100644
+index bbefbee..55ce2a3 100644
 --- a/graphics/gxcore/src/wgsl.cpp
 +++ b/graphics/gxcore/src/wgsl.cpp
 @@ -13,6 +13,37 @@
@@ -9359,7 +9531,7 @@ index bbefbee..8d581a9 100644
  std::string generate_wgsl(const ShaderKey& key) {
    std::string out;
    out.reserve(4096);
-@@ -45,6 +76,11 @@ std::string generate_wgsl(const ShaderKey& key) {
+@@ -45,15 +76,23 @@ std::string generate_wgsl(const ShaderKey& key) {
    // the NBT binormal/tangent vertex attrs must be present even on an unlit draw.
    const bool emit_lights = lit || has_emboss;
    const bool emit_nbt = has_emboss; // binormal/tangent vertex inputs required
@@ -9371,7 +9543,11 @@ index bbefbee..8d581a9 100644
    // color1 occupies @location(1) whenever it is emitted; texcoords shift up one.
    const bool emit_color1 = tev || needs_color1;
    const std::uint32_t uv_loc_base = emit_color1 ? 2u : 1u;
-@@ -53,7 +89,7 @@ std::string generate_wgsl(const ShaderKey& key) {
++  // A stage sampling at EFB pixel centres (TevStageKey.snap_efb_pixel) reads
++  // the fragment's EFB position, a varying after the texcoords.
++  const bool emit_efbpos = tev && efb_snap_any(key);
+   // Per-channel: run the full integer-lighting path (vs vertex-color
+   // passthrough). Channel 1 only matters when its varying is emitted.
    const bool chan0_lit = channel_lit_path(key, 0u);
    const bool chan1_lit = emit_color1 && channel_lit_path(key, 1u);
    // The lit path reads vsc.materials (register material/ambient) and, when a
@@ -9380,7 +9556,7 @@ index bbefbee..8d581a9 100644
    // register-material channel is active we must expose the full uniform view
    // (both fields, in the fixed C struct order) so offsets line up.
    const bool needs_uniform_full =
-@@ -70,16 +106,22 @@ std::string generate_wgsl(const ShaderKey& key) {
+@@ -70,16 +109,22 @@ std::string generate_wgsl(const ShaderKey& key) {
        has_tangent ? "in.rawtangent" : "vsc.cached_tangent.xyz";
    const char* binormal_in =
        has_binormal ? "in.rawbinormal" : "vsc.cached_binormal.xyz";
@@ -9408,7 +9584,7 @@ index bbefbee..8d581a9 100644
  
    emit(out, "// gxcore generated shader (Dolphin VertexShaderGen shape)\n");
    if (needs_uniform_full)
-@@ -90,36 +132,40 @@ std::string generate_wgsl(const ShaderKey& key) {
+@@ -90,36 +135,40 @@ std::string generate_wgsl(const ShaderKey& key) {
                "    pos: vec4f,\n"
                "    dir: vec4f,\n"
                "};\n");
@@ -9469,7 +9645,7 @@ index bbefbee..8d581a9 100644
    if (tev) {
      // PixelShaderConstants (Dolphin I_COLORS/I_KCOLORS/I_ALPHA). Integer TEV.
      // group(2) here (texture shifts to group(3)) so an untextured TEV draw
-@@ -202,13 +248,13 @@ std::string generate_wgsl(const ShaderKey& key) {
+@@ -202,13 +251,13 @@ std::string generate_wgsl(const ShaderKey& key) {
              "    @location(9) rawtex5: vec2f,\n"
              "    @location(10) rawtex6: vec2f,\n"
              "    @location(11) rawtex7: vec2f,\n");
@@ -9486,7 +9662,7 @@ index bbefbee..8d581a9 100644
      emit(out, "    @location(15) rawtangent: vec3f,\n");
    emit(out, "};\n");
  
-@@ -216,8 +262,11 @@ std::string generate_wgsl(const ShaderKey& key) {
+@@ -216,13 +265,18 @@ std::string generate_wgsl(const ShaderKey& key) {
    // indices so WebGPU's first-vertex convention matches GC last-vertex.
    const char* color_interp =
        key.flat_shading != 0u ? " @interpolate(flat)" : "";
@@ -9499,7 +9675,14 @@ index bbefbee..8d581a9 100644
    emitf(out, "    @location(0)%s color0: vec4f,\n", color_interp);
    if (emit_color1)
      emitf(out, "    @location(1)%s color1: vec4f,\n", color_interp);
-@@ -236,9 +285,9 @@ std::string generate_wgsl(const ShaderKey& key) {
+   for (std::uint32_t i = 0; i < key.num_tex_gens; ++i)
+     emitf(out, "    @location(%u) uv%u: vec3f,\n", uv_loc_base + i, i);
++  if (emit_efbpos)
++    emitf(out, "    @location(%u) efbpos: vec2f,\n", uv_loc_base + key.num_tex_gens);
+   emit(out, "};\n\n");
+ 
+   // Integer lighting header (Dolphin GenerateLightingShaderHeader): one function
+@@ -236,9 +290,9 @@ std::string generate_wgsl(const ShaderKey& key) {
              "    var o: VertexOut;\n");
    if (key.has_pos_mtx_idx != 0) {
      emit(out, "    let posidx = i32(in.posmtx);\n"
@@ -9512,7 +9695,15 @@ index bbefbee..8d581a9 100644
    } else {
      emit(out, "    let p0 = vsc.posnormalmatrix[0];\n"
                "    let p1 = vsc.posnormalmatrix[1];\n"
-@@ -253,20 +302,30 @@ std::string generate_wgsl(const ShaderKey& key) {
+@@ -250,23 +304,38 @@ std::string generate_wgsl(const ShaderKey& key) {
+             "    var clip = vec4f(dot(vsc.projection[0], viewpos), "
+             "dot(vsc.projection[1], viewpos), dot(vsc.projection[2], "
+             "viewpos), dot(vsc.projection[3], viewpos));\n");
++  // EFB pixels from the viewport centre (ndc * wd, ndc * ht): where in the
++  // EFB pixel grid a fragment falls (its offset from the true EFB origin is
++  // a whole number of pixels).
++  if (emit_efbpos)
++    emit(out, "    o.efbpos = clip.xy / clip.w * vsc.viewport_size.xy * 0.5;\n");
    // U9.2: Dolphin VertexShaderGen depth remap + pixel-center correction.
    // Default pcc.zw=(1,0) ⇒ clip.z = -clip.z (reversed-Z). Full formula only
    // when the VSC tail is declared (dual-tex forces full middle + pcc/viewport).
@@ -9557,7 +9748,7 @@ index bbefbee..8d581a9 100644
    emit(out, "    o.pos = clip;\n");
    // Vertex colors (Dolphin VertexShaderGen WriteVertexBody). First select each
    // channel's vertex color with the GX presence rules: channel 0 prefers
-@@ -333,8 +392,14 @@ std::string generate_wgsl(const ShaderKey& key) {
+@@ -333,8 +402,14 @@ std::string generate_wgsl(const ShaderKey& key) {
                "1.0);\n",
                texnum, texnum);
        }
@@ -9573,7 +9764,7 @@ index bbefbee..8d581a9 100644
      if (tg.inputform == 0u) // AB11
        emit(out, "        coord.z = 1.0;\n");
      const auto tgtype = static_cast<TexGenType>(tg.texgentype);
-@@ -350,9 +415,9 @@ std::string generate_wgsl(const ShaderKey& key) {
+@@ -350,9 +425,9 @@ std::string generate_wgsl(const ShaderKey& key) {
          emitf(out,
                "        let ti%u = (in.texmtxidx.%c >> (8u * %uu)) & 0xFFu;\n", i,
                i < 4u ? 'x' : 'y', i % 4u);
@@ -9586,7 +9777,7 @@ index bbefbee..8d581a9 100644
          if (tg.projection != 0u)
            emitf(out, "        var uv = vec3f(dot(coord, m%u0), dot(coord, m%u1), "
                       "dot(coord, m%u2));\n",
-@@ -379,11 +444,11 @@ std::string generate_wgsl(const ShaderKey& key) {
+@@ -379,11 +454,11 @@ std::string generate_wgsl(const ShaderKey& key) {
        // normalize are compile-time constants from postMtxInfo[i].
        if (key.dualtex_enabled != 0) {
          const std::uint32_t base = tg.postmtx_index & 0x3fu;
@@ -9601,7 +9792,7 @@ index bbefbee..8d581a9 100644
                (base + 2u) & 0x3fu);
          if (tg.postmtx_normalize != 0u)
            emit(out, "        uv = normalize(uv);\n");
-@@ -416,7 +481,7 @@ std::string generate_wgsl(const ShaderKey& key) {
+@@ -416,7 +491,7 @@ std::string generate_wgsl(const ShaderKey& key) {
                   "dot(vsc.posnormalmatrix[4].xyz, %s), "
                   "dot(vsc.posnormalmatrix[5].xyz, %s));\n",
              i, binormal_in, binormal_in, binormal_in);

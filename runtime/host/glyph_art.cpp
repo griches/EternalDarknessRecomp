@@ -125,19 +125,37 @@ void fill(Canvas& c, const std::vector<uint8_t>& hole, int x0, int y0, int x1, i
             }
         levels.push_back(std::move(b));
     }
-    // Down the pyramid: a pixel without weight takes its parent's average.
+    // Down the pyramid: a pixel without weight takes its parents' average,
+    // bilinear between the four nearest (nearest alone leaves blocks).
+    levels.back().wt[0] = std::max(levels.back().wt[0], 1e-6f);
     for (int li = static_cast<int>(levels.size()) - 2; li >= 0; li--) {
         Level& a = levels[li];
         const Level& b = levels[li + 1];
         for (int y = 0; y < a.h; y++)
             for (int x = 0; x < a.w; x++) {
-                const size_t s = static_cast<size_t>(y) * a.w + x, d = static_cast<size_t>(y / 2) * b.w + x / 2;
+                const size_t s = static_cast<size_t>(y) * a.w + x;
                 if (a.wt[s] >= 1)
                     continue;
-                if (b.wt[d] <= 0)
+                const float fx = std::min(std::max((x + 0.5f) / 2 - 0.5f, 0.f), b.w - 1.f);
+                const float fy = std::min(std::max((y + 0.5f) / 2 - 0.5f, 0.f), b.h - 1.f);
+                const int ix = static_cast<int>(fx), iy = static_cast<int>(fy);
+                const int jx = std::min(ix + 1, b.w - 1), jy = std::min(iy + 1, b.h - 1);
+                const float tx = fx - ix, ty = fy - iy;
+                float acc[4] = {0, 0, 0, 0}, wsum = 0;
+                const int qx[4] = {ix, jx, ix, jx}, qy[4] = {iy, iy, jy, jy};
+                const float qw[4] = {(1 - tx) * (1 - ty), tx * (1 - ty), (1 - tx) * ty, tx * ty};
+                for (int q = 0; q < 4; q++) {
+                    const size_t d = static_cast<size_t>(qy[q]) * b.w + qx[q];
+                    if (b.wt[d] <= 0 || qw[q] <= 0)
+                        continue;
+                    for (int k = 0; k < 4; k++)
+                        acc[k] += b.v[d * 4 + k] / b.wt[d] * qw[q];
+                    wsum += qw[q];
+                }
+                if (wsum <= 0)
                     continue;
                 for (int k = 0; k < 4; k++)
-                    a.v[s * 4 + k] = b.v[d * 4 + k] / b.wt[d];
+                    a.v[s * 4 + k] = acc[k] / wsum;
                 a.wt[s] = 1;
             }
         // Normalise this level's sums for the next one down.
@@ -444,12 +462,51 @@ void notes(Canvas& c, const std::vector<Head>& heads, float r, bool torn, const 
         const int px = static_cast<int>(h.x * c.u), py = static_cast<int>(h.y * c.u);
         if (!c.inside(px, py) || c.at(px, py)[3] < 128)
             continue;  // torn away
+        // Torn away into the dark behind the page (the small torn sheet keeps
+        // that dark in the picture): the parchment just around the head says.
+        float ring = 0;
+        int count = 0;
+        for (int i = 0; i < 24; i++) {
+            const float a = i * 3.14159265f / 12;
+            const int rx = static_cast<int>((h.x + std::cos(a) * (r + 2)) * c.u);
+            const int ry = static_cast<int>((h.y + std::sin(a) * (r + 2)) * c.u);
+            if (c.inside(rx, ry) && c.at(rx, ry)[3] >= 128 && !blood(c.at(rx, ry))) {
+                ring += luma(c.at(rx, ry));
+                count++;
+            }
+        }
+        if (count < 8 || ring / count < 50)
+            continue;
+        // The head itself: the middle of the pixels near where it was
+        // measured that are well darker than the parchment around it, so the
+        // whole of the old head is rubbed out (a sliver left would show
+        // through the new letter).
+        const float paper = ring / count;
+        float sx = 0, sy = 0;
+        int dark = 0;
+        const int reach = static_cast<int>((r + 3) * c.u);
+        for (int dy = -reach; dy <= reach; dy++)
+            for (int dx = -reach; dx <= reach; dx++) {
+                if (dx * dx + dy * dy > reach * reach || !c.inside(px + dx, py + dy))
+                    continue;
+                const float* q = c.at(px + dx, py + dy);
+                if (q[3] >= 128 && !blood(q) && luma(q) < paper - 25) {
+                    sx += px + dx + 0.5f;
+                    sy += py + dy + 0.5f;
+                    dark++;
+                }
+            }
+        float x = h.x, y = h.y;
+        if (dark > reach * reach) {  // most of a head's worth: trust it
+            x = sx / dark / c.u;
+            y = sy / dark / c.u;
+        }
         // The notes' heads are as dark a red as the blood: only where it
         // crosses them is anything kept.
         Style st = stamp(58, 42, 30, 0.95f);
         st.keep_blood = torn && h.bloodied;
-        rub_out(c, h.x, h.y, r + 0.6f, r + 0.6f, 0, false, st.keep_blood);
-        draw(c, {g.play[h.action]}, h.x, h.y, r * 2.1f, st);
+        rub_out(c, x, y, r + 0.9f, r + 0.9f, 0, false, st.keep_blood);
+        draw(c, {g.play[h.action]}, x, y, r * 2.3f, st);
     }
 }
 

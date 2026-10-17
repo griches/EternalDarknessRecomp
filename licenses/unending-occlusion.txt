@@ -1,0 +1,4 @@
+The function names in config/GEDE01/symbols.txt come from the
+unending-occlusion decompilation of Eternal Darkness: Sanity's Requiem
+(https://github.com/PattyTrish/unending-occlusion), released under CC0 1.0
+Universal: https://creativecommons.org/publicdomain/zero/1.0/

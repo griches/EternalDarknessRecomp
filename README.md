@@ -137,4 +137,5 @@ Dolphin exports them; MaxDrive `.sav` and GameShark `.gcs` import too).
 ## Licence
 
 GPL-3.0-or-later (see `LICENSE`), as the GXRuntime and StrikersRecomp code it
-builds on.
+builds on. `THIRD_PARTY.md` lists everything else a build holds and its
+licence; every package carries their texts in `licenses/`.

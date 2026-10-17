@@ -106,11 +106,8 @@ cp -r "$SRC/res" "$OUT/res"
 cp "$SRC/seeds/dawn_cache_seed-deck.db" "$OUT/res/dawn_cache_seed.db"
 cp "$HERE/play.sh" "$OUT/play.sh"; chmod +x "$OUT/play.sh"
 cp "$HERE/README.txt" "$OUT/README.txt"
-mkdir -p "$OUT/licenses"
-cp "$SRC/LICENSE" "$OUT/licenses/EternalDarknessRecomp.txt"
-cp "$SRC/.deps/DolRecomp/LICENSE" "$OUT/licenses/DolRecomp.txt"
-cp "$SRC/.deps/GXRuntime/LICENSE" "$OUT/licenses/GXRuntime.txt"
-cp "$ZIGDIR/LICENSE" "$OUT/licenses/Zig.txt"
+# Every component's licence text (THIRD_PARTY.md lists them).
+"$SRC/tools/collect-licenses.sh" "$OUT/licenses" "$B" "$ZIGDIR"
 
 # 7. Warm Zig's cache (its compiler-rt and glibc stubs for this target) so the
 #    player's first link only links.

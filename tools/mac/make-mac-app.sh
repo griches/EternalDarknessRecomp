@@ -79,19 +79,8 @@ for d in "$Z"/libc/include/*; do
   [ "$(basename "$d")" = any-macos-any ] || rm -rf "$d"
 done
 
-# Licences: this project, its runtime and translator, Zig, and the libraries
-# in libedhost.
-cp "$SRC/LICENSE" "$R/licenses/EternalDarknessRecomp.txt"
-cp "$SRC/.deps/DolRecomp/LICENSE" "$R/licenses/DolRecomp.txt"
-cp "$SRC/.deps/GXRuntime/LICENSE" "$R/licenses/GXRuntime.txt"
-cp "$TOOLS/$ZIG_NAME/LICENSE" "$R/licenses/Zig.txt"
-for dep in "$B"/_deps/*-src; do
-  name=$(basename "$dep" -src)
-  for l in LICENSE LICENSE.txt LICENSE.md COPYING LICENSE.TXT docs/FTL.TXT; do
-    if [ -f "$dep/$l" ]; then cp "$dep/$l" "$R/licenses/$name.txt"; break; fi
-  done
-done
-for l in "$B"/_deps/dawn_prebuilt-src/LICENSE*; do [ -f "$l" ] && cp "$l" "$R/licenses/dawn.txt"; done
+# Every component's licence text (THIRD_PARTY.md lists them).
+"$SRC/tools/collect-licenses.sh" "$R/licenses" "$B" "$TOOLS/$ZIG_NAME"
 
 VERSION="$(date +%Y%m%d%H%M)-$(git -C "$SRC" rev-parse --short HEAD)"
 echo "$VERSION" > "$R/VERSION"

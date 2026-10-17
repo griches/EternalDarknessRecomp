@@ -1291,7 +1291,8 @@ extern "C" bool frontend_run_launcher(const char* default_iso, char* iso_out,
 
 // On-screen frames per second (game frames, i.e. calls here), refreshed each
 // second while the FPS counter option is on. With frames in between, the
-// screen's frames instead: every picture shown. Drawn through Aurora's ImGui,
+// screen's instead: every frame presented, which falls below the screen's
+// rate only when frames in between are late and skipped. Drawn through Aurora's ImGui,
 // which covers the whole screen: the RmlUi context covers only the game
 // picture, so in 4:3 (and in the game's letterboxed scenes) the counter sat
 // inside the bars, not at the screen's corner.

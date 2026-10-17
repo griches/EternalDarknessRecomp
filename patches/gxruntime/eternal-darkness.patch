@@ -3079,7 +3079,7 @@ index a13ce39..eb4d9fc 100644
   * EFB readback (GXRuntime recomp patch): arm a one-shot copy of the next
   * submitted frame's present source; take returns tightly packed RGBA8 rows
 diff --git a/graphics/aurora/lib/aurora.cpp b/graphics/aurora/lib/aurora.cpp
-index b09ef4d..5de7a4b 100644
+index b09ef4d..cc28246 100644
 --- a/graphics/aurora/lib/aurora.cpp
 +++ b/graphics/aurora/lib/aurora.cpp
 @@ -1,5 +1,15 @@
@@ -3519,7 +3519,7 @@ index b09ef4d..5de7a4b 100644
          if (rmlBindGroup && rmlOverlay) {
            pass.SetPipeline(webgpu::g_CopyPremultipliedAlphaPipeline);
            pass.SetBindGroup(0, rmlBindGroup, 0, nullptr);
-@@ -362,67 +673,176 @@ void end_frame() noexcept {
+@@ -362,67 +673,174 @@ void end_frame() noexcept {
              .label = "ImGui render pass",
              .colorAttachmentCount = attachments.size(),
              .colorAttachments = attachments.data(),
@@ -3633,12 +3633,9 @@ index b09ef4d..5de7a4b 100644
 -        }
 -      }
 -      if (status) {
--        gfx::after_present();
 +      space_present();
 +      if (present_surface()) {
-+        // The frame rate counts frames drawn: a repeat is the last one again.
-+        if (!info.repeat)
-+          gfx::after_present();
+         gfx::after_present();
        } else {
          Log.warn("Surface present failed");
          webgpu::release_surface();
@@ -3716,7 +3713,7 @@ index b09ef4d..5de7a4b 100644
      gfx::after_submit();
  
      TracyPlotConfig("aurora: lastVertSize", tracy::PlotFormatType::Memory, false, true, 0);
-@@ -440,7 +860,7 @@ void end_frame() noexcept {
+@@ -440,7 +858,7 @@ void end_frame() noexcept {
      TracyPlot("aurora: lastIndexSize", static_cast<int64_t>(gfx::g_stats.lastIndexSize));
      TracyPlot("aurora: lastStorageSize", static_cast<int64_t>(gfx::g_stats.lastStorageSize));
      TracyPlot("aurora: lastTextureUploadSize", static_cast<int64_t>(gfx::g_stats.lastTextureUploadSize));
@@ -3725,7 +3722,7 @@ index b09ef4d..5de7a4b 100644
  
  #endif
  }
-@@ -475,6 +895,35 @@ void aurora_set_resampler(AuroraSampler sampler) {
+@@ -475,6 +893,35 @@ void aurora_set_resampler(AuroraSampler sampler) {
    (void)sampler;
  #endif
  }
@@ -3762,7 +3759,7 @@ index b09ef4d..5de7a4b 100644
 +  }
 +}
 diff --git a/graphics/aurora/lib/gfx/common.cpp b/graphics/aurora/lib/gfx/common.cpp
-index a64dd2d..1b91446 100644
+index a64dd2d..e4be24a 100644
 --- a/graphics/aurora/lib/gfx/common.cpp
 +++ b/graphics/aurora/lib/gfx/common.cpp
 @@ -10,6 +10,7 @@
@@ -3946,7 +3943,7 @@ index a64dd2d..1b91446 100644
 +      for (size_t i = 0; i < repeats; ++i) {
 +        static constexpr wgpu::CommandEncoderDescriptor RepeatDescriptor{.label = "Repeat-frame encoder"};
 +        auto repeat = g_device.CreateCommandEncoder(&RepeatDescriptor);
-+        callback(repeat, PresentInfo{.present = true, .real = false, .repeat = true});
++        callback(repeat, PresentInfo{.present = true, .real = false});
 +      }
      }
      g_frameSlots.release(frameSlot);
@@ -4034,7 +4031,7 @@ index a64dd2d..1b91446 100644
  
  Range push_storage(const uint8_t* data, size_t length) {
 diff --git a/graphics/aurora/lib/gfx/common.hpp b/graphics/aurora/lib/gfx/common.hpp
-index 37acf2b..3aa0b1a 100644
+index 37acf2b..6e41efa 100644
 --- a/graphics/aurora/lib/gfx/common.hpp
 +++ b/graphics/aurora/lib/gfx/common.hpp
 @@ -7,8 +7,10 @@
@@ -4048,7 +4045,7 @@ index 37acf2b..3aa0b1a 100644
  
  #include <aurora/gfx.h>
  #include <aurora/math.hpp>
-@@ -238,7 +240,26 @@ using webgpu::Viewport;
+@@ -238,7 +240,25 @@ using webgpu::Viewport;
  
  struct TextureRef;
  using TextureHandle = std::shared_ptr<TextureRef>;
@@ -4058,7 +4055,6 @@ index 37acf2b..3aa0b1a 100644
 +struct PresentInfo {
 +  bool present = true; // put it on screen (false: drawn for its effects only)
 +  bool real = true;    // the game's own frame (false: one in between, or a repeat)
-+  bool repeat = false; // the game's frame shown again (not counted as a frame drawn)
 +};
 +using EndFrameCallback = std::function<void(wgpu::CommandEncoder&, const PresentInfo&)>;
 +// What one game frame shows, in order: frames in between (each with its
@@ -4076,7 +4072,7 @@ index 37acf2b..3aa0b1a 100644
  
  enum class ShaderType : uint8_t {
    Clear = 0,
-@@ -252,8 +273,23 @@ void shutdown();
+@@ -252,8 +272,23 @@ void shutdown();
  
  bool begin_frame();
  void finish();

@@ -14,6 +14,7 @@ Settings g_settings = {
     .aspect = 2,  // 16:9
     .widescreen_hud = true,
     .render_scale = 0,
+    .frame_rate = 60,
     .game_font = 1,  // Tome
     .hd_textures = true,
     .sharp_shadows = true,
@@ -86,6 +87,8 @@ void settings_load(void) {
             g_settings.widescreen_hud = n != 0;
         else if (strcmp(key, "render_scale") == 0)
             g_settings.render_scale = clamp_int(n, 0, 4);
+        else if (strcmp(key, "frame_rate") == 0)
+            g_settings.frame_rate = clamp_int(n, 60, 360);
         else if (strcmp(key, "game_font") == 0)
             g_settings.game_font = clamp_int(n, 0, 2);
         else if (strcmp(key, "hd_textures") == 0)
@@ -131,6 +134,7 @@ void settings_save(void) {
     fprintf(f, "aspect = %d\n", g_settings.aspect);
     fprintf(f, "widescreen_hud = %d\n", g_settings.widescreen_hud ? 1 : 0);
     fprintf(f, "render_scale = %d\n", g_settings.render_scale);
+    fprintf(f, "frame_rate = %d\n", g_settings.frame_rate);
     fprintf(f, "game_font = %d\n", g_settings.game_font);
     fprintf(f, "hd_textures = %d\n", g_settings.hd_textures ? 1 : 0);
     fprintf(f, "sharp_shadows = %d\n", g_settings.sharp_shadows ? 1 : 0);
@@ -159,6 +163,7 @@ void settings_apply(void) {
     static const int kRenderLines[] = {0, 720, 1080, 1440, 2160};
     dol_aurora_set_render_height(kRenderLines[g_settings.render_scale]);
     dol_aurora_set_fullscreen(g_settings.fullscreen);
+    dol_aurora_set_frame_rate(g_settings.frame_rate);
     dol_aurora_set_audio_buffer_ms(g_settings.audio_buffer_ms);
     dol_aurora_set_vibration(g_settings.vibration);
 #endif

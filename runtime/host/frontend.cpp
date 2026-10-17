@@ -11,6 +11,7 @@
 #include "host/settings.h"
 #include "host/texpack.h"
 
+#include <aurora/gfx.h>
 #include <aurora/rmlui.hpp>
 #include <imgui.h>
 
@@ -451,6 +452,7 @@ void build_launcher() {
     Row options{"Options"};
     options.gap = true;
     options.activate = [] {
+        dol_aurora_measure_screen();
         g_options_return = Screen::Launcher;
         g_screen = Screen::Options;
         g_selected = 0;
@@ -570,6 +572,34 @@ void build_options() {
 #endif
     scale.change = [](int dir) { cycle(g_settings.render_scale, 5, dir); changed(); };
     g_rows.push_back(scale);
+
+    // Frames in between the game's own 60 a second (the renderer blends the
+    // last two) on a faster screen. The rate is the screen's: measured as the
+    // options open, so a refresh rate changed meanwhile shows here.
+    const int screen_hz = dol_aurora_screen_refresh();
+    const bool faster = screen_hz >= 75;
+    Row rate{"Frame rate", g_settings.frame_rate != 60 && faster ? std::to_string(screen_hz) : "60"};
+    rate.enabled = faster;
+    if (faster) {
+        rate.note = "Above 60, frames are drawn between the game's own, blended from the last two: "
+                    "smoother motion, at most one game frame more delay.";
+    } else {
+#ifdef __PROSPERO__
+        rate.note = "Your TV is running at 60 Hz. 120 needs a TV that takes 120 Hz, with Enable 120 Hz "
+                    "Output on in the PS5's Screen and Video settings.";
+#else
+        rate.note = std::getenv("SteamDeck") != nullptr
+                        ? std::string("Your screen is running at 60 Hz. On a Steam Deck OLED, set Refresh "
+                                      "Rate to 90 in Steam's Performance menu, then open Options again.")
+                        : "Your screen is running at " + std::to_string(screen_hz) +
+                              " Hz: smoother motion needs a faster one.";
+#endif
+    }
+    rate.change = [screen_hz](int) {
+        g_settings.frame_rate = g_settings.frame_rate == 60 ? screen_hz : 60;
+        changed();
+    };
+    g_rows.push_back(rate);
 
     Row aspect{"Aspect ratio", kAspect[g_settings.aspect]};
     aspect.note = "16:9 is the game's own widescreen view: more at the sides, not stretched. "
@@ -779,6 +809,7 @@ void build_in_game() {
     Row options{"Options"};
     options.gap = true;
     options.activate = [] {
+        dol_aurora_measure_screen();
         g_options_return = Screen::InGame;
         g_screen = Screen::Options;
         g_selected = 0;
@@ -1243,7 +1274,8 @@ extern "C" bool frontend_run_launcher(const char* default_iso, char* iso_out,
 }
 
 // On-screen frames per second (game frames, i.e. calls here), refreshed each
-// second while the FPS counter option is on. Drawn through Aurora's ImGui,
+// second while the FPS counter option is on. With frames in between, the
+// screen's frames instead: every picture shown. Drawn through Aurora's ImGui,
 // which covers the whole screen: the RmlUi context covers only the game
 // picture, so in 4:3 (and in the game's letterboxed scenes) the counter sat
 // inside the bars, not at the screen's corner.
@@ -1282,7 +1314,8 @@ void update_fps_counter() {
     SDL_free(windows);
     ImFont* font = g_fps_font != nullptr ? g_fps_font : ImGui::GetFont();
     char text[32];
-    std::snprintf(text, sizeof text, "%d FPS", shown_fps);
+    std::snprintf(text, sizeof text, "%d FPS",
+                  dol_aurora_frames_between() ? static_cast<int>(aurora_get_fps() + 0.5f) : shown_fps);
     const float size = 18.f * dp;
     const ImVec2 extent = font->CalcTextSizeA(size, FLT_MAX, 0.f, text);
     const ImVec2 at{14.f * dp, 10.f * dp};

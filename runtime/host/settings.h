@@ -12,6 +12,7 @@ typedef struct {
                           // 0 (follow the game) and 3 (the old stretch) read as 16:9
     bool widescreen_hud;  // move the game's widescreen HUD out to the edges
     int render_scale;     // 0 window pixels, 1-4 = 720p, 1080p, 1440p, 4K
+    int frame_rate;       // 60 the game's own; above it, frames in between at the screen's rate
     int game_font;        // the game's text: 0 sharp, 1 tome (default), 2 as on the disc
     bool hd_textures;     // use the texture pack in textures/ when there is one
     bool sharp_shadows;   // upscale the rooms' light maps as they load (lightmaps.cpp)

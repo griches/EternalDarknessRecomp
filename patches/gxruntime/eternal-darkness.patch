@@ -1,5 +1,5 @@
 diff --git a/backends/aurora/aurora_backend.cpp b/backends/aurora/aurora_backend.cpp
-index d94f811..b412198 100644
+index d94f811..d704acb 100644
 --- a/backends/aurora/aurora_backend.cpp
 +++ b/backends/aurora/aurora_backend.cpp
 @@ -19,9 +19,25 @@
@@ -662,11 +662,13 @@ index d94f811..b412198 100644
          return;
      }
      if (!g_shadow_frontend.write_fifo(fragment) ||
-@@ -842,7 +1298,1080 @@ void shadow_transform_observer(
+@@ -841,8 +1297,1213 @@ void shadow_transform_observer(
+                      f[13], f[14], f[15]);
      }
  }
- #endif
+-#endif
 -} // namespace
++#endif
 +
 +} // namespace
 +
@@ -1097,6 +1099,7 @@ index d94f811..b412198 100644
 +std::atomic<std::uint64_t> g_worker_plan_ns{0};
 +std::uint64_t g_plan_wait_ns = 0;  // main waiting for a worker's plan
 +std::uint64_t g_present_ns = 0;    // main in present (Aurora frame end/begin)
++std::uint64_t g_present_t_game = 0;  // the retrace that began the frame being presented
 +
 +// Spin briefly for `ready` before a thread falls back to sleeping: handing
 +// over thousands of draws a frame, a sleep and wake-up per draw costs more
@@ -1581,6 +1584,7 @@ index d94f811..b412198 100644
 +            if (live) {
 +                pace_present(item.t_game);
 +                const std::uint64_t t0 = SDL_GetTicksNS();
++                g_present_t_game = item.t_game;
 +                aurora_backend_present();
 +                g_present_ns = SDL_GetTicksNS() - t0;
 +                if (g_frame_hook != nullptr)
@@ -1741,10 +1745,148 @@ index d94f811..b412198 100644
 +
 +} // namespace gxq
 +#endif
++
++// --- Frame rate: frames in between ---------------------------------------------
++// GXRuntime recomp patch. The game steps its world once per VI retrace (60
++// times a second). A faster screen (120 Hz, 144, the Steam Deck OLED's 90)
++// gets frames in between: Aurora draws the newest game frame again with each
++// draw's matrices blended from the frame before (aurora/lib/gfx/interp.hpp).
++// Each screen refresh shows the moment it stands for, so motion is even at
++// any rate; the cost is up to one more game frame between the game and the
++// screen. dol_aurora_set_frame_rate: 60 = off (the game's own rate, as
++// before), anything else = the screen's rate. DOL_INTERP_LOG=1: once a second,
++// the rates and how the frames matched.
++namespace frame_rate {
++std::atomic<int> g_setting{60};
++bool g_vsync = true;            // presents wait for the screen (else nothing to measure)
++std::atomic<bool> g_probe{true}; // measure the screen at the next game frame
++SDL_DisplayID g_display = 0;
++std::uint64_t g_last_t_game = 0;
++double g_game_period = 1e9 / 60.0;  // ns between game frames, smoothed
++double g_phase = 0.0;  // the next screen refresh, in game frames after the previous one
++std::atomic<bool> g_active{false};
++
++// The screen's refresh period in ns: Aurora's measurement once it has one
++// (snapped to the nearest common rate within 4%: presents are timed by the
++// compositor, a little off the screen's own refresh), else SDL's. On a Mac,
++// SDL's: a ProMotion screen follows the app's presents (90 to 120 Hz measured
++// from one run to the next), and shows any rate up to its own evenly.
++double screen_period() {
++    SDL_Window* window = aurora::window::get_sdl_window();
++    const SDL_DisplayID display = window != nullptr ? SDL_GetDisplayForWindow(window) : 0;
++    const SDL_DisplayMode* mode = display != 0 ? SDL_GetCurrentDisplayMode(display) : nullptr;
++    const double reported = mode != nullptr && mode->refresh_rate > 1.f ? 1e9 / mode->refresh_rate : 0.0;
++#ifdef __APPLE__
++    if (reported > 0.0)
++        return reported;
++#endif
++    if (const std::int64_t measured = aurora_get_refresh_period_ns(); measured > 0) {
++        static constexpr double kRates[] = {50.0,  59.94, 60.0,  72.0,  75.0,   90.0,  100.0, 119.88,
++                                            120.0, 143.86, 144.0, 165.0, 175.0, 240.0};
++        double best = static_cast<double>(measured);
++        double best_error = 0.04;
++        for (const double hz : kRates) {
++            const double error = std::fabs(1e9 / hz - measured) / measured;
++            if (error < best_error) {
++                best_error = error;
++                best = 1e9 / hz;
++            }
++        }
++        return best;
++    }
++    return reported > 0.0 ? reported : 1e9 / 60.0;
++}
++
++// Main thread, before a game frame ends (t_game: the retrace that began it;
++// 0 for the launcher's frames, which are left alone): which screen refreshes
++// it covers, as phases between the previous game frame (0) and it (1).
++void before_end_frame(std::uint64_t t_game) {
++    const int setting = g_setting.load();
++    // Measure the screen at the start, and again when the window moves to
++    // another display (each measurement holds one frame for a dozen refreshes).
++    if (SDL_Window* window = aurora::window::get_sdl_window(); window != nullptr) {
++        const SDL_DisplayID display = SDL_GetDisplayForWindow(window);
++        if (display != g_display) {
++            g_display = display;
++            g_probe = true;
++        }
++    }
++    if (g_vsync && g_probe.exchange(false))
++        aurora_request_refresh_probe();
++    if (t_game == 0u) {
++        aurora_set_present_spacing_ns(0);
++        return;
++    }
++    // The game's frame period, smoothed; loads and pauses are left out.
++    if (g_last_t_game != 0u && t_game > g_last_t_game) {
++        const double gap = static_cast<double>(t_game - g_last_t_game);
++        if (gap > 8e6 && gap < 40e6)
++            g_game_period += (gap - g_game_period) / 32.0;
++    }
++    g_last_t_game = t_game;
++
++    // Game frames per screen refresh, at the game's own 60 (its VI retrace):
++    // never the measured rate, which a slowed game would lower and so add
++    // frames in between that slow it further.
++    const double period = screen_period();
++    const double step = period / (1e9 / 60.0);
++    const bool want = setting != 60 && g_vsync && step > 0.1 && step < 0.8;
++    aurora_interp_set_wanted(want);
++    aurora_set_present_spacing_ns(want ? static_cast<std::int64_t>(period) : 0);
++    static const bool log = std::getenv("DOL_INTERP_LOG") != nullptr;
++    static std::uint64_t log_start = 0;
++    static unsigned frames = 0, outputs = 0, results[4] = {};
++    static AuroraInterpStats last{};
++    if (!want) {
++        g_active = false;
++        return;
++    }
++    if (!g_active) {
++        g_active = true;
++        g_phase = step;
++    }
++    float phases[16];
++    std::uint32_t count = 0;
++    while (g_phase <= 1.0 + 1e-6 && count < 16u) {
++        phases[count++] = static_cast<float>(std::min(g_phase, 1.0));
++        g_phase += step;
++    }
++    g_phase = std::max(g_phase - 1.0, 0.0);
++    aurora_interp_set_phases(phases, count);
++    if (log) {
++        // The previous frame's match (this one's is built at its end).
++        aurora_get_interp_stats(&last);
++        ++frames;
++        outputs += count;
++        ++results[std::clamp(last.result, 0, 3)];
++        const std::uint64_t now = SDL_GetTicksNS();
++        if (log_start == 0u)
++            log_start = now;
++        if (now - log_start >= 1'000'000'000u) {
++            std::fprintf(stderr,
++                         "[interp] screen=%.2fHz game=%.2fHz shown=%u/%u frames blended=%u still=%u cut=%u "
++                         "none=%u | last: draws=%u matched=%u loose=%u moved=%u jumped=%u\n",
++                         1e9 / period, 1e9 / g_game_period, outputs, frames, results[0], results[1], results[2],
++                         results[3], last.draws, last.matched, last.loose, last.moved, last.jumped);
++            log_start = now;
++            frames = outputs = 0;
++            std::fill(std::begin(results), std::end(results), 0u);
++        }
++    }
++}
++} // namespace frame_rate
  
  extern "C" {
  
-@@ -890,6 +2419,10 @@ bool dol_aurora_initialize(int argc, char** argv,
+@@ -882,6 +2543,7 @@ bool dol_aurora_initialize(int argc, char** argv,
+                                             : defaults.app_name;
+     config.desiredBackend = BACKEND_AUTO;
+     config.vsync = backend_config->vsync;
++    frame_rate::g_vsync = backend_config->vsync;
+     config.windowWidth = backend_config->window_width != 0
+                              ? backend_config->window_width
+                              : defaults.window_width;
+@@ -890,6 +2552,10 @@ bool dol_aurora_initialize(int argc, char** argv,
                                : defaults.window_height;
      config.allowTextureDumps = backend_config->allow_texture_dumps;
      config.logCallback = log_callback;
@@ -1755,7 +1897,7 @@ index d94f811..b412198 100644
      config.logLevel = backend_config->info_logging ? LOG_INFO : LOG_ERROR;
      // The recomp runtime owns guest MEM1/ARAM. Aurora receives translated host
      // pointers for graphics resources and must not allocate duplicate memory.
-@@ -937,7 +2470,7 @@ bool dol_aurora_initialize(int argc, char** argv,
+@@ -937,7 +2603,7 @@ bool dol_aurora_initialize(int argc, char** argv,
      g_trace_present_scope_frame = 0ull;
      g_trace_frame_begun = false;
      g_trace_frames_recorded = 0ull;
@@ -1764,7 +1906,7 @@ index d94f811..b412198 100644
      const char* trace_out = std::getenv("DOL_AURORA_RECOMP_TRACE_OUT");
      if (trace_out != nullptr && trace_out[0] != '\0') {
          g_trace_path = trace_out;
-@@ -1069,7 +2602,11 @@ static void flush_gxcore_gap_counters() {
+@@ -1069,7 +2735,11 @@ static void flush_gxcore_gap_counters() {
  #if GXRUNTIME_HAS_AURORA_RECOMP
      if (!g_gx_core_enabled)
          return;
@@ -1777,7 +1919,7 @@ index d94f811..b412198 100644
      struct {
          const char* name;
          unsigned long long value;
-@@ -1114,10 +2651,179 @@ void dol_aurora_flush_gap_report(void) {
+@@ -1114,10 +2784,195 @@ void dol_aurora_flush_gap_report(void) {
      flush_gxcore_gap_counters();
  }
  
@@ -1922,6 +2064,22 @@ index d94f811..b412198 100644
 +    aurora::window::set_fullscreen(fullscreen);
 +}
 +
++void dol_aurora_set_frame_rate(int hz) {
++    frame_rate::g_setting = hz;
++}
++
++int dol_aurora_screen_refresh(void) {
++    return static_cast<int>(std::lround(1e9 / frame_rate::screen_period()));
++}
++
++void dol_aurora_measure_screen(void) {
++    frame_rate::g_probe = true;
++}
++
++bool dol_aurora_frames_between(void) {
++    return frame_rate::g_active;
++}
++
 +void dol_aurora_set_audio_buffer_ms(int ms) {
 +    g_audio_prebuffer_ms = std::clamp(ms, 20, 500);
 +    if (g_audio_max_queue_ms < g_audio_prebuffer_ms + 100)
@@ -1958,7 +2116,7 @@ index d94f811..b412198 100644
          aurora::gfx::efb_readback::set_continuous(true);
          aurora_request_framebuffer_readback();
      }
-@@ -1169,8 +2875,11 @@ void aurora_backend_present(void) {
+@@ -1169,8 +3024,11 @@ void aurora_backend_present(void) {
      // gxcore accumulates the frame's draws as their spans complete; the final
      // pending draw is only planned at the frame boundary. Submit it into the
      // still-open Aurora frame before end_frame flushes the command list.
@@ -1971,7 +2129,17 @@ index d94f811..b412198 100644
      // TEMP DIAG: per-frame gxcore gap-counter deltas so a live
      // goal celebration reveals which skip reason dominates (missing_vcd /
      // "projection never captured" vertex_decode_failures / cull_all_draws vs.
-@@ -1201,8 +2910,11 @@ void aurora_backend_present(void) {
+@@ -1197,12 +3055,21 @@ void aurora_backend_present(void) {
+     }
+ #endif
+     if (g_frame_open) {
++#if GXRUNTIME_HAS_AURORA_RECOMP
++        frame_rate::before_end_frame(gxq::g_active ? gxq::g_present_t_game
++                                                   : gxq::g_last_retrace_ns.load());
++#else
++        frame_rate::before_end_frame(0u);
++#endif
+         aurora_end_frame();
          g_frame_open = false;
      }
      // Host EFB fill: push latest present-source snapshot into software backing
@@ -1985,7 +2153,7 @@ index d94f811..b412198 100644
          const std::uint8_t* rgba = nullptr;
          std::uint32_t w = 0;
          std::uint32_t h = 0;
-@@ -1212,6 +2924,109 @@ void aurora_backend_present(void) {
+@@ -1212,6 +3079,109 @@ void aurora_backend_present(void) {
          }
      }
      ++g_present_count;
@@ -2095,7 +2263,7 @@ index d94f811..b412198 100644
      if (g_frame_pacing_log &&
          (g_present_count <= 10 || (g_present_count % 60) == 0)) {
          const AuroraStats* stats = aurora_get_stats();
-@@ -1432,6 +3247,7 @@ void aurora_backend_present(void) {
+@@ -1432,6 +3402,7 @@ void aurora_backend_present(void) {
      const unsigned long long present_fifo = g_fifo_bytes;
      g_fifo_bytes = 0;
      poll_events();
@@ -2103,7 +2271,7 @@ index d94f811..b412198 100644
      if (!g_should_quit) {
          g_frame_open = aurora_begin_frame();
  #if GXRUNTIME_HAS_AURORA_RECOMP
-@@ -1482,7 +3298,13 @@ void aurora_backend_gx_write(u64 value, u8 size) {
+@@ -1482,7 +3453,13 @@ void aurora_backend_gx_write(u64 value, u8 size) {
          return;
      g_fifo_bytes += size;
  #if GXRUNTIME_HAS_AURORA_RECOMP
@@ -2118,7 +2286,7 @@ index d94f811..b412198 100644
      // Record AFTER the shadow write so MEM_UPDATEs its resolves emitted
      // precede this GX_WRITE in the trace (replay reads them first), and
      // BEFORE the live-Aurora forwarding below so the pristine value is
-@@ -1673,6 +3495,7 @@ void aurora_backend_set_guest_address_resolver(
+@@ -1673,6 +3650,7 @@ void aurora_backend_set_guest_address_resolver(
              &frontend_resolver, frontend_guest_address_resolver_bridge,
              nullptr);
          g_shadow_frontend.reset(&frontend_resolver);
@@ -2126,7 +2294,7 @@ index d94f811..b412198 100644
          g_shadow_frontend.set_packet_drain_enabled(g_shadow_frontend_enabled);
          g_shadow_packet_sink.reset();
          // Resolve packet guest addresses to host bytes through the frontend's
-@@ -1737,6 +3560,7 @@ void aurora_backend_set_xfb_black(bool black) {
+@@ -1737,6 +3715,7 @@ void aurora_backend_set_xfb_black(bool black) {
  }
  
  bool aurora_backend_pad_init(void) {
@@ -2134,7 +2302,7 @@ index d94f811..b412198 100644
      if (PADInit() == FALSE)
          return false;
  
-@@ -1780,6 +3604,7 @@ bool aurora_backend_pad_init(void) {
+@@ -1780,6 +3759,7 @@ bool aurora_backend_pad_init(void) {
  }
  
  u32 aurora_backend_pad_read(DolPadState state[4]) {
@@ -2142,7 +2310,7 @@ index d94f811..b412198 100644
      PADStatus status[4]{};
      const u32 motor_mask = PADRead(status);
      for (u32 i = 0; i < 4; i++) {
-@@ -1796,22 +3621,41 @@ u32 aurora_backend_pad_read(DolPadState state[4]) {
+@@ -1796,22 +3776,41 @@ u32 aurora_backend_pad_read(DolPadState state[4]) {
              .error = status[i].err,
          };
      }
@@ -2184,7 +2352,7 @@ index d94f811..b412198 100644
      PADSetSpec(spec);
  }
  
-@@ -1841,13 +3685,16 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1841,13 +3840,16 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
          return;
      const int bytes_per_second =
          static_cast<int>(g_audio_sample_rate) * 2 * static_cast<int>(sizeof(s16));
@@ -2203,7 +2371,7 @@ index d94f811..b412198 100644
      while (queued > max_queued_bytes && waited_ms < 20u) {
          g_audio_throttle_count++;
          if (g_audio_queue_log &&
-@@ -1860,11 +3707,51 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1860,11 +3862,51 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
                           max_queued_bytes);
          SDL_Delay(1);
          waited_ms++;
@@ -2255,7 +2423,7 @@ index d94f811..b412198 100644
      if (g_audio_queue_log &&
          (g_audio_push_count <= 16 || (g_audio_push_count % 4000) == 0 ||
           (low_queue && g_audio_push_count - g_audio_low_log_push >= 4000))) {
-@@ -1876,6 +3763,21 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1876,6 +3918,21 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
                       g_audio_push_count, queued, queued + bytes,
                       g_audio_playing ? 1u : 0u, g_audio_throttle_count);
      }
@@ -2277,7 +2445,7 @@ index d94f811..b412198 100644
      if (!SDL_PutAudioStreamData(g_audio_stream, samples, bytes))
          std::fprintf(stderr, "[audio] failed to queue samples: %s\n", SDL_GetError());
      else if (!g_audio_playing && queued + bytes >= prebuffer_bytes) {
-@@ -1886,10 +3788,455 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1886,10 +3943,455 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
      }
  }
  
@@ -2733,7 +2901,7 @@ index d94f811..b412198 100644
      const DolPlatformOps ops = {
          .should_quit = aurora_backend_should_quit,
          .present = aurora_backend_present,
-@@ -1918,6 +4265,7 @@ void install_platform_ops() {
+@@ -1918,6 +4420,7 @@ void install_platform_ops() {
          .audio_set_sample_rate = aurora_backend_audio_set_sample_rate,
          .audio_push = aurora_backend_audio_push,
      };
@@ -2741,6 +2909,19 @@ index d94f811..b412198 100644
      dol_platform_install(&ops);
  }
  } // namespace
+diff --git a/graphics/aurora/cmake/aurora_gx.cmake b/graphics/aurora/cmake/aurora_gx.cmake
+index 349237d..f747ec5 100644
+--- a/graphics/aurora/cmake/aurora_gx.cmake
++++ b/graphics/aurora/cmake/aurora_gx.cmake
+@@ -67,6 +67,8 @@ if (TARGET GXRuntime::gxcore)
+     target_sources(aurora_gx PRIVATE
+         lib/gfx/gxcore_draw.cpp
+         lib/gfx/gxcore_draw.hpp
++        lib/gfx/interp.cpp
++        lib/gfx/interp.hpp
+     )
+     # gxcore + gxruntime (E7 YUYV encode symbols used by display-copy RAM path).
+     target_link_libraries(aurora_gx PRIVATE GXRuntime::gxcore GXRuntime::runtime)
 diff --git a/graphics/aurora/include/aurora/aurora.h b/graphics/aurora/include/aurora/aurora.h
 index b86b214..f6b70de 100644
 --- a/graphics/aurora/include/aurora/aurora.h
@@ -2757,10 +2938,10 @@ index b86b214..f6b70de 100644
  AuroraBackend aurora_get_backend();
  const AuroraBackend* aurora_get_available_backends(size_t* count);
 diff --git a/graphics/aurora/include/aurora/gfx.h b/graphics/aurora/include/aurora/gfx.h
-index a13ce39..8cc350b 100644
+index a13ce39..eb4d9fc 100644
 --- a/graphics/aurora/include/aurora/gfx.h
 +++ b/graphics/aurora/include/aurora/gfx.h
-@@ -29,6 +29,10 @@ typedef struct {
+@@ -29,10 +29,43 @@ typedef struct {
  } AuroraStats;
  
  const AuroraStats* aurora_get_stats();
@@ -2771,8 +2952,41 @@ index a13ce39..8cc350b 100644
  float aurora_get_fps();
  
  void aurora_enable_vsync(bool enabled);
+ 
++/*
++ * Frame interpolation (GXRuntime recomp patch): with the screen faster than
++ * the game, the screen refreshes between two game frames show the newer
++ * frame's draws with their matrices blended from the older's.
++ * set_wanted: keep each frame's draws and uniforms for blending (from the
++ * next frame). set_phases: the screen refreshes the frame about to end
++ * covers, each a phase in (0, 1] between the previous game frame (0) and
++ * this one (1; about 1 is the frame itself); none, the frame alone.
++ * set_present_spacing_ns: the shortest gap between two presents (0, none).
++ * request_refresh_probe: at the next frame, present it several times in a
++ * row to measure the screen's refresh; get_refresh_period_ns: the result
++ * (0 until measured). result: 0 blended, 1 nothing moved, 2 a camera cut,
++ * 3 no previous frame.
++ */
++typedef struct {
++  uint32_t draws;
++  uint32_t matched;
++  uint32_t loose;
++  uint32_t moved;
++  uint32_t jumped;
++  int result;
++} AuroraInterpStats;
++void aurora_interp_set_wanted(bool wanted);
++void aurora_interp_set_phases(const float* phases, uint32_t count);
++void aurora_set_present_spacing_ns(int64_t ns);
++void aurora_request_refresh_probe(void);
++int64_t aurora_get_refresh_period_ns(void);
++void aurora_get_interp_stats(AuroraInterpStats* out);
++
+ /*
+  * EFB readback (GXRuntime recomp patch): arm a one-shot copy of the next
+  * submitted frame's present source; take returns tightly packed RGBA8 rows
 diff --git a/graphics/aurora/lib/aurora.cpp b/graphics/aurora/lib/aurora.cpp
-index b09ef4d..1899378 100644
+index b09ef4d..5de7a4b 100644
 --- a/graphics/aurora/lib/aurora.cpp
 +++ b/graphics/aurora/lib/aurora.cpp
 @@ -1,5 +1,15 @@
@@ -2791,7 +3005,15 @@ index b09ef4d..1899378 100644
  #ifdef AURORA_ENABLE_GX
  #include "gfx/common.hpp"
  #include "gfx/render_worker.hpp"
-@@ -41,6 +51,232 @@ using webgpu::g_device;
+@@ -22,6 +32,7 @@
+ #include "window.hpp"
+ 
+ #include <SDL3/SDL_filesystem.h>
++#include <SDL3/SDL_timer.h>
+ #include <magic_enum.hpp>
+ 
+ #include "system_info.hpp"
+@@ -41,6 +52,232 @@ using webgpu::g_device;
  using webgpu::g_queue;
  using webgpu::g_surface;
  
@@ -3024,7 +3246,7 @@ index b09ef4d..1899378 100644
  uint32_t clamp_scissor_coord(double value, uint32_t maximum) noexcept {
    if (!std::isfinite(value)) {
      return 0;
-@@ -106,7 +342,14 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
+@@ -106,7 +343,14 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
    } else {
      g_config.userPath = strdup(g_config.userPath);
    }
@@ -3040,7 +3262,40 @@ index b09ef4d..1899378 100644
      g_config.cachePath = SDL_GetPrefPath(nullptr, g_config.appName);
    } else {
      g_config.cachePath = strdup(g_config.cachePath);
-@@ -257,10 +500,38 @@ void end_frame() noexcept {
+@@ -248,6 +492,32 @@ bool begin_frame() noexcept {
+   return true;
+ }
+ 
++#ifdef AURORA_ENABLE_GX
++// GXRuntime recomp patch: frame interpolation (gfx/interp.hpp). The phases of
++// the screen refreshes the next frame to end covers (aurora_interp_set_phases),
++// the shortest gap between two presents, and the screen's refresh period as
++// measured by presenting one picture several times in a row.
++std::vector<float> g_interpPhases;
++std::atomic<int64_t> g_presentSpacingNs{0};
++std::atomic<int> g_refreshProbes{0};
++std::atomic<int64_t> g_refreshPeriodNs{0};
++
++// Render worker, before each present: at least the spacing since the last
++// one, so frames in between never reach a variable-refresh screen back to
++// back (a fixed-refresh screen paces them itself).
++void space_present() {
++  static std::chrono::steady_clock::time_point s_last{};
++  const int64_t spacing = g_presentSpacingNs.load(std::memory_order_relaxed);
++  if (spacing > 0 && s_last.time_since_epoch().count() != 0) {
++    const auto target = s_last + std::chrono::nanoseconds{spacing - std::min<int64_t>(spacing / 8, 1'000'000)};
++    const auto now = std::chrono::steady_clock::now();
++    if (target > now)
++      SDL_DelayPrecise(static_cast<Uint64>(std::chrono::duration_cast<std::chrono::nanoseconds>(target - now).count()));
++  }
++  s_last = std::chrono::steady_clock::now();
++}
++#endif
++
+ void end_frame() noexcept {
+   ZoneScoped;
+ #ifdef AURORA_ENABLE_GX
+@@ -257,10 +527,38 @@ void end_frame() noexcept {
  
    // E7 present-from-XFB: VI current → GPU Virtual-XFB, else YUYV-from-RAM
    // decode, else EFB-direct (Strikers when no RAM XFB / match fails).
@@ -3081,21 +3336,77 @@ index b09ef4d..1899378 100644
    const uint32_t contentW =
        xfbTex && *xfbTex ? (*xfbTex)->size.width : efbSource.size.width;
    const uint32_t contentH =
-@@ -282,8 +553,9 @@ void end_frame() noexcept {
+@@ -282,28 +580,37 @@ void end_frame() noexcept {
    // Capture XFB handle by value for the worker lambda (shared_ptr).
    gfx::TextureHandle xfbHandle = (xfbTex && *xfbTex) ? *xfbTex : nullptr;
  
 -  gfx::end_frame([rmlBindGroup = std::move(rmlBindGroup), rmlOverlay, viewport,
 -                  imguiDrawData = std::move(imguiDrawData),
+-                  xfbHandle = std::move(xfbHandle)](wgpu::CommandEncoder& encoder) {
+-    wgpu::Texture currentTexture;
+-    wgpu::TextureView currentView;
+-    auto surfaceStatus = wgpu::SurfaceGetCurrentTextureStatus::Error;
+-    {
 +  auto xfbRamRequests = gfx::gxcore::take_xfb_ram_requests();
++  // GXRuntime recomp patch: what this frame shows (frames in between, the
++  // frame, repeats); the callback runs once for each.
++  auto outputs = gfx::plan_outputs(g_interpPhases.data(), g_interpPhases.size());
++  g_interpPhases.clear();
 +  gfx::end_frame([rmlBindGroup = std::move(rmlBindGroup), rmlOverlay, viewport, viBlack,
 +                  imguiDrawData = std::move(imguiDrawData), xfbRamRequests = std::move(xfbRamRequests),
-                   xfbHandle = std::move(xfbHandle)](wgpu::CommandEncoder& encoder) {
-     wgpu::Texture currentTexture;
-     wgpu::TextureView currentView;
-@@ -337,12 +609,16 @@ void end_frame() noexcept {
++                  xfbHandle = std::move(xfbHandle)](wgpu::CommandEncoder& encoder, const gfx::PresentInfo& info) {
++    // The surface's next texture, or why there is none.
++    struct Acquired {
++      wgpu::Texture texture;
++      wgpu::TextureView view;
++      wgpu::SurfaceGetCurrentTextureStatus status = wgpu::SurfaceGetCurrentTextureStatus::Error;
++    };
++    const auto acquire = [] {
++      Acquired out;
+       window::SurfaceLock surfaceLock;
+       if (window::is_presentable() && g_surface) {
+         ZoneScopedN("Acquire texture");
+         wgpu::SurfaceTexture surfaceTexture;
+         g_surface.GetCurrentTexture(&surfaceTexture);
+-        surfaceStatus = surfaceTexture.status;
+-        if (surfaceStatus == wgpu::SurfaceGetCurrentTextureStatus::SuccessOptimal) {
+-          currentTexture = std::move(surfaceTexture.texture);
+-          currentView = currentTexture.CreateView();
++        out.status = surfaceTexture.status;
++        if (out.status == wgpu::SurfaceGetCurrentTextureStatus::SuccessOptimal) {
++          out.texture = std::move(surfaceTexture.texture);
++          out.view = out.texture.CreateView();
+         }
+       }
+-    }
+-
+-    const bool canPresent = currentTexture && currentView;
+-    if (canPresent) {
++      return out;
++    };
++    // The picture (and the debug overlay) into the surface's texture.
++    const auto encode_present = [&](wgpu::CommandEncoder& enc, const wgpu::TextureView& currentView) {
+       wgpu::BindGroup presentBindGroup;
+       if (rmlBindGroup && !rmlOverlay) {
+         presentBindGroup = rmlBindGroup;
+@@ -318,7 +625,7 @@ void end_frame() noexcept {
          };
-         const auto pass = encoder.BeginRenderPass(&renderPassDescriptor);
+         presentBindGroup = webgpu::create_copy_bind_group(xfbSrc);
+       } else {
+-        const auto& resampledSource = webgpu::resample_present_source(encoder, viewport);
++        const auto& resampledSource = webgpu::resample_present_source(enc, viewport);
+         presentBindGroup = webgpu::create_copy_bind_group(resampledSource);
+       }
+       {
+@@ -333,16 +640,20 @@ void end_frame() noexcept {
+             .label = xfbHandle ? "XFB present render pass" : "EFB copy render pass",
+             .colorAttachmentCount = attachments.size(),
+             .colorAttachments = attachments.data(),
+-            .timestampWrites = webgpu::gpu_prof::pass_writes("Present blit"),
++            .timestampWrites = info.real ? webgpu::gpu_prof::pass_writes("Present blit") : nullptr,
+         };
+-        const auto pass = encoder.BeginRenderPass(&renderPassDescriptor);
++        const auto pass = enc.BeginRenderPass(&renderPassDescriptor);
          // Present: Virtual XFB when latched, else EFB→swapchain (Strikers).
 -        pass.SetPipeline(webgpu::g_CopyPipeline);
 -        pass.SetBindGroup(0, presentBindGroup, 0, nullptr);
@@ -3115,43 +3426,82 @@ index b09ef4d..1899378 100644
          if (rmlBindGroup && rmlOverlay) {
            pass.SetPipeline(webgpu::g_CopyPremultipliedAlphaPipeline);
            pass.SetBindGroup(0, rmlBindGroup, 0, nullptr);
-@@ -373,6 +649,25 @@ void end_frame() noexcept {
-     } else {
+@@ -362,67 +673,176 @@ void end_frame() noexcept {
+             .label = "ImGui render pass",
+             .colorAttachmentCount = attachments.size(),
+             .colorAttachments = attachments.data(),
+-            .timestampWrites = webgpu::gpu_prof::pass_writes("ImGui"),
++            .timestampWrites = info.real ? webgpu::gpu_prof::pass_writes("ImGui") : nullptr,
+         };
+-        const auto pass = encoder.BeginRenderPass(&renderPassDescriptor);
++        const auto pass = enc.BeginRenderPass(&renderPassDescriptor);
+         pass.SetViewport(0.f, 0.f, static_cast<float>(webgpu::g_graphicsConfig.surfaceConfiguration.width),
+                          static_cast<float>(webgpu::g_graphicsConfig.surfaceConfiguration.height), 0.f, 1.f);
+         imgui::render(pass, imguiDrawData);
+         pass.End();
+       }
+-    } else {
++    };
++    const auto present_surface = [] {
++      wgpu::ConvertibleStatus status = wgpu::Status::Error;
++      {
++        window::SurfaceLock surfaceLock;
++        if (window::is_presentable()) {
++          status = g_surface.Present();
++        }
++      }
++      return static_cast<bool>(status);
++    };
++
++    Acquired current;
++    if (info.present) {
++      current = acquire();
++    }
++    const bool canPresent = current.texture && current.view;
++    if (canPresent) {
++      encode_present(encoder, current.view);
++    } else if (info.present) {
        Log.info("Skipping present; window not presentable");
      }
-+    // Each display copy this frame, read back for the XFB in guest RAM.
+-    webgpu::gpu_prof::frame_end(encoder);
++    // Each display copy this frame, read back for the XFB in guest RAM (the
++    // game's own frame only: one in between is never read back).
 +    std::vector<xfb_ram::Slot*> xfbRamSlots;
 +    // DOL_XFB_RAM_PRESENTED=1 (testing): the frame on screen instead, as before.
 +    static const bool presented = std::getenv("DOL_XFB_RAM_PRESENTED") != nullptr;
-+    for (const auto& request : xfbRamRequests) {
-+      const gfx::TextureHandle& tex = presented && xfbHandle ? xfbHandle : request.texture;
-+      if (!tex)
-+        continue;
-+      const webgpu::TextureWithSampler source{.texture = tex->texture,
-+                                              .view = tex->sampleTextureView,
-+                                              .size = tex->size,
-+                                              .format = tex->format,
-+                                              .sampler = webgpu::present_source().sampler};
-+      if (xfb_ram::Slot* slot = xfb_ram::encode(encoder, source, request.target))
-+        xfbRamSlots.push_back(slot);
++    if (info.real) {
++      for (const auto& request : xfbRamRequests) {
++        const gfx::TextureHandle& tex = presented && xfbHandle ? xfbHandle : request.texture;
++        if (!tex)
++          continue;
++        const webgpu::TextureWithSampler source{.texture = tex->texture,
++                                                .view = tex->sampleTextureView,
++                                                .size = tex->size,
++                                                .format = tex->format,
++                                                .sampler = webgpu::present_source().sampler};
++        if (xfb_ram::Slot* slot = xfb_ram::encode(encoder, source, request.target))
++          xfbRamSlots.push_back(slot);
++      }
 +    }
 +    frame_dump::Slot* dumpSlot = canPresent && frame_dump::dir() != nullptr
-+                                     ? frame_dump::copy(encoder, currentTexture)
++                                     ? frame_dump::copy(encoder, current.texture)
 +                                     : nullptr;
-     webgpu::gpu_prof::frame_end(encoder);
++    if (info.real)
++      webgpu::gpu_prof::frame_end(encoder);
      const wgpu::CommandBufferDescriptor cmdBufDescriptor{.label = "Redraw command buffer"};
      const auto buffer = encoder.Finish(&cmdBufDescriptor);
-@@ -380,6 +675,40 @@ void end_frame() noexcept {
+     {
        ZoneScopedN("Queue Submit");
        g_queue.Submit(1, &buffer);
      }
+-    webgpu::gpu_prof::after_submit();
 +    frame_dump::map(dumpSlot);
 +    for (xfb_ram::Slot* slot : xfbRamSlots)
 +      xfb_ram::map(slot);
 +    // GXRuntime recomp patch: AURORA_GPU_TIME_LOG, once a second: how long the
 +    // GPU took to finish each frame after its submit, and the gap between
 +    // frames finishing (the GPU's pace when it is the bottleneck).
-+    {
++    if (info.real) {
 +      static const bool log = std::getenv("AURORA_GPU_TIME_LOG") != nullptr;
 +      if (log) {
 +        const auto submitted = std::chrono::steady_clock::now();
@@ -3178,11 +3528,129 @@ index b09ef4d..1899378 100644
 +                                      }
 +                                    });
 +      }
++      webgpu::gpu_prof::after_submit();
 +    }
-     webgpu::gpu_prof::after_submit();
      if (canPresent && g_surface) {
        ZoneScopedN("Present");
-@@ -478,3 +807,17 @@ void aurora_set_resampler(AuroraSampler sampler) {
+-      wgpu::ConvertibleStatus status = wgpu::Status::Error;
+-      {
+-        window::SurfaceLock surfaceLock;
+-        if (window::is_presentable()) {
+-          status = g_surface.Present();
+-        }
+-      }
+-      if (status) {
+-        gfx::after_present();
++      space_present();
++      if (present_surface()) {
++        // The frame rate counts frames drawn: a repeat is the last one again.
++        if (!info.repeat)
++          gfx::after_present();
+       } else {
+         Log.warn("Surface present failed");
+         webgpu::release_surface();
+       }
+-    } else if (g_surface) {
+-      switch (surfaceStatus) {
++      // GXRuntime recomp patch: the screen's refresh, when asked for: the same
++      // picture presented again and again; each has to wait for the screen,
++      // so the gaps between them are its refresh period.
++      if (info.real && g_refreshProbes.exchange(0) > 0 && g_surface) {
++        constexpr int kProbes = 24;
++        std::vector<int64_t> stamps;
++        for (int i = 0; i < kProbes; ++i) {
++          Acquired again = acquire();
++          if (!again.texture || !again.view)
++            break;
++          static constexpr wgpu::CommandEncoderDescriptor ProbeDescriptor{.label = "Refresh probe encoder"};
++          auto probe = g_device.CreateCommandEncoder(&ProbeDescriptor);
++          encode_present(probe, again.view);
++          const auto probeBuffer = probe.Finish(&cmdBufDescriptor);
++          g_queue.Submit(1, &probeBuffer);
++          if (!present_surface())
++            break;
++          stamps.push_back(std::chrono::duration_cast<std::chrono::nanoseconds>(
++                               std::chrono::steady_clock::now().time_since_epoch())
++                               .count());
++        }
++        // The first several fill the queue; after that each one waits a whole
++        // refresh, so their average gap is the screen's period (one gap jitters).
++        constexpr size_t kSkip = 8;
++        int64_t period = 0;
++        if (stamps.size() >= kSkip + 8)
++          period = (stamps.back() - stamps[kSkip]) / static_cast<int64_t>(stamps.size() - 1 - kSkip);
++        if (period > 2'000'000 && period < 40'000'000) {
++          g_refreshPeriodNs.store(period);
++          std::fprintf(stderr, "[display] refresh measured: %.3f ms (%.2f Hz)\n", period / 1e6, 1e9 / period);
++        } else {
++          std::fprintf(stderr, "[display] refresh not measured: %zu presents, median gap %.3f ms\n", stamps.size(),
++                       period / 1e6);
++        }
++      }
++    } else if (g_surface && info.present) {
++      switch (current.status) {
+       case wgpu::SurfaceGetCurrentTextureStatus::Timeout:
+         Log.warn("Surface texture acquisition timed out");
+         break;
+       case wgpu::SurfaceGetCurrentTextureStatus::SuccessSuboptimal:
+       case wgpu::SurfaceGetCurrentTextureStatus::Outdated:
+-        Log.info("Surface texture is {}, reconfiguring swapchain", magic_enum::enum_name(surfaceStatus));
++        Log.info("Surface texture is {}, reconfiguring swapchain", magic_enum::enum_name(current.status));
+         window::push_custom_event(window::CustomEvent::RefreshSurface);
+         break;
+       case wgpu::SurfaceGetCurrentTextureStatus::Lost:
+-        Log.warn("Surface texture is {}, releasing surface", magic_enum::enum_name(surfaceStatus));
++        Log.warn("Surface texture is {}, releasing surface", magic_enum::enum_name(current.status));
+         webgpu::release_surface();
+         break;
+       case wgpu::SurfaceGetCurrentTextureStatus::Error:
+-        Log.warn("Surface texture is {}, dropping surface", magic_enum::enum_name(surfaceStatus));
++        Log.warn("Surface texture is {}, dropping surface", magic_enum::enum_name(current.status));
+         g_surface = {};
+         break;
+       default:
+         if (!window::is_presentable()) {
+           webgpu::release_surface();
+         } else {
+-          Log.error("Failed to get surface texture: {}", magic_enum::enum_name(surfaceStatus));
++          Log.error("Failed to get surface texture: {}", magic_enum::enum_name(current.status));
+         }
+         break;
+       }
+     }
++    if (!info.real)
++      return;
+     gfx::after_submit();
+ 
+     TracyPlotConfig("aurora: lastVertSize", tracy::PlotFormatType::Memory, false, true, 0);
+@@ -440,7 +860,7 @@ void end_frame() noexcept {
+     TracyPlot("aurora: lastIndexSize", static_cast<int64_t>(gfx::g_stats.lastIndexSize));
+     TracyPlot("aurora: lastStorageSize", static_cast<int64_t>(gfx::g_stats.lastStorageSize));
+     TracyPlot("aurora: lastTextureUploadSize", static_cast<int64_t>(gfx::g_stats.lastTextureUploadSize));
+-  });
++  }, std::move(outputs));
+ 
+ #endif
+ }
+@@ -475,6 +895,35 @@ void aurora_set_resampler(AuroraSampler sampler) {
+   (void)sampler;
+ #endif
+ }
++#ifdef AURORA_ENABLE_GX
++void aurora_interp_set_wanted(bool wanted) { aurora::gfx::interp_set_wanted(wanted); }
++void aurora_interp_set_phases(const float* phases, uint32_t count) {
++  aurora::g_interpPhases.assign(phases, phases + count);
++}
++void aurora_set_present_spacing_ns(int64_t ns) { aurora::g_presentSpacingNs.store(ns); }
++void aurora_request_refresh_probe(void) { aurora::g_refreshProbes.store(1); }
++int64_t aurora_get_refresh_period_ns(void) { return aurora::g_refreshPeriodNs.load(); }
++void aurora_get_interp_stats(AuroraInterpStats* out) {
++  if (out == nullptr)
++    return;
++  const auto s = aurora::gfx::interp_stats();
++  *out = AuroraInterpStats{s.draws, s.matched, s.loose, s.moved, s.jumped, s.result};
++}
++#endif
  void aurora_set_efb_fixed_size(uint32_t width, uint32_t height) {
    aurora::window::set_fixed_efb_size(width, height);
  }
@@ -3201,10 +3669,29 @@ index b09ef4d..1899378 100644
 +  }
 +}
 diff --git a/graphics/aurora/lib/gfx/common.cpp b/graphics/aurora/lib/gfx/common.cpp
-index a64dd2d..1161ecf 100644
+index a64dd2d..1b91446 100644
 --- a/graphics/aurora/lib/gfx/common.cpp
 +++ b/graphics/aurora/lib/gfx/common.cpp
-@@ -338,6 +338,8 @@ static void wait_for_gpu_progress(std::chrono::nanoseconds sleepDuration) {
+@@ -10,6 +10,7 @@
+ #include "../gx/pipeline.hpp"
+ #ifdef AURORA_ENABLE_GXCORE
+ #include "gxcore_draw.hpp"
++#include "interp.hpp"
+ #endif
+ #ifdef AURORA_ENABLE_RMLUI
+ #include "../rmlui/pipeline.hpp"
+@@ -253,6 +254,10 @@ static std::array<FramePacket, FrameSlotCount> g_framePackets;
+ static FramePacket* g_recordingFrame = nullptr;
+ static size_t g_recordingFrameSlot = 0;
+ static uint64_t g_nextFrameId = 1;
++// GXRuntime recomp patch: the newest frame the render thread has ended. The
++// render worker draws a frame's frames in between only while it is the newest:
++// once the next is waiting they would only hold the game back.
++static std::atomic<uint64_t> g_lastEndedFrameId{0};
+ static render_worker::FrameSlotPool g_frameSlots{FrameSlotCount};
+ static render_worker::FrameSlotPool g_stagingSlots{StagingBufferCount};
+ static u32 g_currentRenderPass = UINT32_MAX;
+@@ -338,6 +343,8 @@ static void wait_for_gpu_progress(std::chrono::nanoseconds sleepDuration) {
    std::this_thread::sleep_for(sleepDuration);
  }
  
@@ -3213,7 +3700,17 @@ index a64dd2d..1161ecf 100644
  static void pace_frame_start() {
    ZoneScopedN("Frame start pacing");
    if (g_frameSlots.free_count() == FrameSlotCount) {
-@@ -652,6 +654,26 @@ gx::DrawData* get_last_draw_command() {
+@@ -475,7 +482,8 @@ static void seal_pass(FramePacket& frame, uint32_t passIndex) {
+ }
+ 
+ static void encode_op(wgpu::CommandEncoder& cmd, FramePacket& frame, const FrameOp& op);
+-static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo, uint32_t passIndex);
++static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo, uint32_t passIndex,
++                   bool replay = false);
+ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, const RenderPass& passInfo);
+ static void expire_cached_bind_groups();
+ static void push_command(CommandType type, const Command::Data& data);
+@@ -652,6 +660,26 @@ gx::DrawData* get_last_draw_command() {
    return &last.data.draw.gx;
  }
  
@@ -3240,13 +3737,269 @@ index a64dd2d..1161ecf 100644
  static void push_draw_command(ShaderDrawCommand data) {
    push_command(CommandType::Draw, Command::Data{.draw = data});
    ++g_drawCallCount;
+@@ -1271,6 +1299,9 @@ bool begin_frame() {
+   push_command(CommandType::SetViewport, Command::Data{.setViewport = g_cachedViewport});
+   push_command(CommandType::SetScissor, Command::Data{.setScissor = g_cachedScissor});
+   begin_pipeline_frame();
++#ifdef AURORA_ENABLE_GXCORE
++  interp::begin_frame();
++#endif
+   render_worker::enqueue_begin_frame(frame.frameId, [frameSlot] {
+     static constexpr wgpu::CommandEncoderDescriptor EncoderDescriptor{.label = "Redraw encoder"};
+     g_framePackets[frameSlot].encoder = g_device.CreateCommandEncoder(&EncoderDescriptor);
+@@ -1309,7 +1340,60 @@ void finish() {
+   }
+ }
+ 
+-void end_frame(EndFrameCallback callback) {
++// GXRuntime recomp patch: a frame in between, encoded on the render worker
++// once the game's frame is complete (defined below with the staging copies).
++static void encode_between(wgpu::CommandEncoder& cmd, FramePacket& frame, bool upload);
++
++std::vector<FrameOutput> plan_outputs(const float* phases, size_t count) {
++  std::vector<FrameOutput> outputs;
++  if (count == 0 || g_recordingFrame == nullptr)
++    return outputs;
++  // The last phase at about 1 is this frame's own turn on screen; otherwise it
++  // is drawn after the frames in between but not shown.
++  const bool realShown = phases[count - 1] >= 0.98f;
++  const size_t between = realShown ? count - 1 : count;
++#ifdef AURORA_ENABLE_GXCORE
++  auto& frame = current_frame_packet();
++  // A channel spilled past its staging slice is uploaded from the heap as it
++  // goes: the frames in between could not replay it from staging.
++  const bool spilled = frame.verts.is_owned() || frame.uniforms.is_owned() || frame.indices.is_owned() ||
++                       frame.storage.is_owned() || frame.textureUpload.is_owned();
++  std::vector<interp::Uniforms> buffers;
++  const auto result = spilled || between == 0
++                          ? interp::Result::NoReference
++                          : interp::build(phases, between, frame.uniforms.size(), buffers);
++  if (result == interp::Result::Blend) {
++    for (auto& buffer : buffers)
++      outputs.push_back(FrameOutput{.kind = FrameOutput::Kind::Between, .uniforms = std::move(buffer)});
++    outputs.push_back(FrameOutput{.kind = realShown ? FrameOutput::Kind::Real : FrameOutput::Kind::RealHidden});
++    return outputs;
++  }
++#endif
++  // Nothing to blend (still, a cut, no previous frame): this frame for each.
++  outputs.push_back(FrameOutput{.kind = FrameOutput::Kind::Real});
++  for (size_t i = 1; i < count; ++i)
++    outputs.push_back(FrameOutput{.kind = FrameOutput::Kind::Repeat});
++  return outputs;
++}
++
++void interp_set_wanted(bool on) noexcept {
++#ifdef AURORA_ENABLE_GXCORE
++  interp::set_wanted(on);
++#else
++  (void)on;
++#endif
++}
++
++InterpStats interp_stats() noexcept {
++#ifdef AURORA_ENABLE_GXCORE
++  const auto s = interp::last_stats();
++  return {s.draws, s.matched, s.loose, s.moved, s.jumped, static_cast<int>(s.result)};
++#else
++  return {0, 0, 0, 0, 0, 3};
++#endif
++}
++
++void end_frame(EndFrameCallback callback, std::vector<FrameOutput> outputs) {
+   ZoneScoped;
+   ASSERT(!g_inOffscreen, "end_frame called while offscreen rendering is active");
+   ASSERT(g_currentRenderPass == UINT32_MAX, "end_frame called before finish finalized the current render pass");
+@@ -1352,10 +1436,33 @@ void end_frame(EndFrameCallback callback) {
+ #endif
+ 
+   const size_t stagingSlot = frame.stagingBuffer;
+-  render_worker::enqueue_end_frame(frameId, [frameSlot, stagingSlot, callback = std::move(callback)]() mutable {
++  g_lastEndedFrameId.store(frameId);
++  render_worker::enqueue_end_frame(frameId, [frameSlot, stagingSlot, frameId, callback = std::move(callback),
++                                             outputs = std::move(outputs)]() mutable {
+     auto& packet = g_framePackets[frameSlot];
+     g_stagingBuffers[stagingSlot].Unmap();
+     s_mappingStates[stagingSlot].store(BufferMapState::Unmapped, std::memory_order_release);
++    // GXRuntime recomp patch: the frames in between go first, each the whole
++    // frame replayed with its blended uniforms; the game's own frame (encoded
++    // as it was recorded) follows, so what it leaves in the EFB copies and the
++    // XFB is the game's for the next frame.
++    bool uploaded = false;
++    bool realShown = true;
++    size_t repeats = 0;
++    for (const auto& output : outputs) {
++      if (output.kind == FrameOutput::Kind::RealHidden)
++        realShown = false;
++      else if (output.kind == FrameOutput::Kind::Repeat)
++        ++repeats;
++      if (output.kind != FrameOutput::Kind::Between || !callback || g_lastEndedFrameId.load() > frameId)
++        continue;
++      static constexpr wgpu::CommandEncoderDescriptor BetweenDescriptor{.label = "Between-frame encoder"};
++      auto between = g_device.CreateCommandEncoder(&BetweenDescriptor);
++      g_queue.WriteBuffer(g_uniformBuffer, 0, output.uniforms->data(), output.uniforms->size());
++      encode_between(between, packet, !uploaded);
++      uploaded = true;
++      callback(between, PresentInfo{.present = true, .real = false});
++    }
+     auto encoder = std::move(packet.encoder);
+     const auto stats = packet.stats;
+     packet = {};
+@@ -1367,7 +1474,12 @@ void end_frame(EndFrameCallback callback) {
+     g_stats.lastStorageSize = stats.lastStorageSize;
+     g_stats.lastTextureUploadSize = stats.lastTextureUploadSize;
+     if (callback) {
+-      callback(encoder);
++      callback(encoder, PresentInfo{.present = realShown, .real = true});
++      for (size_t i = 0; i < repeats; ++i) {
++        static constexpr wgpu::CommandEncoderDescriptor RepeatDescriptor{.label = "Repeat-frame encoder"};
++        auto repeat = g_device.CreateCommandEncoder(&RepeatDescriptor);
++        callback(repeat, PresentInfo{.present = true, .real = false, .repeat = true});
++      }
+     }
+     g_frameSlots.release(frameSlot);
+     expire_cached_bind_groups();
+@@ -1561,7 +1673,46 @@ static void encode_op(wgpu::CommandEncoder& cmd, FramePacket& frame, const Frame
+   }
+ }
+ 
+-static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo, uint32_t passIndex) {
++// GXRuntime recomp patch: a frame in between. The game's frame was encoded
++// as it was recorded and is submitted after this, so the first one in between
++// copies the frame's vertices, indices, storage and textures from staging
++// itself (its uniforms were written blended just before), then every pass and
++// texture copy runs again.
++static void encode_between(wgpu::CommandEncoder& cmd, FramePacket& frame, bool upload) {
++  if (upload) {
++    const auto& staging = g_stagingBuffers[frame.stagingBuffer];
++    const auto copy = [&](size_t size, uint64_t offset, const wgpu::Buffer& dst) {
++      if (size != 0)
++        cmd.CopyBufferToBuffer(staging, offset, dst, 0, AURORA_ALIGN(size, 4));
++    };
++    copy(frame.verts.size(), VertexStagingOffset, g_vertexBuffer);
++    copy(frame.indices.size(), IndexStagingOffset, g_indexBuffer);
++    copy(frame.storage.size(), StorageStagingOffset, g_storageBuffer);
++    if constexpr (UseTextureBuffer) {
++      for (const auto& item : frame.textureUploads) {
++        const wgpu::TexelCopyBufferInfo buf{
++            .layout =
++                wgpu::TexelCopyBufferLayout{
++                    .offset = item.buffer ? item.layout.offset : item.layout.offset + TextureUploadStagingOffset,
++                    .bytesPerRow = AURORA_ALIGN(item.layout.bytesPerRow, 256),
++                    .rowsPerImage = item.layout.rowsPerImage,
++                },
++            .buffer = item.buffer ? item.buffer : staging,
++        };
++        cmd.CopyBufferToTexture(&buf, &item.tex, &item.size);
++      }
++    }
++  }
++  for (const auto& op : frame.ops) {
++    if (op.type == FrameOpType::RenderPass && op.renderPass != nullptr)
++      render(cmd, frame, *op.renderPass, op.index, /*replay=*/true);
++    else if (op.type == FrameOpType::TextureCopy && op.textureCopy != nullptr)
++      cmd.CopyTextureToTexture(&op.textureCopy->src, &op.textureCopy->dst, &op.textureCopy->size);
++  }
++}
++
++static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo, uint32_t passIndex,
++                   bool replay) {
+   ZoneScoped;
+   if (!passInfo.sealed) {
+     return;
+@@ -1625,12 +1776,14 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
+ 
+   // Pre-resolve / pre-present EFB color plane (GPNF §7). Encode before the
+   // resolve copy so the snapshot matches the pre-copy EFB.
+-  if (passInfo.capturePlaneColor && passInfo.copySourceTexture) {
++  // A frame in between (replay) is shown only: the readback captures belong
++  // to the game's own frame.
++  if (!replay && passInfo.capturePlaneColor && passInfo.copySourceTexture) {
+     plane_capture::encode_color_snapshot(cmd, passInfo.copySourceTexture, passInfo.targetSize,
+                                          passInfo.planeKey, passInfo.planeCopy);
+   }
+ 
+-  if (passInfo.captureDepthSnapshot) {
++  if (!replay && passInfo.captureDepthSnapshot) {
+     depth_peek::encode_frame_snapshot(cmd, passInfo.copySourceDepthView, passInfo.targetSize, passInfo.msaaSamples);
+   }
+ 
+@@ -1892,8 +2045,14 @@ Range push_indices(const uint8_t* data, size_t length, size_t alignment) {
+ 
+ Range push_uniform(const uint8_t* data, size_t length) {
+   ZoneScoped;
+-  return push(current_frame_packet().uniforms, data, length, g_cachedLimits.minUniformBufferOffsetAlignment,
+-              UniformBufferSize, "uniforms");
++  const Range range = push(current_frame_packet().uniforms, data, length,
++                           g_cachedLimits.minUniformBufferOffsetAlignment, UniformBufferSize, "uniforms");
++#ifdef AURORA_ENABLE_GXCORE
++  // GXRuntime recomp patch: a copy for blending frames in between.
++  if (interp::recording())
++    interp::note_uniform(range.offset, data, length);
++#endif
++  return range;
+ }
+ 
+ Range push_storage(const uint8_t* data, size_t length) {
 diff --git a/graphics/aurora/lib/gfx/common.hpp b/graphics/aurora/lib/gfx/common.hpp
-index 37acf2b..3e9f28f 100644
+index 37acf2b..3aa0b1a 100644
 --- a/graphics/aurora/lib/gfx/common.hpp
 +++ b/graphics/aurora/lib/gfx/common.hpp
-@@ -254,6 +254,10 @@ bool begin_frame();
+@@ -7,8 +7,10 @@
+ #include <cstdlib>
+ #include <cstring>
+ #include <functional>
++#include <memory>
+ #include <type_traits>
+ #include <utility>
++#include <vector>
+ 
+ #include <aurora/gfx.h>
+ #include <aurora/math.hpp>
+@@ -238,7 +240,26 @@ using webgpu::Viewport;
+ 
+ struct TextureRef;
+ using TextureHandle = std::shared_ptr<TextureRef>;
+-using EndFrameCallback = std::function<void(wgpu::CommandEncoder&)>;
++// GXRuntime recomp patch: frame interpolation (interp.hpp). One game frame can
++// put several pictures on screen; the end-frame callback presents each.
++struct PresentInfo {
++  bool present = true; // put it on screen (false: drawn for its effects only)
++  bool real = true;    // the game's own frame (false: one in between, or a repeat)
++  bool repeat = false; // the game's frame shown again (not counted as a frame drawn)
++};
++using EndFrameCallback = std::function<void(wgpu::CommandEncoder&, const PresentInfo&)>;
++// What one game frame shows, in order: frames in between (each with its
++// blended uniforms), the game's own frame, then repeats of it.
++struct FrameOutput {
++  enum class Kind : uint8_t {
++    Between,    // the frame replayed with blended matrices
++    Real,       // the game's frame
++    RealHidden, // the game's frame, drawn but not shown (its turn fell between screen refreshes)
++    Repeat,     // the game's frame shown again
++  };
++  Kind kind = Kind::Real;
++  std::shared_ptr<const std::vector<uint8_t>> uniforms; // Between only
++};
+ 
+ enum class ShaderType : uint8_t {
+   Clear = 0,
+@@ -252,8 +273,23 @@ void shutdown();
+ 
+ bool begin_frame();
  void finish();
- void end_frame(EndFrameCallback callback);
+-void end_frame(EndFrameCallback callback);
++// GXRuntime recomp patch: what the frame being recorded shows, from the
++// phases (0, 1] of the screen refreshes it covers between the previous game
++// frame (0) and this one (1); a phase of about 1 is this frame itself. No
++// phases: this frame alone, as without interpolation.
++std::vector<FrameOutput> plan_outputs(const float* phases, size_t count);
++void interp_set_wanted(bool on) noexcept;
++struct InterpStats {
++  uint32_t draws, matched, loose, moved, jumped;
++  int result; // 0 blended, 1 still, 2 cut, 3 no previous frame
++};
++InterpStats interp_stats() noexcept;
++void end_frame(EndFrameCallback callback, std::vector<FrameOutput> outputs = {});
  uint32_t current_frame() noexcept;
 +// GXRuntime recomp patch: for a thread waiting on a readback between frames
 +// (the game reading an XFB back): has the render worker process Dawn's events
@@ -3293,18 +4046,19 @@ index 7af8fca..4c14e34 100644
      g_requested.store(false, std::memory_order_release);
    else
 diff --git a/graphics/aurora/lib/gfx/gxcore_draw.cpp b/graphics/aurora/lib/gfx/gxcore_draw.cpp
-index 71136b9..8abdd1e 100644
+index 71136b9..1fcdf52 100644
 --- a/graphics/aurora/lib/gfx/gxcore_draw.cpp
 +++ b/graphics/aurora/lib/gfx/gxcore_draw.cpp
-@@ -1,4 +1,7 @@
+@@ -1,4 +1,8 @@
 +#include <chrono>
 +#include <condition_variable>
  #include "gxcore_draw.hpp"
++#include "interp.hpp"
 +#include "pipeline_cache.hpp"
  #include "xfb_present.hpp"
  #include "efb_readback.hpp"
  #include "plane_capture.hpp"
-@@ -17,9 +20,15 @@
+@@ -17,9 +21,15 @@
  #include "../dolphin/vi/vi_internal.hpp"
  
  #include <absl/container/flat_hash_map.h>
@@ -3320,7 +4074,7 @@ index 71136b9..8abdd1e 100644
  #include <vector>
  
  namespace aurora::gfx::gxcore {
-@@ -40,6 +49,22 @@ namespace {
+@@ -40,6 +50,22 @@ namespace {
  // LOD bias has no WebGPU sampler field — residual stays shader-side if needed.
  // maxAnisotropy>1 is clamped to device capability (textureAnisotropy); WebGPU
  // linear min/mag/mip when aniso is already applied in decode_sampler.
@@ -3343,7 +4097,7 @@ index 71136b9..8abdd1e 100644
  wgpu::SamplerDescriptor sampler_from_plan(const gxc::PlanSampler& s) {
    auto address = [](std::uint8_t a) -> wgpu::AddressMode {
      switch (a) {
-@@ -158,6 +183,64 @@ wgpu::BlendFactor to_blend_factor_dst(gxc::DstBlendFactor factor, bool dual_src)
+@@ -158,6 +184,64 @@ wgpu::BlendFactor to_blend_factor_dst(gxc::DstBlendFactor factor, bool dual_src)
    }
  }
  
@@ -3408,7 +4162,7 @@ index 71136b9..8abdd1e 100644
  // Texture bind group layout for a used-texmap set (63/Mfin multi-texmap): texmap
  // t occupies binding 2t (texture) + 2t+1 (sampler), matching the WGSL. Cached per
  // mask; used_mask=1 (texmap 0 only) reproduces the pre-Mfin single-texmap layout.
-@@ -228,11 +311,75 @@ struct TextureKey {
+@@ -228,11 +312,75 @@ struct TextureKey {
  };
  
  absl::flat_hash_map<TextureKey, TextureHandle> g_textureCache;
@@ -3484,7 +4238,7 @@ index 71136b9..8abdd1e 100644
  TextureCacheStats g_textureCacheStats;
  
  // EFB copy-to-texture destinations (63/S16): dest guest address -> resolved EFB
-@@ -242,6 +389,26 @@ TextureCacheStats g_textureCacheStats;
+@@ -242,6 +390,26 @@ TextureCacheStats g_textureCacheStats;
  // (a re-copy to the same address updates in place, matching the live path).
  // E7: format-0xF display copies also land here (Virtual XFB GPU texture).
  absl::flat_hash_map<uint32_t, TextureHandle> g_efbCopyTextures;
@@ -3511,7 +4265,7 @@ index 71136b9..8abdd1e 100644
  
  // E7 present-from-RAM: YUYV decoded from guest MEM1 when no GPU copy exists
  // (software/external XFB writers). Keyed by physical address; re-upload when
-@@ -261,6 +428,19 @@ static uint32_t g_last_xfb_dest_stride = 0;
+@@ -261,6 +429,19 @@ static uint32_t g_last_xfb_dest_stride = 0;
  // E7: last display-copy XFB height after BP 0x4E y_scale (0 = use VI height).
  static uint32_t g_last_xfb_height = 0;
  
@@ -3531,7 +4285,7 @@ index 71136b9..8abdd1e 100644
  static unsigned long long g_xfb_display_copy_count = 0;
  static unsigned long long g_xfb_ram_present_count = 0;
  
-@@ -277,17 +457,118 @@ unsigned long long xfb_display_copy_count() noexcept {
+@@ -277,17 +458,118 @@ unsigned long long xfb_display_copy_count() noexcept {
    return g_xfb_display_copy_count;
  }
  
@@ -3652,7 +4406,7 @@ index 71136b9..8abdd1e 100644
      return &it->second;
  
    const auto dims = aurora::vi::configured_xfb_size();
-@@ -345,6 +626,11 @@ const TextureHandle* lookup_xfb_texture(std::uint32_t physical_address) noexcept
+@@ -345,6 +627,11 @@ const TextureHandle* lookup_xfb_texture(std::uint32_t physical_address) noexcept
    return &slot.handle;
  }
  
@@ -3664,7 +4418,7 @@ index 71136b9..8abdd1e 100644
  wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
    const gxc::PipelineKey& key = config.key;
    const std::string wgsl = gxc::generate_wgsl(key.shader);
-@@ -364,11 +650,19 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -364,11 +651,19 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
    const bool textured = key.shader.textured != 0;
    // Multi-texmap: the texture group's layout matches the set of texmaps the WGSL
    // declares (derived identically from the shader key), so pipeline and bind
@@ -3687,7 +4441,7 @@ index 71136b9..8abdd1e 100644
        tev ? g_uniformBindGroupLayout : texture_bind_group_layout(tex_mask),
        texture_bind_group_layout(tex_mask),
    };
-@@ -427,7 +721,13 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -427,7 +722,13 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
    // vertex FORMAT carries that attribute. A lit/emboss draw whose format omits
    // it reads the cached fallback from the uniform instead (I_CACHED_NORMAL), so
    // the shader does not declare the input and the layout must not provide it.
@@ -3702,7 +4456,7 @@ index 71136b9..8abdd1e 100644
        key.shader.has_vertex_normal != 0) {
      attributes.push_back(wgpu::VertexAttribute{
          .format = wgpu::VertexFormat::Float32x3,
-@@ -442,14 +742,14 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -442,14 +743,14 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
          .shaderLocation = 13,
      });
    }
@@ -3719,7 +4473,7 @@ index 71136b9..8abdd1e 100644
      attributes.push_back(wgpu::VertexAttribute{
          .format = wgpu::VertexFormat::Float32x3,
          .offset = gxc::kVertexTangentOffset,
-@@ -536,6 +836,10 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -536,6 +837,10 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
    default:
      break; // None here; All was skipped at plan time
    }
@@ -3730,7 +4484,7 @@ index 71136b9..8abdd1e 100644
  
    const wgpu::RenderPipelineDescriptor descriptor{
        .label = "GXCore Pipeline",
-@@ -566,10 +870,22 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -566,10 +871,22 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
  
  void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
    if (!bind_pipeline(data.pipeline, pass)) {
@@ -3755,7 +4509,7 @@ index 71136b9..8abdd1e 100644
    if (data.tev) {
      // group 2 = PS uniform (same dynamic-uniform bind group, its own offset);
      // group 3 = texture.
-@@ -591,14 +907,31 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
+@@ -591,14 +908,31 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
  
  void reset_texture_cache() {
    g_textureCache.clear();
@@ -3787,7 +4541,7 @@ index 71136b9..8abdd1e 100644
  }
  
  const TextureCacheStats& texture_cache_stats() { return g_textureCacheStats; }
-@@ -612,6 +945,8 @@ const TextureCacheStats& texture_cache_stats() { return g_textureCacheStats; }
+@@ -612,6 +946,8 @@ const TextureCacheStats& texture_cache_stats() { return g_textureCacheStats; }
  // color/Z afterwards. The bound draw's geometry is already in the pass (the
  // sink flushed the pending draw before firing this).
  void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
@@ -3796,7 +4550,7 @@ index 71136b9..8abdd1e 100644
    // Mirror the copy-clear color/Z (BP 0x4F-0x51 at this copy) into the gx
    // state GXSetCopyClear would have written: begin_frame's pass-0 EFB clear
    // reads g_gxState.clearColor/clearDepth, and in gxcore mode the live gx
-@@ -635,11 +970,25 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -635,11 +971,25 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
    const auto fmt = is_xfb ? GX_TF_RGBA8 : static_cast<GXTexFmt>(cmd.format);
    // Dual dims: EFB source rect stays cmd.height; XFB dest height from
    // byte_size/stride (or cmd.xfb_height if gxcore latched it).
@@ -3823,7 +4577,7 @@ index 71136b9..8abdd1e 100644
    });
    // U8: half_scale halves destination dims (TextureEncoder box 2:1).
    const uint32_t scaleShift = cmd.half_scale ? 1u : 0u;
-@@ -660,8 +1009,9 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -660,8 +1010,9 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
        dstHeight = xfb_h;
    }
  
@@ -3835,7 +4589,7 @@ index 71136b9..8abdd1e 100644
        it->second->size.width != dstWidth || it->second->size.height != dstHeight) {
      TextureHandle handle;
      if (!is_xfb && gfx::tex_copy_conv::needs_conversion(fmt)) {
-@@ -670,7 +1020,7 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -670,7 +1021,7 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
        handle = gfx::new_render_texture(dstWidth, dstHeight, GX_TF_RGBA8,
                                         is_xfb ? "GXCore XFB" : "GXCore Copy");
      }
@@ -3844,7 +4598,7 @@ index 71136b9..8abdd1e 100644
    }
    if (!it->second) {
      return;
-@@ -709,11 +1059,32 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -709,11 +1060,32 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
    // XFB YUYV into guest RAM from this readback on every display copy, so it
    // must stay armed in product runs too (cost: one EFB readback per display
    // copy, ~1-2/frame).
@@ -3878,7 +4632,7 @@ index 71136b9..8abdd1e 100644
    gfx::resolve_pass(it->second, srcRect, do_clear && cmd.color_update,
                      do_clear && cmd.alpha_update,
                      do_clear && cmd.depth_update,
-@@ -723,73 +1094,360 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -723,73 +1095,360 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
                                  static_cast<float>(cmd.clear_a) / 255.f},
                      clearDepthValue, fmt, &filter);
  
@@ -4296,7 +5050,7 @@ index 71136b9..8abdd1e 100644
      const float sx = plan.viewport[0];
      const float sy = plan.viewport[1];
      const float sz = plan.viewport[2];
-@@ -799,8 +1457,8 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -799,8 +1458,8 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      const float width = sx * 2.0f;
      const float height = -sy * 2.0f;
      gx::set_logical_viewport({
@@ -4307,7 +5061,7 @@ index 71136b9..8abdd1e 100644
          .width = width,
          .height = height,
          .znear = (oz - sz) / 1.6777215e7f,
-@@ -827,7 +1485,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -827,7 +1486,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
        [&](uint32_t address, uint32_t tsize, uint32_t format, uint32_t width,
            uint32_t height, const void* data, uint32_t available, bool has_tlut,
            uint32_t tlut_address, uint32_t tlut_format, uint32_t tlut_entries,
@@ -4316,7 +5070,7 @@ index 71136b9..8abdd1e 100644
      auto efbIt = g_efbCopyTextures.find(address);
      if (efbIt != g_efbCopyTextures.end() && efbIt->second) {
        ++g_textureCacheStats.hits;
-@@ -839,23 +1497,253 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -839,23 +1498,253 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      const uint32_t size = std::min(tsize, available);
      // Hash the actual source texels (+ TLUT for CI) so a content change under an
      // unchanged guest identity is a distinct cache entry — see TextureKey.
@@ -4577,7 +5331,7 @@ index 71136b9..8abdd1e 100644
      // gxcore owns the decode for every format: produce tightly-packed RGBA8 and
      // upload it as a pre-decoded PC texture (no substrate re-conversion).
      std::vector<uint8_t> decoded;
-@@ -868,8 +1756,47 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -868,8 +1757,47 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      } else {
        decoded = gxc::decode_texture(format, width, height, bytes, size);
      }
@@ -4626,7 +5380,7 @@ index 71136b9..8abdd1e 100644
        handle = new_static_texture_2d(
            width, height, 1, GX_TF_RGBA8_PC,
            ArrayRef<uint8_t>{decoded.data(), decoded.size()}, false,
-@@ -892,7 +1819,98 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -892,7 +1820,98 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    };
  
    BindGroupRef textureBindGroup = 0;
@@ -4725,7 +5479,7 @@ index 71136b9..8abdd1e 100644
      if (plan.texmap_mask == 0u) {
        // Single-texmap fast path: primary texture + plan.sampler at binding 0/1.
        if (plan.has_texture) {
-@@ -903,7 +1921,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -903,7 +1922,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
              plan.tlut_data, plan.tlut_available);
          if (bound) {
            const auto sampler =
@@ -4734,7 +5488,7 @@ index 71136b9..8abdd1e 100644
            const std::array entries{
                WGPUBindGroupEntry{.binding = 0,
                                   .textureView =
-@@ -919,6 +1937,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -919,6 +1938,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            textureBindGroup = bind_group_ref(descriptor);
          }
        }
@@ -4742,7 +5496,7 @@ index 71136b9..8abdd1e 100644
      } else {
        // Multi-texmap: bind each used texmap at 2t (texture) / 2t+1 (sampler),
        // matching the WGSL declarations. Per-texmap PlanSampler from
-@@ -932,12 +1951,15 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -932,12 +1952,15 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
          if ((plan.texmap_mask & (1u << t)) == 0u)
            continue;
          const gxc::PlanTexture& pt = plan.textures[t];
@@ -4759,7 +5513,7 @@ index 71136b9..8abdd1e 100644
          if (!bound) {
            complete = false;
            break;
-@@ -945,14 +1967,16 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -945,14 +1968,16 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
          held.push_back(bound);
          const gxc::PlanSampler& ps =
              pt.sampler.valid ? pt.sampler : plan.samplers[t];
@@ -4778,7 +5532,7 @@ index 71136b9..8abdd1e 100644
        const WGPUBindGroupDescriptor descriptor{
            .label = {"GXCore Texture Bind Group", WGPU_STRLEN},
            .layout = texture_bind_group_layout(plan.texmap_mask).Get(),
-@@ -960,6 +1984,239 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -960,6 +1985,242 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            .entries = entries.data(),
        };
        textureBindGroup = bind_group_ref(descriptor);
@@ -4867,6 +5621,9 @@ index 71136b9..8abdd1e 100644
 +        s_pixelUniforms, &plan.pixel_constants, sizeof(plan.pixel_constants),
 +        plan.pixel_constants_hash);
 +  }
++  // GXRuntime recomp patch: the draw's uniforms, for frames in between.
++  if (interp::recording())
++    interp::note_draw(plan, uniformRange.offset, sharedUniformRange.offset);
 +
 +  // pipeline_ref hashes the whole config even for a repeat; compare bytes.
 +  const PipelineConfig pipelineConfig{
@@ -5018,7 +5775,7 @@ index 71136b9..8abdd1e 100644
      }
    }
  
-@@ -969,27 +2226,13 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -969,27 +2230,13 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    const auto idxRange = push_indices(
        reinterpret_cast<const uint8_t*>(plan.indices.data()),
        plan.indices.size() * sizeof(uint16_t), 4);
@@ -5048,7 +5805,7 @@ index 71136b9..8abdd1e 100644
          .pixelUniformRange = pixelUniformRange,
          .indexCount = static_cast<uint32_t>(plan.indices.size()),
          .textureBindGroup = textureBindGroup,
-@@ -1006,6 +2249,8 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -1006,6 +2253,8 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      }
    } else {
      issue_draw();
@@ -5158,6 +5915,463 @@ index 0a23a3f..d4e382e 100644
  // U8 dst-alpha: pipelines created with use_dst_alpha while DualSourceBlending
  // was unavailable (single-source SrcAlpha fallback). Zero when feature present.
  unsigned long long dst_alpha_fallback_count() noexcept;
+diff --git a/graphics/aurora/lib/gfx/interp.cpp b/graphics/aurora/lib/gfx/interp.cpp
+new file mode 100644
+index 0000000..c7937eb
+--- /dev/null
++++ b/graphics/aurora/lib/gfx/interp.cpp
+@@ -0,0 +1,392 @@
++#include "interp.hpp"
++
++#include <gxruntime/gxcore/shader.hpp>
++
++#include <absl/container/flat_hash_map.h>
++#include <xxhash.h>
++
++#include <algorithm>
++#include <cmath>
++#include <cstring>
++#include <utility>
++
++namespace aurora::gfx::interp {
++namespace {
++namespace gxc = gxruntime::gxcore;
++using Vs = gxc::VertexShaderConstants;
++using Xf = gxc::VertexSharedConstants;
++
++struct Draw {
++  uint64_t key;   // pipeline, textures, vertex count and the first vertices
++  uint64_t loose; // the same without the vertices
++  uint32_t vs;    // VertexShaderConstants offset in the frame's uniforms
++  uint32_t xf;    // VertexSharedConstants offset
++};
++
++struct Frame {
++  std::vector<uint8_t> uniforms; // a copy of what the frame uploaded, at the same offsets
++  std::vector<Draw> draws;
++};
++
++// What to blend of a matched draw's vertex constants: bit 0 the position and
++// normal matrix, bit 1 the projection, bit 2 + g texgen g's matrix.
++struct VsPair {
++  uint32_t cur, prev, mask;
++};
++// ... and of its XF block: position matrices (bit per matrix), texture
++// matrices, post-transform matrices (bit per three rows) and lights.
++struct XfPair {
++  uint32_t cur, prev;
++  uint32_t pos = 0, tex = 0, post = 0, lights = 0;
++};
++
++bool g_wanted = false;
++bool g_recording = false;
++bool g_havePrev = false;
++Frame g_frames[2];
++int g_cur = 0;
++Stats g_stats;
++std::vector<std::shared_ptr<std::vector<uint8_t>>> g_pool;
++
++constexpr uint32_t kTexGens = gxc::kMaxTexGens;
++
++bool same(const float* a, const float* b, size_t n) { return std::memcmp(a, b, n * sizeof(float)) == 0; }
++
++void lerp(float* out, const float* a, const float* b, size_t n, float t) {
++  for (size_t i = 0; i < n; ++i)
++    out[i] = a[i] + (b[i] - a[i]) * t;
++}
++
++// A position matrix (three rows of four) that moved little enough in one game
++// frame to blend: its rotation and scale by under about 20 degrees, and its
++// translation by under half its distance from the camera. A draw matched by
++// state alone (strict) must be closer still, so two different objects that
++// share a model are never blended into each other. False on NaN.
++bool close_pos(const float (*a)[4], const float (*b)[4], bool strict) {
++  float scale = 0.f, rot = 0.f;
++  for (int r = 0; r < 3; ++r)
++    for (int c = 0; c < 3; ++c) {
++      scale = std::max({scale, std::fabs(a[r][c]), std::fabs(b[r][c])});
++      rot = std::max(rot, std::fabs(a[r][c] - b[r][c]));
++    }
++  if (!(rot <= (strict ? 0.15f : 0.35f) * scale))
++    return false;
++  float da = 0.f, db = 0.f, dd = 0.f;
++  for (int r = 0; r < 3; ++r) {
++    da += a[r][3] * a[r][3];
++    db += b[r][3] * b[r][3];
++    dd += (a[r][3] - b[r][3]) * (a[r][3] - b[r][3]);
++  }
++  return dd <= (strict ? 0.04f : 0.25f) * std::max(da, db) + 1e-6f;
++}
++
++// Texture, projection and post matrices: blend unless they jumped (a scroll
++// wrapping round, a new projection). False on NaN.
++bool close_rows(const float (*a)[4], const float (*b)[4], int rows) {
++  float scale = 1.f, diff = 0.f;
++  for (int r = 0; r < rows; ++r)
++    for (int c = 0; c < 4; ++c) {
++      scale = std::max({scale, std::fabs(a[r][c]), std::fabs(b[r][c])});
++      diff = std::max(diff, std::fabs(a[r][c] - b[r][c]));
++    }
++  return diff <= 0.25f * scale;
++}
++
++// A light's position or direction (xyz).
++bool close_vec(const float* a, const float* b) {
++  float da = 0.f, db = 0.f, dd = 0.f;
++  for (int i = 0; i < 3; ++i) {
++    da += a[i] * a[i];
++    db += b[i] * b[i];
++    dd += (a[i] - b[i]) * (a[i] - b[i]);
++  }
++  return dd <= 0.25f * std::max(da, db) + 1e-6f;
++}
++
++const Vs& vs_at(const std::vector<uint8_t>& u, uint32_t offset) {
++  return *reinterpret_cast<const Vs*>(u.data() + offset);
++}
++const Xf& xf_at(const std::vector<uint8_t>& u, uint32_t offset) {
++  return *reinterpret_cast<const Xf*>(u.data() + offset);
++}
++
++// The k-th of the previous frame's draws with this key, or -1.
++int32_t nth_with(const std::vector<std::pair<uint64_t, uint32_t>>& sorted, uint64_t key, uint32_t nth) {
++  const auto lo = std::lower_bound(sorted.begin(), sorted.end(), std::pair<uint64_t, uint32_t>{key, 0u});
++  if (static_cast<size_t>(sorted.end() - lo) <= nth)
++    return -1;
++  const auto it = lo + nth;
++  return it->first == key ? static_cast<int32_t>(it->second) : -1;
++}
++
++std::shared_ptr<std::vector<uint8_t>> pooled_buffer(size_t size) {
++  for (auto& buf : g_pool)
++    if (buf.use_count() == 1) {
++      buf->resize(size);
++      return buf;
++    }
++  auto buf = std::make_shared<std::vector<uint8_t>>(size);
++  if (g_pool.size() < 8)
++    g_pool.push_back(buf);
++  return buf;
++}
++} // namespace
++
++void set_wanted(bool on) noexcept { g_wanted = on; }
++bool recording() noexcept { return g_recording; }
++
++void begin_frame() noexcept {
++  // The frame just ended was kept: it is the one to blend from now.
++  g_havePrev = g_recording;
++  if (g_recording)
++    g_cur ^= 1;
++  g_recording = g_wanted;
++  Frame& f = g_frames[g_cur];
++  f.uniforms.clear();
++  f.draws.clear();
++  if (!g_recording) {
++    g_havePrev = false;
++    for (Frame& frame : g_frames) {
++      frame.uniforms.shrink_to_fit();
++      frame.draws.shrink_to_fit();
++    }
++    g_pool.clear();
++  }
++}
++
++void note_uniform(uint32_t offset, const uint8_t* data, size_t length) noexcept {
++  if (!g_recording || length == 0)
++    return;
++  auto& u = g_frames[g_cur].uniforms;
++  const size_t end = static_cast<size_t>(offset) + length;
++  if (u.size() < end)
++    u.resize(end);
++  std::memcpy(u.data() + offset, data, length);
++}
++
++void note_draw(const gxc::DrawPlan& plan, uint32_t vsOffset, uint32_t xfOffset) noexcept {
++  if (!g_recording)
++    return;
++  auto& draws = g_frames[g_cur].draws;
++  // Draws that share the previous draw's uniforms change nothing to blend.
++  if (!draws.empty() && draws.back().vs == vsOffset && draws.back().xf == xfOffset)
++    return;
++  uint32_t id[14]{};
++  std::memcpy(id, &plan.pipeline_hash, sizeof plan.pipeline_hash);
++  id[2] = plan.vertex_count;
++  id[3] = plan.texmap_mask;
++  id[4] = plan.has_texture ? plan.tex_address : 0u;
++  id[5] = plan.has_texture ? plan.tex_format : 0u;
++  for (uint32_t t = 0; t < 8u; ++t)
++    if ((plan.texmap_mask >> t) & 1u)
++      id[6 + t] = plan.textures[t].address;
++  const uint64_t loose = XXH3_64bits(id, sizeof id);
++  // The first vertices' positions and matrix indices, in object space: the
++  // same each frame for a model the GPU moves, new for geometry the game
++  // builds each frame (which only matches loosely).
++  float first[6][4]{};
++  const size_t n = std::min<size_t>({6u, plan.vertex_count, plan.vertices.size() / gxc::kVertexFloats});
++  for (size_t i = 0; i < n; ++i)
++    std::memcpy(first[i], &plan.vertices[i * gxc::kVertexFloats], sizeof first[i]);
++  const uint64_t key = XXH3_64bits_withSeed(first, n * sizeof first[0], loose);
++  draws.push_back(Draw{key, loose, vsOffset, xfOffset});
++}
++
++Result build(const float* phases, size_t count, size_t uniformSize, std::vector<Uniforms>& out) {
++  out.clear();
++  Stats stats;
++  Frame& cur = g_frames[g_cur];
++  const Frame& prev = g_frames[g_cur ^ 1];
++  const size_t size = (uniformSize + 3u) & ~size_t{3u};
++  if (!g_recording || !g_havePrev || count == 0) {
++    g_stats = stats;
++    return stats.result;
++  }
++  if (cur.uniforms.size() < size)
++    cur.uniforms.resize(size);
++  stats.draws = static_cast<uint32_t>(cur.draws.size());
++
++  // Match each draw to the previous frame's: the k-th draw with a key to the
++  // k-th one there (the game draws its scene in the same order each frame),
++  // first by geometry, then by state alone for what is left.
++  static std::vector<std::pair<uint64_t, uint32_t>> byKey, byLoose;
++  static absl::flat_hash_map<uint64_t, uint32_t> seenKey, seenLoose;
++  static std::vector<uint8_t> used;
++  static std::vector<int32_t> match;
++  static std::vector<uint32_t> looseNth;
++  byKey.clear();
++  byLoose.clear();
++  for (uint32_t i = 0; i < prev.draws.size(); ++i) {
++    byKey.emplace_back(prev.draws[i].key, i);
++    byLoose.emplace_back(prev.draws[i].loose, i);
++  }
++  std::sort(byKey.begin(), byKey.end());
++  std::sort(byLoose.begin(), byLoose.end());
++  seenKey.clear();
++  seenLoose.clear();
++  used.assign(prev.draws.size(), 0);
++  match.assign(cur.draws.size(), -1);
++  looseNth.resize(cur.draws.size());
++  for (size_t i = 0; i < cur.draws.size(); ++i) {
++    const Draw& c = cur.draws[i];
++    looseNth[i] = seenLoose[c.loose]++;
++    const int32_t p = nth_with(byKey, c.key, seenKey[c.key]++);
++    if (p >= 0 && used[p] == 0) {
++      match[i] = p;
++      used[p] = 1;
++      ++stats.matched;
++    }
++  }
++  static std::vector<uint8_t> strict;
++  strict.assign(cur.draws.size(), 0);
++  for (size_t i = 0; i < cur.draws.size(); ++i) {
++    if (match[i] >= 0)
++      continue;
++    const int32_t p = nth_with(byLoose, cur.draws[i].loose, looseNth[i]);
++    if (p >= 0 && used[p] == 0) {
++      match[i] = p;
++      used[p] = 1;
++      strict[i] = 1;
++      ++stats.loose;
++    }
++  }
++
++  // What to blend of each pair, and whether the camera cut.
++  static std::vector<VsPair> vsPairs;
++  static std::vector<XfPair> xfPairs;
++  static absl::flat_hash_map<uint32_t, uint32_t> vsSeen, xfSeen;
++  vsPairs.clear();
++  xfPairs.clear();
++  vsSeen.clear();
++  xfSeen.clear();
++  for (size_t i = 0; i < cur.draws.size(); ++i) {
++    if (match[i] < 0)
++      continue;
++    const Draw& c = cur.draws[i];
++    const Draw& p = prev.draws[match[i]];
++    const bool tight = strict[i] != 0;
++    if (c.vs + sizeof(Vs) <= cur.uniforms.size() && p.vs + sizeof(Vs) <= prev.uniforms.size() &&
++        vsSeen.emplace(c.vs, p.vs).second) {
++      const Vs& a = vs_at(prev.uniforms, p.vs);
++      const Vs& b = vs_at(cur.uniforms, c.vs);
++      uint32_t mask = 0;
++      if (!same(a.posnormalmatrix[0], b.posnormalmatrix[0], 12)) {
++        ++stats.moved;
++        if (close_pos(a.posnormalmatrix, b.posnormalmatrix, tight))
++          mask |= 1u;
++        else
++          ++stats.jumped;
++      }
++      if (!same(a.projection[0], b.projection[0], 16) && a.projection[3][2] == b.projection[3][2] &&
++          a.projection[3][3] == b.projection[3][3] && close_rows(a.projection, b.projection, 4))
++        mask |= 2u;
++      for (uint32_t g = 0; g < kTexGens; ++g)
++        if (!same(a.texmatrices[3 * g], b.texmatrices[3 * g], 12) &&
++            close_rows(&a.texmatrices[3 * g], &b.texmatrices[3 * g], 3))
++          mask |= 4u << g;
++      if (mask != 0)
++        vsPairs.push_back(VsPair{c.vs, p.vs, mask});
++    }
++    if (c.xf + sizeof(Xf) <= cur.uniforms.size() && p.xf + sizeof(Xf) <= prev.uniforms.size() &&
++        xfSeen.emplace(c.xf, p.xf).second) {
++      const Xf& a = xf_at(prev.uniforms, p.xf);
++      const Xf& b = xf_at(cur.uniforms, c.xf);
++      if (std::memcmp(&a, &b, sizeof(Xf)) == 0)
++        continue;
++      XfPair pair{c.xf, p.xf};
++      for (uint32_t m = 0; m < 10u; ++m) {
++        const float(*ra)[4] = &a.transformmatrices[3 * m];
++        const float(*rb)[4] = &b.transformmatrices[3 * m];
++        if (same(ra[0], rb[0], 12))
++          continue;
++        ++stats.moved;
++        if (close_pos(ra, rb, tight))
++          pair.pos |= 1u << m;
++        else
++          ++stats.jumped;
++      }
++      for (uint32_t k = 0; k < 11u; ++k) {
++        const uint32_t row = 30u + 3u * k;
++        if (!same(a.transformmatrices[row], b.transformmatrices[row], 12) &&
++            close_rows(&a.transformmatrices[row], &b.transformmatrices[row], 3))
++          pair.tex |= 1u << k;
++      }
++      for (uint32_t k = 0; k < 22u; ++k) {
++        const uint32_t row = 3u * k;
++        const int rows = std::min(3, 64 - static_cast<int>(row));
++        if (!same(a.posttransformmatrices[row], b.posttransformmatrices[row], rows * 4u) &&
++            close_rows(&a.posttransformmatrices[row], &b.posttransformmatrices[row], rows))
++          pair.post |= 1u << k;
++      }
++      for (uint32_t l = 0; l < 8u; ++l) {
++        const auto& la = a.lights[l];
++        const auto& lb = b.lights[l];
++        if ((!same(la.pos, lb.pos, 3) || !same(la.dir, lb.dir, 3)) && close_vec(la.pos, lb.pos) &&
++            close_vec(la.dir, lb.dir))
++          pair.lights |= 1u << l;
++      }
++      if ((pair.pos | pair.tex | pair.post | pair.lights) != 0)
++        xfPairs.push_back(pair);
++    }
++  }
++
++  if (stats.matched + stats.loose == 0 && !cur.draws.empty())
++    stats.result = Result::Cut;
++  else if (stats.jumped >= 4 && stats.jumped * 2 >= stats.moved)
++    stats.result = Result::Cut;
++  else if (vsPairs.empty() && xfPairs.empty())
++    stats.result = Result::Still;
++  else
++    stats.result = Result::Blend;
++  g_stats = stats;
++  if (stats.result != Result::Blend)
++    return stats.result;
++
++  for (size_t n = 0; n < count; ++n) {
++    const float t = std::clamp(phases[n], 0.f, 1.f);
++    auto buf = pooled_buffer(size);
++    std::memcpy(buf->data(), cur.uniforms.data(), size);
++    for (const VsPair& pair : vsPairs) {
++      Vs& o = *reinterpret_cast<Vs*>(buf->data() + pair.cur);
++      const Vs& a = vs_at(prev.uniforms, pair.prev);
++      const Vs& b = vs_at(cur.uniforms, pair.cur);
++      if (pair.mask & 1u)
++        lerp(o.posnormalmatrix[0], a.posnormalmatrix[0], b.posnormalmatrix[0], 24, t);
++      if (pair.mask & 2u)
++        lerp(o.projection[0], a.projection[0], b.projection[0], 16, t);
++      for (uint32_t g = 0; g < kTexGens; ++g)
++        if (pair.mask & (4u << g))
++          lerp(o.texmatrices[3 * g], a.texmatrices[3 * g], b.texmatrices[3 * g], 12, t);
++    }
++    for (const XfPair& pair : xfPairs) {
++      Xf& o = *reinterpret_cast<Xf*>(buf->data() + pair.cur);
++      const Xf& a = xf_at(prev.uniforms, pair.prev);
++      const Xf& b = xf_at(cur.uniforms, pair.cur);
++      for (uint32_t m = 0; m < 10u; ++m)
++        if (pair.pos & (1u << m))
++          lerp(o.transformmatrices[3 * m], a.transformmatrices[3 * m], b.transformmatrices[3 * m], 12, t);
++      for (uint32_t k = 0; k < 11u; ++k)
++        if (pair.tex & (1u << k)) {
++          const uint32_t row = 30u + 3u * k;
++          lerp(o.transformmatrices[row], a.transformmatrices[row], b.transformmatrices[row], 12, t);
++        }
++      for (uint32_t k = 0; k < 22u; ++k)
++        if (pair.post & (1u << k)) {
++          const uint32_t row = 3u * k;
++          const size_t rows = std::min<size_t>(3u, 64u - row);
++          lerp(o.posttransformmatrices[row], a.posttransformmatrices[row], b.posttransformmatrices[row], rows * 4u,
++               t);
++        }
++      for (uint32_t l = 0; l < 8u; ++l)
++        if (pair.lights & (1u << l)) {
++          lerp(o.lights[l].pos, a.lights[l].pos, b.lights[l].pos, 3, t);
++          lerp(o.lights[l].dir, a.lights[l].dir, b.lights[l].dir, 3, t);
++        }
++    }
++    out.push_back(std::move(buf));
++  }
++  return Result::Blend;
++}
++
++Stats last_stats() noexcept { return g_stats; }
++} // namespace aurora::gfx::interp
+diff --git a/graphics/aurora/lib/gfx/interp.hpp b/graphics/aurora/lib/gfx/interp.hpp
+new file mode 100644
+index 0000000..4308023
+--- /dev/null
++++ b/graphics/aurora/lib/gfx/interp.hpp
+@@ -0,0 +1,53 @@
++#pragma once
++
++// GXRuntime recomp patch: frame interpolation. When the screen refreshes
++// faster than the game draws (120 Hz against its 60), the frames in between
++// replay the game frame's own draw packet with each draw's matrices blended
++// from the previous frame's (common.cpp end_frame). This part keeps each
++// frame's draws and uniforms, matches the draws of one frame to the last's,
++// and builds the blended uniform buffers.
++
++#include <cstddef>
++#include <cstdint>
++#include <memory>
++#include <vector>
++
++namespace gxruntime::gxcore {
++struct DrawPlan;
++} // namespace gxruntime::gxcore
++
++namespace aurora::gfx::interp {
++using Uniforms = std::shared_ptr<const std::vector<uint8_t>>;
++
++// On while frames in between are wanted; takes effect at the next frame.
++void set_wanted(bool on) noexcept;
++// This frame's draws and uniforms are being kept (decided at begin_frame).
++bool recording() noexcept;
++
++// Render thread: a new frame, a uniform upload (its offset in the frame's
++// uniform buffer) and a draw's vertex and shared uniform offsets.
++void begin_frame() noexcept;
++void note_uniform(uint32_t offset, const uint8_t* data, size_t length) noexcept;
++void note_draw(const gxruntime::gxcore::DrawPlan& plan, uint32_t vsOffset, uint32_t xfOffset) noexcept;
++
++enum class Result : uint8_t {
++  Blend,       // the buffers are built
++  Still,       // nothing moved: the frames in between would be this one
++  Cut,         // the camera jumped: blending would smear two shots together
++  NoReference, // no previous frame to blend from
++};
++// One buffer per phase in (0, 1): this frame's uniforms (uniformSize bytes)
++// with every matched draw's matrices at t between the previous frame (0) and
++// this one (1). Anything but Blend leaves `out` empty: show this frame.
++Result build(const float* phases, size_t count, size_t uniformSize, std::vector<Uniforms>& out);
++
++struct Stats {
++  uint32_t draws = 0;   // this frame's draws with uniforms of their own
++  uint32_t matched = 0; // found in the previous frame by geometry
++  uint32_t loose = 0;   // found by state alone (geometry built each frame)
++  uint32_t moved = 0;   // whose position matrix changed
++  uint32_t jumped = 0;  // ... by too much to blend
++  Result result = Result::NoReference;
++};
++Stats last_stats() noexcept;
++} // namespace aurora::gfx::interp
 diff --git a/graphics/aurora/lib/gfx/pipeline_cache.cpp b/graphics/aurora/lib/gfx/pipeline_cache.cpp
 index 822a560..16ff80d 100644
 --- a/graphics/aurora/lib/gfx/pipeline_cache.cpp
@@ -9838,7 +11052,7 @@ index 9c2f7bb..6dd6411 100644
 +
  #endif
 diff --git a/include/gxruntime/aurora_backend.h b/include/gxruntime/aurora_backend.h
-index 6ef4cf4..cc5a18c 100644
+index 6ef4cf4..b8c460e 100644
 --- a/include/gxruntime/aurora_backend.h
 +++ b/include/gxruntime/aurora_backend.h
 @@ -5,6 +5,7 @@
@@ -9882,7 +11096,7 @@ index 6ef4cf4..cc5a18c 100644
  
  // C2: walk nonzero gxcore GapCounters into the process-global gap_report.
  // Call once before gap_report_write_json on the live Strikers path so
-@@ -40,6 +55,143 @@ void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user);
+@@ -40,6 +55,153 @@ void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user);
  // from shutdown (second call only bumps if counters grew).
  void dol_aurora_flush_gap_report(void);
  
@@ -10018,6 +11232,16 @@ index 6ef4cf4..cc5a18c 100644
 +void dol_aurora_set_widescreen_hud(bool edges);
 +// Audio queued ahead of the output before playback starts (latency vs. gaps).
 +void dol_aurora_set_audio_buffer_ms(int ms);
++// Frame rate (frames in between, blended from the last two game frames, on a
++// screen faster than the game's 60): 60 = off, anything else = the screen's
++// own rate. screen_refresh: the screen's rate in Hz, as measured (presenting
++// one picture several times in a row) or, before that, as reported;
++// measure_screen measures it again at the next frame. frames_between: they
++// are being drawn now.
++void dol_aurora_set_frame_rate(int hz);
++int dol_aurora_screen_refresh(void);
++void dol_aurora_measure_screen(void);
++bool dol_aurora_frames_between(void);
 +// The display aspect in use (4:3, 16:9, or the window's for stretch) and the
 +// window's size in pixels, for showing what a resolution choice means.
 +void dol_aurora_get_display_info(float* aspect, uint32_t* window_width,

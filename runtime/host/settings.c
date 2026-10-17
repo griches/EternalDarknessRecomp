@@ -11,7 +11,6 @@
 #include <string.h>
 
 Settings g_settings = {
-    .skip_intros = false,
     .aspect = 2,  // 16:9
     .widescreen_hud = true,
     .render_scale = 0,
@@ -81,9 +80,7 @@ void settings_load(void) {
         const char* key = trim(line);
         const char* value = trim(eq + 1);
         const int n = atoi(value);
-        if (strcmp(key, "skip_intros") == 0)
-            g_settings.skip_intros = n != 0;
-        else if (strcmp(key, "aspect") == 0)
+        if (strcmp(key, "aspect") == 0)
             g_settings.aspect = n == 1 ? 1 : 2;
         else if (strcmp(key, "widescreen_hud") == 0)
             g_settings.widescreen_hud = n != 0;
@@ -131,7 +128,6 @@ void settings_save(void) {
         return;
     }
     fprintf(f, "# Eternal Darkness settings (written by the launcher)\n");
-    fprintf(f, "skip_intros = %d\n", g_settings.skip_intros ? 1 : 0);
     fprintf(f, "aspect = %d\n", g_settings.aspect);
     fprintf(f, "widescreen_hud = %d\n", g_settings.widescreen_hud ? 1 : 0);
     fprintf(f, "render_scale = %d\n", g_settings.render_scale);

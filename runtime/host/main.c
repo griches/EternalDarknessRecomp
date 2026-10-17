@@ -531,9 +531,6 @@ int main(int argc, char** argv) {
                 return 0;
             }
             iso_path = launcher_iso;
-        } else if (g_settings.skip_intros && getenv("ED_SKIP_INTRO") == NULL &&
-                   getenv("ED_QUICKLOAD") == NULL) {
-            setenv("ED_SKIP_INTRO", "1", 1);
         }
     }
 #endif

@@ -404,7 +404,7 @@ void start_game(int slot) {
         if (slot != 0) {
             quickstate_request_load(slot_path(slot).c_str());
         } else {
-            hle_set_skip_intro(g_settings.skip_intros);
+            hle_set_skip_intro(false);
             quickstate_request_load(quickstate_boot_path());
         }
         g_close = true;
@@ -634,12 +634,6 @@ void build_options() {
                    "Original keeps the disc's soft, blocky maps.";
     shadows.change = [](int) { g_settings.sharp_shadows = !g_settings.sharp_shadows; };
     g_rows.push_back(shadows);
-
-    Row skip{"Skip intros", on_off(g_settings.skip_intros)};
-    skip.page = 1;
-    skip.note = "Skip the logo movies and the opening quote (next start).";
-    skip.change = [](int) { g_settings.skip_intros = !g_settings.skip_intros; };
-    g_rows.push_back(skip);
 
     if (g_options_return == Screen::Launcher && !g_disc_on_main) {
         Row disc = disc_row();
@@ -1212,8 +1206,6 @@ extern "C" bool frontend_run_launcher(const char* default_iso, char* iso_out,
     if (g_load_slot != 0) {
         // Boot straight into the save (the quick-state load at boot).
         setenv("ED_QUICKLOAD", slot_path(g_load_slot).c_str(), 1);
-    } else if (g_settings.skip_intros) {
-        setenv("ED_SKIP_INTRO", "1", 1);
     }
     return true;
 }

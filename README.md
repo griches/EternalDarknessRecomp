@@ -85,7 +85,7 @@ menu with four save slots (`saves/`), the same options, and a way back to the
 launcher. Menus work with the keyboard (arrows, Enter, Esc), a controller
 (d-pad or stick, A, B) or the mouse.
 
-Options (kept in `settings.ini`): skip intros, aspect ratio (4:3 or 16:9, the
+Options (kept in `settings.ini`): aspect ratio (4:3 or 16:9, the
 game's own two; it sets the game's widescreen option), widescreen HUD, resolution (each
 choice shows its size), fullscreen, on-screen FPS counter (off by default), baked shadows
 (Sharp: each room's light maps are upscaled 4x as it loads, with CMPR's blocks

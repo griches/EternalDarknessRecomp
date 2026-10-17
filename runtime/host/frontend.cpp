@@ -537,18 +537,34 @@ void build_options() {
         }
         return std::to_string(w) + "\u00d7" + std::to_string(h);
     };
+#ifdef __PROSPERO__
+    const char* const kNative = "Screen (";  // no window on a console
+#else
+    const char* const kNative = "Window (";
+#endif
     const std::string kScale[] = {
-        "Window (" + size_label(0) + ")", "720p (" + size_label(1) + ")",
+        kNative + size_label(0) + ")", "720p (" + size_label(1) + ")",
         "1080p (" + size_label(2) + ")", "1440p (" + size_label(3) + ")",
         "4K (" + size_label(4) + ")"};
 
+#ifndef __PROSPERO__
     Row full{"Fullscreen", on_off(g_settings.fullscreen)};
     full.section = "I \u00b7 Display";
     full.change = [](int) { g_settings.fullscreen = !g_settings.fullscreen; changed(); };
     g_rows.push_back(full);
+#endif
 
     Row scale{"Resolution", kScale[g_settings.render_scale]};
+#ifdef __PROSPERO__
+    // The PS5 has no window: the picture always fills the screen, so no
+    // Fullscreen row, and the section starts here.
+    scale.section = "I \u00b7 Display";
+#endif
+#ifdef __PROSPERO__
+    scale.note = "Screen draws at your TV's own resolution; the others draw at that size and scale to fit.";
+#else
     scale.note = "Window draws at your screen's own resolution; the others draw at that size and scale to fit.";
+#endif
     scale.change = [](int dir) { cycle(g_settings.render_scale, 5, dir); changed(); };
     g_rows.push_back(scale);
 

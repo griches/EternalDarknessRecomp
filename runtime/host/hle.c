@@ -20,6 +20,7 @@
 #include "host/hle_abi.h"
 #include "host/interrupt.h"
 #include "host/mmio.h"
+#include "host/quickstate.h"
 #include "host/sdk_map.h"
 #include "host/compat.h"
 #include "host/settings.h"
@@ -793,6 +794,52 @@ static void hle_LCStoreData(CPUState* cpu) {
 // Start+L+R soft reset remains implemented by the game's own input path.
 static void hle_OSGetResetButtonState(CPUState* cpu) {
     hle_set_u32(cpu, 0u);
+}
+
+// OSResetSystem(OS_RESET_RESTART) ends in __OSReboot, which reads the disc's
+// apploader to 0x81300000 and jumps to it to load the game again. ED restarts
+// itself this way (e.g. after a chapter), keeping its state in the range it
+// gave OSSetSaveRegion (PAL 0x80700000..0x81200000) and checking
+// OSGetResetCode at boot. Nothing at 0x813xxxxx is recompiled, so the guest
+// spun there for ever (Mac) or left recompiled code (PS5). quickstate.c
+// restarts the machine instead, from the boot state with that range put back;
+// until it does (at its next safe point) the guest waits here.
+static bool g_reboot_requested;
+
+// OSSetSaveRegion(start, end) is `stw r3, d(r13)`, `stw r4, d(r13)`: read the
+// two words it stores to.
+static bool save_region(CPUState* cpu, u32* start, u32* end) {
+    const u32 fn = sdk_symbol_address("OSSetSaveRegion");
+    if (fn == 0u)
+        return false;
+    u32 word[2];
+    for (u32 i = 0; i < 2u; i++) {
+        const u32 op = mem_read32(cpu, fn + 4u * i);
+        if ((op >> 26) != 36u || ((op >> 21) & 31u) != 3u + i ||
+            ((op >> 16) & 31u) != 13u)
+            return false;
+        word[i] = cpu->gpr[13] + (u32)(s32)(s16)(op & 0xFFFFu);
+    }
+    *start = mem_read32(cpu, word[0]);
+    *end = mem_read32(cpu, word[1]);
+    return true;
+}
+
+static void hle___OSReboot(CPUState* cpu) {
+    if (!g_reboot_requested) {
+        u32 start = 0, end = 0;
+        if (!save_region(cpu, &start, &end))
+            fprintf(stderr, "[reset] OSSetSaveRegion not found; keeping nothing\n");
+        if (!quickstate_request_reboot(cpu, start, end)) {
+            fprintf(stderr, "[reset] no boot state to restart from\n");
+            g_hle_passthrough = true;
+            return;
+        }
+        fprintf(stderr, "[reset] game restarting itself (save region 0x%08X..0x%08X)\n",
+                start, end);
+        g_reboot_requested = true;
+    }
+    g_hle_tail_call = true;  // stay at the entry until the restart
 }
 
 static void hle_salInitDsp(CPUState* cpu) {
@@ -3719,6 +3766,9 @@ static const HleAddrEntry kAddrHandlers[] = {
     // DSP boot handshake: polls a DSP mailbox bit that never changes without a
     // modeled DSP. Audio is routed through Aurora, so skip the hardware init.
     { 0u, hle_noop,                     "__OSInitAudioSystem" },
+    // Its counterpart on OSResetSystem: resets the DSP and waits for the reset
+    // bit to clear, which it never does here (the game over's restart hung).
+    { 0u, hle_noop,                     "__OSStopAudioSystem" },
     // AI sample-rate-converter calibration: times transitions of the AI sample
     // counter (__AIRegs[2]), which never ticks without modeled AI hardware.
     // Aurora owns audio, so skip the calibration (its result feeds only AI regs).
@@ -3769,6 +3819,7 @@ static const HleAddrEntry kAddrHandlers[] = {
     // intersection, so it is registered by its exact game address.
     { 0u, hle_CARDFormatAsync,           "CARDFormatAsync" },
     { 0u, hle_OSGetResetButtonState,    "OSGetResetButtonState" },
+    { 0u, hle___OSReboot,               "__OSReboot" },
     // Locked-cache DMA helpers. THP video decode writes into the 0xE0000000
     // scratch area and uses these to move rows into MEM1 texture planes.
     { 0u, hle_LCStoreBlocks,             "LCStoreBlocks" },
@@ -5229,6 +5280,7 @@ static void unstick_disc_streams(CPUState* cpu) {
 }
 
 void hle_state_loaded(CPUState* cpu) {
+    g_reboot_requested = false;
     for (u32 i = 0; i < g_callback_count; i++)
         delay_callback(cpu, (g_callback_read + i) % HLE_CALLBACK_QUEUE_CAPACITY);
     unstick_disc_streams(cpu);

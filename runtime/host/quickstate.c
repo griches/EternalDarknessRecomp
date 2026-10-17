@@ -102,7 +102,7 @@ static const QsBlob k_blobs[] = {
 };
 #define QS_BLOB_COUNT (sizeof k_blobs / sizeof k_blobs[0])
 
-typedef enum { QS_SAVE, QS_LOAD } QsKind;
+typedef enum { QS_SAVE, QS_LOAD, QS_REBOOT } QsKind;
 typedef struct {
     QsKind kind;
     char path[QS_PATH_MAX];
@@ -158,6 +158,51 @@ void quickstate_request_save(const char* path) {
 
 void quickstate_request_load(const char* path) {
     request(QS_LOAD, path);
+}
+
+// The game's own restart: the save region's bytes as they were when it asked,
+// put back over the boot state.
+static u8* g_keep;
+static u32 g_keep_offset;
+static u32 g_keep_size;
+
+bool quickstate_request_reboot(CPUState* cpu, u32 start, u32 end) {
+    if (!g_boot_saved || g_keep != NULL || g_queue_count == QS_QUEUE)
+        return false;
+    // Physical offsets: the region may be given cached (0x8...) or not (0xC...).
+    const u32 offset = start & 0x3FFFFFFFu;
+    const u32 limit = end & 0x3FFFFFFFu;
+    g_keep_offset = 0;
+    g_keep_size = 0;
+    if (start != 0u && limit > offset && limit <= cpu->ram_size) {
+        g_keep = (u8*)malloc(limit - offset);
+        if (g_keep == NULL)
+            return false;
+        memcpy(g_keep, cpu->ram + offset, limit - offset);
+        g_keep_offset = offset;
+        g_keep_size = limit - offset;
+    }
+    request(QS_REBOOT, QS_BOOT_PATH);
+    return true;
+}
+
+static bool load_state(CPUState* cpu, const char* path);
+
+static bool restart_machine(CPUState* cpu) {
+    const bool ok = load_state(cpu, QS_BOOT_PATH);
+    if (ok) {
+        if (g_keep != NULL)
+            memcpy(cpu->ram + g_keep_offset, g_keep, g_keep_size);
+        // What __OSReboot sets before it runs the apploader: OSGetResetCode
+        // answers 0x80000000 (restarted) while this byte is set.
+        mem_write8(cpu, 0x800030E2u, 1u);
+        fprintf(stderr, "[reset] restarted from %s, kept 0x%08X..0x%08X\n",
+                QS_BOOT_PATH, 0x80000000u | g_keep_offset,
+                0x80000000u | (g_keep_offset + g_keep_size));
+    }
+    free(g_keep);
+    g_keep = NULL;
+    return ok;
 }
 
 const char* quickstate_boot_path(void) {
@@ -685,6 +730,8 @@ bool quickstate_service(CPUState* cpu) {
     // and a queued save then sees the loaded machine.
     if (next.kind == QS_LOAD)
         return load_state(cpu, next.path);
+    if (next.kind == QS_REBOOT)
+        return restart_machine(cpu);
     save_state(cpu, next.path);
     return false;
 }

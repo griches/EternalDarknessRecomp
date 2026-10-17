@@ -31,6 +31,11 @@ void quickstate_request_load(const char* path);
 // game without restarting; NULL until it is saved.
 const char* quickstate_boot_path(void);
 
+// The game restarting itself (OSResetSystem's reboot, hle.c): the machine as
+// it booted, with guest memory [start, end) kept as it is now (the game's
+// OSSetSaveRegion; start 0 keeps nothing). False when there is no boot state.
+bool quickstate_request_reboot(CPUState* cpu, u32 start, u32 end);
+
 // Nonzero while a save or load waits for a safe point.
 extern int g_quickstate_pending;
 

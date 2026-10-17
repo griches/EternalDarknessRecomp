@@ -756,7 +756,7 @@ void build_in_game() {
                               (slot_used(g_slot) ? " \u203a" : " \u00b7 empty \u203a")};
     load.enabled = slot_used(g_slot);
     load.browse = true;
-    load.change =[](int dir) { g_slot = (g_slot - 1 + dir + 4) % 4 + 1; };
+    load.change = [](int dir) { g_slot = (g_slot - 1 + dir + 4) % 4 + 1; };
     load.activate = [] {
         quickstate_request_load(slot_path(g_slot).c_str());
         g_close = true;

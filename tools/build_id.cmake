@@ -3,7 +3,11 @@
 # the commit (or whether there are uncommitted changes) differs.
 execute_process(COMMAND git -C "${SRC}" rev-parse --short=7 HEAD
                 OUTPUT_VARIABLE commit OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-if(NOT commit)
+if(NOT commit AND EXISTS "${SRC}/.build-commit")
+    # A copy of the tree without .git (the Deck's and the PC's): the commit the
+    # copy was made from, written beside it by whoever copied it.
+    file(STRINGS "${SRC}/.build-commit" commit LIMIT_COUNT 1)
+elseif(NOT commit)
     set(commit "unknown")
 else()
     execute_process(COMMAND git -C "${SRC}" status --porcelain --untracked-files=no

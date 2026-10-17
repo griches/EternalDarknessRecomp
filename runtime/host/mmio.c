@@ -8,6 +8,7 @@
 #endif
 #include "gxruntime/efb_access.h"
 #include "gxruntime/exi.h"
+#include "gxruntime/gap_report.h"
 #include "gxruntime/guest_memory.h"
 #include "gxruntime/interrupts.h"
 #include "gxruntime/mi.h"
@@ -468,11 +469,137 @@ static bool exi_read_cb(void* user, CPUState* cpu, u32 ea, u8 size,
     return true;
 }
 
+// The console's own settings: the SRAM in the IPL chip (EXI channel 0, chip
+// select 1), which the OS reads once at boot. Nothing answered there, so the
+// read left zeros, and the game takes a zero sound flag as mono: new games
+// started in Mono. The chip now serves a blank SRAM with the sound set to
+// stereo, as a console set to stereo would. Writes land in it (the game's
+// Audio Mode writes the sound flag) and are kept in a file across runs when
+// the executable names one, as a console keeps its settings. The rest of the
+// chip (the clock) still finishes with no data, as before.
+#define EXI_IPL_CHIP 2u            // chip select 1, as the status mask has it
+#define IPL_SRAM_FIRST 0x800004u   // SRAM's first byte in the chip's addresses
+#define SRAM_SIZE 64u
+#define SRAM_FLAGS 0x13u
+#define SRAM_FLAG_STEREO 0x04u
+
+static struct {
+    u8 sram[SRAM_SIZE];
+    bool selected;
+    bool addressed;  // the first word after selecting is the address
+    bool in_sram;
+    u32 offset;      // the SRAM byte the next data goes to or comes from
+    bool changed;    // written since the file was saved
+} g_ipl;
+static char g_sram_path[1024];
+
+static void ipl_init(void) {
+    memset(&g_ipl, 0, sizeof g_ipl);
+    g_ipl.sram[SRAM_FLAGS] = SRAM_FLAG_STEREO;
+    // The two checksums cover bytes 0x0C-0x13 as big-endian halfwords.
+    u16 sum = 0, inverse = 0;
+    for (u32 i = 0x0Cu; i < 0x14u; i += 2u) {
+        const u16 half = (u16)(g_ipl.sram[i] << 8 | g_ipl.sram[i + 1u]);
+        sum = (u16)(sum + half);
+        inverse = (u16)(inverse + (u16)~half);
+    }
+    g_ipl.sram[0] = (u8)(sum >> 8);
+    g_ipl.sram[1] = (u8)sum;
+    g_ipl.sram[2] = (u8)(inverse >> 8);
+    g_ipl.sram[3] = (u8)inverse;
+}
+
+void mmio_set_sram_path(const char* path) {
+    snprintf(g_sram_path, sizeof g_sram_path, "%s", path != NULL ? path : "");
+    FILE* f = g_sram_path[0] != '\0' ? fopen(g_sram_path, "rb") : NULL;
+    if (f == NULL)
+        return;
+    u8 saved[SRAM_SIZE];
+    if (fread(saved, 1, sizeof saved, f) == sizeof saved)
+        memcpy(g_ipl.sram, saved, sizeof saved);
+    fclose(f);
+}
+
+static void save_sram(void) {
+    g_ipl.changed = false;
+    if (g_sram_path[0] == '\0')
+        return;
+    char tmp[sizeof g_sram_path + 4];
+    snprintf(tmp, sizeof tmp, "%s.tmp", g_sram_path);
+    FILE* f = fopen(tmp, "wb");
+    if (f == NULL)
+        return;
+    const bool ok = fwrite(g_ipl.sram, 1, SRAM_SIZE, f) == SRAM_SIZE;
+    if (fclose(f) == 0 && ok)
+        rename(tmp, g_sram_path);
+    else
+        remove(tmp);
+}
+
+static bool exi_transfer_cb(void* user, DolExiTransfer* t) {
+    (void)user;
+    if (t->channel != 0u || t->chip_select != EXI_IPL_CHIP) {
+        char key[24];
+        snprintf(key, sizeof key, "ch%u:cs%u", t->channel, t->chip_select);
+        gap_report_note("exi", "unclaimed-device", key,
+                        t->cpu != NULL ? t->cpu->pc : 0u,
+                        "EXI transfer to a channel with no attached device");
+        return true;
+    }
+    if (!g_ipl.addressed) {
+        if (!t->dma && t->direction == DOL_EXI_TRANSFER_WRITE && t->length == 4u) {
+            const u32 address = (*t->immediate_data & 0x7FFFFFFFu) >> 6;
+            g_ipl.addressed = true;
+            g_ipl.in_sram = address >= IPL_SRAM_FIRST &&
+                            address < IPL_SRAM_FIRST + SRAM_SIZE;
+            g_ipl.offset = address - IPL_SRAM_FIRST;
+        }
+        return true;
+    }
+    if (!g_ipl.in_sram || t->direction == DOL_EXI_TRANSFER_READ_WRITE)
+        return true;
+    const bool read = t->direction == DOL_EXI_TRANSFER_READ;
+    u32 word = read ? 0u : *t->immediate_data;
+    for (u32 i = 0; i < t->length; i++, g_ipl.offset++) {
+        const bool inside = g_ipl.offset < SRAM_SIZE;
+        if (t->dma) {
+            const u32 at = GC_RAM_BASE | (t->dma_address + i);
+            if (read)
+                mem_write8(t->cpu, at, inside ? g_ipl.sram[g_ipl.offset] : 0u);
+            else if (inside) {
+                g_ipl.sram[g_ipl.offset] = mem_read8(t->cpu, at);
+                g_ipl.changed = true;
+            }
+        } else if (i < 4u) {
+            const u32 shift = 24u - 8u * i;
+            if (read)
+                word |= (u32)(inside ? g_ipl.sram[g_ipl.offset] : 0u) << shift;
+            else if (inside) {
+                g_ipl.sram[g_ipl.offset] = (u8)(word >> shift);
+                g_ipl.changed = true;
+            }
+        }
+    }
+    if (read && !t->dma)
+        *t->immediate_data = word;
+    return true;
+}
+
 static bool exi_write_cb(void* user, CPUState* cpu, u32 ea, u8 size,
                          u64 value) {
     DolExi* exi = (DolExi*)user;
     if (!dol_exi_mmio_contains(ea))
         return false;
+    if (ea == DOL_EXI_BASE) {
+        const bool selected =
+            (((u32)value & DOL_EXI_STATUS_CHIP_SELECT_MASK) >> 7) == EXI_IPL_CHIP;
+        if (selected != g_ipl.selected) {
+            g_ipl.selected = selected;
+            g_ipl.addressed = false;
+            if (!selected && g_ipl.changed)
+                save_sram();
+        }
+    }
     dol_exi_mmio_write(exi, cpu, ea, size, value);
     interrupt_set_exi_pending(dol_exi_interrupt_pending(exi));
     return true;
@@ -688,6 +815,8 @@ bool mmio_install(CPUState* cpu) {
     audio_init();
     interrupt_init();
     dol_exi_init(&g_exi);
+    dol_exi_set_transfer_callback(&g_exi, exi_transfer_cb, NULL);
+    ipl_init();
     dol_di_init(&g_di);
     dol_cp_init(&g_cp);
     dol_pe_init(&g_pe);

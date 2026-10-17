@@ -40,6 +40,10 @@ void mmio_fifo_dump_note(const char* what, u32 a, u32 b);
 
 void mmio_set_disc_present(bool present);
 
+// The console's settings (the SRAM mmio.c serves on EXI) kept in this 64-byte
+// file across runs. Without one they start blank with the sound on stereo.
+void mmio_set_sram_path(const char* path);
+
 // Translate a guest address backed by the runtime into a stable host pointer.
 // `available` receives the contiguous byte count remaining in that region.
 void* mmio_guest_pointer(CPUState* cpu, u32 address, u32* available);

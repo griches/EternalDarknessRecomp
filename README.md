@@ -73,6 +73,9 @@ Memory cards: slot A is `ed-GEDP01-slot-a.dolcard` (the disc's game ID in the
 name) in the folder the game runs from. A card beside it named
 `...-slot-b.dolcard`, or one given with `--card-b PATH` or `ED_CARD_B=path`,
 goes in slot B, and the game's Load Game and Save screens offer it there.
+The console's own settings sit beside slot A as `...-sram.bin`: the game takes
+its Audio Mode from them at start, as on a GameCube, and writes them when you
+change it. Without that file a new game starts in Stereo.
 `tools/gci.py` lists a card and moves saves in and out as GCI files (as
 Dolphin exports them; MaxDrive `.sav` and GameShark `.gcs` import too).
 

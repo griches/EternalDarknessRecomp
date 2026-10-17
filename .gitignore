@@ -4,6 +4,7 @@ generated/
 build*/
 .deps/
 *.dolcard
+*-sram.bin
 __pycache__/
 # Player settings and save slots (written by the launcher).
 settings.ini

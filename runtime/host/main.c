@@ -564,6 +564,16 @@ int main(int argc, char** argv) {
         }
         if (card_b_path != NULL && !hle_card_open_b(card_b_path))
             fprintf(stderr, "[card] slot B unavailable: %s\n", card_b_path);
+        // The console's settings beside slot A's card: -slot-a.dolcard becomes
+        // -sram.bin (any other card name gets .sram on the end).
+        char sram_path[1024];
+        const char* sram_tag = strstr(card_path, "-slot-a.dolcard");
+        if (sram_tag != NULL)
+            snprintf(sram_path, sizeof sram_path, "%.*s-sram.bin",
+                     (int)(sram_tag - card_path), card_path);
+        else
+            snprintf(sram_path, sizeof sram_path, "%s.sram", card_path);
+        mmio_set_sram_path(sram_path);
     }
     hle_install(&dolrecomp_cpu);
     if (iso_path == NULL)

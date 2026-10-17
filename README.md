@@ -8,7 +8,7 @@
 Windows and Linux / Steam Deck, built from **your own disc**. Nothing from the game
 is in this repository. The PlayStation 5 version is
 [PS5_EternalDarkness](https://github.com/griches/PS5_EternalDarkness).
-Version 0.8.1.
+Version 0.9.0.
 
 > **European disc only.** You need your own image (`.iso` or `.gcm`) of the
 > **European GameCube disc, `GEDP01`**. The USA disc (`GEDE01`) is not supported:
@@ -119,6 +119,10 @@ folder, or the Mac app's
   to 4K, or a fixed 720p, 1080p, 1440p or 4K, with full colour (no 6-bit banding).
 - **Widescreen**: the game's own 16:9 mode (more of the room at the sides, not
   stretched) with the HUD and prompts at the screen's edges; 4:3 too.
+- **Smoother on a fast screen**: on a 90, 120 Hz or faster screen, frames in
+  between the game's 60 (Options > Frame rate).
+- **Fast-forward the cutscenes**: while a movie or a scene in the black bars
+  plays, hold RB (Tab on the keyboard) to run it at up to four times speed.
 - **New baked shadows** (below): the rooms' light and shadow redrawn sharp.
 - **Crisp game text**: the game's lettering redrawn in two styles, *Sharp* or
   *Tome* (old typefaces), or *Original* as on the disc.
@@ -148,6 +152,7 @@ A controller works as it is; the keyboard works too. Two layouts and your own:
 | Quickcast | <img src="res/ui/glyphs/ink/xbox/north.png" width="30" alt="Y"> | <img src="res/ui/glyphs/ink/xbox/north.png" width="30" alt="Y"> | <img src="res/ui/glyphs/ink/kb/i.png" width="30" alt="I"> |
 | Spells | <img src="docs/glyphs/dpad.png" width="30" alt="D-pad"> | <img src="docs/glyphs/dpad.png" width="30" alt="D-pad"> | <img src="res/ui/glyphs/ink/kb/arrows.png" width="30" alt="Arrow keys"> |
 | Game's pause menu | <img src="res/ui/glyphs/ink/xbox/start.png" width="30" alt="Menu"> | <img src="res/ui/glyphs/ink/xbox/start.png" width="30" alt="Menu"> | <img src="res/ui/glyphs/ink/kb/enter.png" width="30" alt="Enter"> |
+| Fast-forward a cutscene (hold) | <img src="res/ui/glyphs/ink/xbox/rb.png" width="30" alt="RB"> | <img src="res/ui/glyphs/ink/xbox/rb.png" width="30" alt="RB"> | <img src="res/ui/glyphs/ink/kb/tab.png" width="30" alt="Tab"> |
 | This port's menu (saves, options) | <img src="res/ui/glyphs/ink/xbox/back.png" width="30" alt="View"> | <img src="res/ui/glyphs/ink/xbox/back.png" width="30" alt="View"> | <img src="res/ui/glyphs/ink/kb/escape.png" width="30" alt="Esc"> |
 
 PlayStation and Switch controllers use the same buttons in the same places, and

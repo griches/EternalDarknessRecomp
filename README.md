@@ -69,6 +69,13 @@ Quick save: 2 saves the whole machine to `build/runs/quick.state` and 1 loads
 it back, in the same session or after a restart (`ED_QUICKSTATE=path` picks
 another file). Memory-card saves are never touched by a load.
 
+Memory cards: slot A is `ed-GEDP01-slot-a.dolcard` (the disc's game ID in the
+name) in the folder the game runs from. A card beside it named
+`...-slot-b.dolcard`, or one given with `--card-b PATH` or `ED_CARD_B=path`,
+goes in slot B, and the game's Load Game and Save screens offer it there.
+`tools/gci.py` lists a card and moves saves in and out as GCI files (as
+Dolphin exports them; MaxDrive `.sav` and GameShark `.gcs` import too).
+
 ## Layout
 
 - `runtime/host/`: the game's host layer (SDK intercepts, interrupts, disc,

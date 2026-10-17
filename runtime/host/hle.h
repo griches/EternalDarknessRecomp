@@ -26,6 +26,9 @@ void hle_audio_api_report(void);
 // Configure the persistent slot-A card before hle_install. Failure leaves the
 // old no-card behavior available so the game can still continue without saves.
 bool hle_card_open(const char* path);
+// A second card in slot B (after hle_card_open; without one the slot is empty).
+bool hle_card_open_b(const char* path);
+// Both slots.
 void hle_card_close(void);
 
 // Inject one queued asynchronous SDK completion callback into guest execution.

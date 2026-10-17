@@ -359,6 +359,7 @@ int main(int argc, char** argv) {
     const char* dol_path = DEFAULT_DOL_PATH;
     const char* iso_path = NULL;
     const char* card_path = NULL;
+    const char* card_b_path = NULL;
     bool card_enabled = true;
     unsigned long long max_blocks = DEFAULT_MAX_BLOCKS;
     unsigned long long trace_every = 0;
@@ -389,6 +390,8 @@ int main(int argc, char** argv) {
             iso_path = argv[++i];
         } else if (strcmp(argv[i], "--card") == 0 && i + 1 < argc) {
             card_path = argv[++i];
+        } else if (strcmp(argv[i], "--card-b") == 0 && i + 1 < argc) {
+            card_b_path = argv[++i];
         } else if (strcmp(argv[i], "--no-launcher") == 0) {
             no_launcher = true;
         } else if (strcmp(argv[i], "--no-card") == 0) {
@@ -541,6 +544,26 @@ int main(int argc, char** argv) {
         if (!hle_card_open(card_path))
             fprintf(stderr,
                     "[card] slot A unavailable; continuing with no card\n");
+        // Slot B: --card-b or ED_CARD_B (made if it is not there yet), else
+        // slot A's file with -slot-b in its name when that file exists.
+        if (card_b_path == NULL)
+            card_b_path = getenv("ED_CARD_B");
+        char beside_a[1024];
+        if (card_b_path == NULL || card_b_path[0] == '\0') {
+            card_b_path = NULL;
+            const char* tag = strstr(card_path, "-slot-a.dolcard");
+            if (tag != NULL && strlen(card_path) < sizeof beside_a) {
+                strcpy(beside_a, card_path);
+                memcpy(beside_a + (tag - card_path), "-slot-b", 7);
+                FILE* f = fopen(beside_a, "rb");
+                if (f != NULL) {
+                    fclose(f);
+                    card_b_path = beside_a;
+                }
+            }
+        }
+        if (card_b_path != NULL && !hle_card_open_b(card_b_path))
+            fprintf(stderr, "[card] slot B unavailable: %s\n", card_b_path);
     }
     hle_install(&dolrecomp_cpu);
     if (iso_path == NULL)

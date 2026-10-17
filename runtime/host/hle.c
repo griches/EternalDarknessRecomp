@@ -412,6 +412,7 @@ static u32 g_callback_count;
 static bool g_callback_active;
 static HleSavedContext g_callback_context;
 static DolMemoryCard* g_memory_card;
+static DolMemoryCard* g_memory_card_b;  // slot B, when the executable gives it a card
 
 // A host DVD read is done the moment it is asked for, but its completion
 // callback waits until the thread that asked has moved past the call, as it
@@ -1201,8 +1202,8 @@ static void hle_DVDGetStreamPlayAddrAsync(CPUState* cpu) {
 // CARD handlers
 //
 // GXRuntime owns a persistent, game-independent virtual card. These handlers
-// translate the G4QE01 SDK ABI and guest structs onto that service. Slot A is
-// configured by the executable; slot B remains empty.
+// translate the G4QE01 SDK ABI and guest structs onto that service. The
+// executable configures slot A, and slot B when it has a card for it.
 // ---------------------------------------------------------------------------
 #define CARD_FILE_INFO_CHAN 0x00u
 #define CARD_FILE_INFO_FILENO 0x04u
@@ -1227,7 +1228,7 @@ static void hle_DVDGetStreamPlayAddrAsync(CPUState* cpu) {
 #define CARD_STAT_OFFSET_DATA 0x68u
 
 static DolMemoryCard* card_for_channel(s32 channel) {
-    return channel == 0 ? g_memory_card : NULL;
+    return channel == 0 ? g_memory_card : channel == 1 ? g_memory_card_b : NULL;
 }
 
 static s32 card_invalid_channel_result(s32 channel) {
@@ -4693,8 +4694,7 @@ static bool hle_dispatch(CPUState* cpu, u32 address) {
     return false;
 }
 
-bool hle_card_open(const char* path) {
-    hle_card_close();
+static DolMemoryCard* open_card(const char* path, const char* slot) {
     DolMemoryCardConfig config;
     memset(&config, 0, sizeof config);
     config.path = path;
@@ -4702,28 +4702,41 @@ bool hle_card_open(const char* path) {
     config.encoding = 0;
     memcpy(config.game_code, ED_GAME_ID, 4);
     memcpy(config.company, ED_GAME_ID + 4, 2);
-    g_memory_card = dol_card_open(&config);
-    if (g_memory_card == NULL)
-        return false;
+    DolMemoryCard* card = dol_card_open(&config);
+    if (card == NULL)
+        return NULL;
 
     u16 size_mbits = 0;
     u32 sector_size = 0;
-    if (dol_card_probe(g_memory_card, &size_mbits, &sector_size) !=
-        DOL_CARD_RESULT_READY) {
-        hle_card_close();
-        return false;
+    if (dol_card_probe(card, &size_mbits, &sector_size) != DOL_CARD_RESULT_READY) {
+        dol_card_close(card);
+        return NULL;
     }
     fprintf(stderr,
-            "[card] slot A: %s (%u Mbit, %u-byte sectors, serial %016llX)\n",
+            "[card] slot %s: %s (%u Mbit, %u-byte sectors, serial %016llX)\n", slot,
             path != NULL && path[0] != '\0' ? path : "(memory)",
             size_mbits, sector_size,
-            (unsigned long long)dol_card_serial(g_memory_card));
-    return true;
+            (unsigned long long)dol_card_serial(card));
+    return card;
+}
+
+bool hle_card_open(const char* path) {
+    hle_card_close();
+    g_memory_card = open_card(path, "A");
+    return g_memory_card != NULL;
+}
+
+bool hle_card_open_b(const char* path) {
+    dol_card_close(g_memory_card_b);
+    g_memory_card_b = open_card(path, "B");
+    return g_memory_card_b != NULL;
 }
 
 void hle_card_close(void) {
     dol_card_close(g_memory_card);
     g_memory_card = NULL;
+    dol_card_close(g_memory_card_b);
+    g_memory_card_b = NULL;
     g_callback_read = 0;
     g_callback_count = 0;
     g_callback_active = false;
@@ -5331,7 +5344,7 @@ void hle_install(CPUState* cpu) {
 // ---------------------------------------------------------------------------
 // The host halves of guest operations in flight: queued and running completion
 // callbacks (with the context a running one returns to), the DVD current
-// directory, skip-intro progress, and whether the card is mounted. The card's
+// directory, skip-intro progress, and whether each card is mounted. The cards'
 // contents are not part of a state: loading one never rewrites saves.
 typedef struct {
     HlePendingCallback callback_queue[HLE_CALLBACK_QUEUE_CAPACITY];
@@ -5346,6 +5359,7 @@ typedef struct {
     bool skip_intro_done;
     bool skip_intro_armed;
     bool card_mounted;
+    bool card_b_mounted;  // in what was padding, so older states read it as false
 } HleQuickState;
 
 size_t hle_state_size(void) {
@@ -5367,7 +5381,17 @@ void hle_state_save(void* out) {
     s.skip_intro_done = g_skip_intro_done;
     s.skip_intro_armed = g_skip_intro_armed;
     s.card_mounted = dol_card_mounted(g_memory_card);
+    s.card_b_mounted = dol_card_mounted(g_memory_card_b);
     memcpy(out, &s, sizeof s);
+}
+
+static void match_card_mount(DolMemoryCard* card, bool mounted) {
+    if (card == NULL || dol_card_mounted(card) == mounted)
+        return;
+    if (mounted)
+        dol_card_mount(card);
+    else
+        dol_card_unmount(card);
 }
 
 void hle_state_load(const void* in) {
@@ -5391,13 +5415,9 @@ void hle_state_load(const void* in) {
              s.dvd_cwd[0] == '/' ? s.dvd_cwd : "/");
     g_skip_intro_done = s.skip_intro_done;
     g_skip_intro_armed = s.skip_intro_armed;
-    // The guest's CARD library remembers mounting; match the host card to it.
-    if (g_memory_card != NULL && dol_card_mounted(g_memory_card) != s.card_mounted) {
-        if (s.card_mounted)
-            dol_card_mount(g_memory_card);
-        else
-            dol_card_unmount(g_memory_card);
-    }
+    // The guest's CARD library remembers mounting; match the host cards to it.
+    match_card_mount(g_memory_card, s.card_mounted);
+    match_card_mount(g_memory_card_b, s.card_b_mounted);
 }
 
 // The multi-stage GX shortcuts (ED_GX_HLE=1) exist only in the windowed build,

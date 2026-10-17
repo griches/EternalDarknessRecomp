@@ -792,8 +792,17 @@ static void hle_LCStoreData(CPUState* cpu) {
 
 // Desktop hosts have no GameCube chassis reset switch. Controller-based
 // Start+L+R soft reset remains implemented by the game's own input path.
+// ED_RESET_BUTTON=start,end (testing): held from frame start to end.
 static void hle_OSGetResetButtonState(CPUState* cpu) {
-    hle_set_u32(cpu, 0u);
+    static long long start = -1, end = -1;
+    if (start == -1) {
+        const char* env = getenv("ED_RESET_BUTTON");
+        start = -2;
+        if (env != NULL && sscanf(env, "%lld,%lld", &start, &end) != 2)
+            start = -2;
+    }
+    const long long frame = (long long)(cpu->timebase / 675000ull);
+    hle_set_u32(cpu, start >= 0 && frame >= start && frame < end ? 1u : 0u);
 }
 
 // OSResetSystem(OS_RESET_RESTART) ends in __OSReboot, which reads the disc's
@@ -830,7 +839,7 @@ static void hle___OSReboot(CPUState* cpu) {
         u32 start = 0, end = 0;
         if (!save_region(cpu, &start, &end))
             fprintf(stderr, "[reset] OSSetSaveRegion not found; keeping nothing\n");
-        if (!quickstate_request_reboot(cpu, start, end)) {
+        if (!quickstate_request_reboot(cpu, start, end, true)) {
             fprintf(stderr, "[reset] no boot state to restart from\n");
             g_hle_passthrough = true;
             return;
@@ -840,6 +849,25 @@ static void hle___OSReboot(CPUState* cpu) {
         g_reboot_requested = true;
     }
     g_hle_tail_call = true;  // stay at the entry until the restart
+}
+
+// OSResetSystem(OS_RESET_HOTRESET) and __OSReboot's fallback end in the SDK's
+// Reset(code << 3): it writes the PI reset register and spins, for the
+// hardware to reset the console and the IPL to boot the disc afresh. ED asks
+// for it from its reset-button and disc-error paths. Restart from the boot
+// state, keeping nothing (a cold start, as from the IPL).
+static void hle_Reset(CPUState* cpu) {
+    if (!g_reboot_requested) {
+        if (!quickstate_request_reboot(cpu, 0u, 0u, false)) {
+            fprintf(stderr, "[reset] hot reset: no boot state to restart from\n");
+            g_hle_passthrough = true;
+            return;
+        }
+        fprintf(stderr, "[reset] hot reset (code 0x%08X): starting the game again\n",
+                cpu->gpr[3] >> 3);
+        g_reboot_requested = true;
+    }
+    g_hle_tail_call = true;
 }
 
 static void hle_salInitDsp(CPUState* cpu) {
@@ -3820,6 +3848,7 @@ static const HleAddrEntry kAddrHandlers[] = {
     { 0u, hle_CARDFormatAsync,           "CARDFormatAsync" },
     { 0u, hle_OSGetResetButtonState,    "OSGetResetButtonState" },
     { 0u, hle___OSReboot,               "__OSReboot" },
+    { 0u, hle_Reset,                    "Reset" },
     // Locked-cache DMA helpers. THP video decode writes into the 0xE0000000
     // scratch area and uses these to move rows into MEM1 texture planes.
     { 0u, hle_LCStoreBlocks,             "LCStoreBlocks" },

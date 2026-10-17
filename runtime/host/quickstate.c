@@ -165,8 +165,9 @@ void quickstate_request_load(const char* path) {
 static u8* g_keep;
 static u32 g_keep_offset;
 static u32 g_keep_size;
+static bool g_rebooted;
 
-bool quickstate_request_reboot(CPUState* cpu, u32 start, u32 end) {
+bool quickstate_request_reboot(CPUState* cpu, u32 start, u32 end, bool rebooted) {
     if (!g_boot_saved || g_keep != NULL || g_queue_count == QS_QUEUE)
         return false;
     // Physical offsets: the region may be given cached (0x8...) or not (0xC...).
@@ -182,6 +183,7 @@ bool quickstate_request_reboot(CPUState* cpu, u32 start, u32 end) {
         g_keep_offset = offset;
         g_keep_size = limit - offset;
     }
+    g_rebooted = rebooted;
     request(QS_REBOOT, QS_BOOT_PATH);
     return true;
 }
@@ -195,10 +197,14 @@ static bool restart_machine(CPUState* cpu) {
             memcpy(cpu->ram + g_keep_offset, g_keep, g_keep_size);
         // What __OSReboot sets before it runs the apploader: OSGetResetCode
         // answers 0x80000000 (restarted) while this byte is set.
-        mem_write8(cpu, 0x800030E2u, 1u);
-        fprintf(stderr, "[reset] restarted from %s, kept 0x%08X..0x%08X\n",
-                QS_BOOT_PATH, 0x80000000u | g_keep_offset,
-                0x80000000u | (g_keep_offset + g_keep_size));
+        if (g_rebooted)
+            mem_write8(cpu, 0x800030E2u, 1u);
+        if (g_keep_size != 0u)
+            fprintf(stderr, "[reset] restarted from %s, kept 0x%08X..0x%08X\n",
+                    QS_BOOT_PATH, 0x80000000u | g_keep_offset,
+                    0x80000000u | (g_keep_offset + g_keep_size));
+        else
+            fprintf(stderr, "[reset] restarted from %s\n", QS_BOOT_PATH);
     }
     free(g_keep);
     g_keep = NULL;

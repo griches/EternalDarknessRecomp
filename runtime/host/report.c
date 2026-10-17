@@ -149,7 +149,7 @@ static THREAD_RET tee_main(void* arg) {
 }
 
 // fd (1 or 2) through a pipe to its tee thread; untouched if anything fails.
-static void tee(int fd, Tee* t) {
+static void log_through_pipe(int fd, Tee* t) {
     int fds[2];
 #ifdef _WIN32
     if (_pipe(fds, 65536, _O_BINARY) != 0)
@@ -373,8 +373,8 @@ void report_init(void) {
     lock_init(&g_write_lock);
     g_tee[0].to = g_tee[1].to = -1;
     if (getenv("ED_NO_LOG_TEE") == NULL) {
-        tee(1, &g_tee[0]);
-        tee(2, &g_tee[1]);
+        log_through_pipe(1, &g_tee[0]);
+        log_through_pipe(2, &g_tee[1]);
         atexit(untee);
     }
     install_crash_handlers();

@@ -87,7 +87,7 @@ launcher. Menus work with the keyboard (arrows, Enter, Esc), a controller
 
 Options (kept in `settings.ini`): skip intros, aspect ratio (4:3 or 16:9, the
 game's own two; it sets the game's widescreen option), widescreen HUD, resolution (each
-choice shows its size), fullscreen, on-screen FPS counter, baked shadows
+choice shows its size), fullscreen, on-screen FPS counter (off by default), baked shadows
 (Sharp: each room's light maps are upscaled 4x as it loads, with CMPR's blocks
 evened out and edge-directed doubling, so window light and shadows on the
 walls and floors have clean edges; Original: as on the disc), music and

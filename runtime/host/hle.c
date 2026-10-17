@@ -4996,6 +4996,11 @@ static void install_msl_memory_hle(CPUState* cpu) {
 static void hle_xfb_reader_notify(CPUState* cpu) {
 #ifdef ED_AURORA
     dol_aurora_xfb_ram_sync(cpu->gpr[3]);
+    // It converts the XFB (r3) to a whole-frame RGB565 texture (r4), 640x528
+    // on PAL, which it then draws with point sampling over the screen, fading
+    // it out: the end of the prologue's logo shot dropped to that blocky
+    // low-res picture. Draw the copy itself, at render resolution, instead.
+    dol_aurora_xfb_texture(cpu->gpr[3], cpu->gpr[4]);
 #else
     (void)cpu;
 #endif

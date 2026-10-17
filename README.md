@@ -1,21 +1,58 @@
 # Eternal Darkness Recomp
 
-A static recompilation of **Eternal Darkness: Sanity's Requiem** (GameCube):
-a native game built from **your own disc**. The game's PowerPC code is
-translated to C by [DolRecomp](https://github.com/ExpansionPak/DolRecomp)
-and runs on [GXRuntime](https://github.com/aharonahdoot/GXRuntime) with the
-Aurora renderer.
+**Eternal Darkness: Sanity's Requiem** (GameCube) as a native game for Mac,
+Windows and Linux / Steam Deck, built from **your own disc**. Nothing from the
+game is in this repository. The PS5 version is
+[PS5_EternalDarkness](https://github.com/griches/PS5_EternalDarkness).
 
-No game data is in this repository. `generated/` (code translated from your
-disc) and `dump/` (your disc image) stay on your machine.
+## Quick start
 
-Platforms: Mac (Apple silicon), Windows and Linux / Steam Deck, all from this
-repository. Supported discs: Europe `GEDP01` and USA `GEDE01`. The game plays
-through with its music, voices, movies and effects; widescreen, higher
-resolutions, HD texture packs, sharper baked shadows and remappable controls
-are in the launcher's Options. The PS5 port is a separate repository.
+You need your own disc image (`.iso` or `.gcm`): Europe `GEDP01` or USA `GEDE01`.
 
-## Build
+**Mac (Apple silicon, macOS 13+)**
+1. Unzip `EternalDarkness-mac-....zip` and move **Eternal Darkness.app** to Applications.
+2. The first time, right-click the app, choose **Open**, then **Open** again (it is not notarised).
+3. Drop your disc image on its window. It builds the game from it (a minute or two), then starts.
+
+**Steam Deck / Linux**
+1. Copy the game folder somewhere (for example `~/Games/EternalDarkness`) and put your disc image in it.
+2. Run `play.sh`. On a Deck: Desktop Mode, Steam > Add a Non-Steam Game > `play.sh`, then play it from Game Mode.
+   The first start builds the game (about half a minute).
+
+**Windows**: build it from source (below), then run `play.bat`.
+
+**HD textures**
+1. Get a Dolphin HD texture pack for Eternal Darkness (a folder of `tex1_....png` files).
+2. Copy those files (any subfolders are fine) into a folder called `textures`:
+   - Mac app: `~/Library/Application Support/Eternal Darkness/textures`
+   - Everywhere else: `textures/` in the game folder, next to `res/`
+3. Start the game again. Options > HD textures turns the pack on and off.
+
+**Playing**
+- The launcher: **Play** (Continue, New game or a save slot) and **Options**.
+- In the game, **Esc** or the controller's **Back / Select / Create** button opens the pause
+  menu: four save slots, Options, Quit.
+- Keyboard: arrows = d-pad, J = A, K = B, U = X, I = Y, Q = Z, E/R = L/R, Enter = Start.
+  Controllers work as they are.
+- Your saves stay in the game folder (the Mac app's is `~/Library/Application Support/Eternal Darkness`):
+  `saves/` (the pause menu's slots) and `ed-GEDP01-slot-a.dolcard` (the game's memory card;
+  `...-slot-b.dolcard` is slot B).
+
+**If something goes wrong**: when the game stops responding, stops or crashes it
+writes a report to `saves/reports/` in the game folder (for a hang, with a `.state`
+of that moment). Send those files with a few words on what you were doing.
+
+## About
+
+The game's PowerPC code is translated to C by
+[DolRecomp](https://github.com/ExpansionPak/DolRecomp) and runs on
+[GXRuntime](https://github.com/aharonahdoot/GXRuntime) with the Aurora renderer.
+`generated/` (code translated from your disc) and `dump/` (your disc image)
+stay on your machine. The game plays through with its music, voices, movies and
+effects; widescreen, higher resolutions, HD texture packs, sharper baked shadows
+and remappable controls are in the launcher's Options.
+
+## Building from source
 
 All platforms start the same way:
 

@@ -574,11 +574,22 @@ void build_options() {
     g_rows.push_back(scale);
 
     // Frames in between the game's own 60 a second (the renderer blends the
-    // last two) on a faster screen. The rate is the screen's: measured as the
-    // options open, so a refresh rate changed meanwhile shows here.
+    // last two) on a faster screen. The choices are the screen's: its rate,
+    // measured as the options open (so a refresh rate changed meanwhile shows
+    // here), and in fullscreen on a PC every faster rate the display has,
+    // which it is switched to.
+    int choices[8];
+    const int count = dol_aurora_frame_rate_choices(choices, 8);
     const int screen_hz = dol_aurora_screen_refresh();
-    const bool faster = screen_hz >= 75;
-    Row rate{"Frame rate", g_settings.frame_rate != 60 && faster ? std::to_string(screen_hz) : "60"};
+    const bool faster = count > 1;
+    int shown = 60;
+    if (g_settings.frame_rate != 60 && faster) {
+        shown = screen_hz >= 75 ? screen_hz : choices[count - 1];
+        for (int i = 0; i < count; i++)
+            if (choices[i] == g_settings.frame_rate)
+                shown = g_settings.frame_rate;
+    }
+    Row rate{"Frame rate", std::to_string(shown)};
     rate.enabled = faster;
     if (faster) {
         rate.note = "Above 60, frames are drawn between the game's own, blended from the last two: "
@@ -595,8 +606,13 @@ void build_options() {
                               " Hz: smoother motion needs a faster one.";
 #endif
     }
-    rate.change = [screen_hz](int) {
-        g_settings.frame_rate = g_settings.frame_rate == 60 ? screen_hz : 60;
+    rate.change = [choices, count, shown](int dir) {
+        int at = count - 1;
+        for (int i = 0; i < count; i++)
+            if (choices[i] == shown)
+                at = i;
+        cycle(at, count, dir);
+        g_settings.frame_rate = choices[at];
         changed();
     };
     g_rows.push_back(rate);

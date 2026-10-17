@@ -5696,7 +5696,7 @@ index b741e17..ceb1ce9 100644
  // window/swapchain native size. Pass 0,0 to clear. Applied immediately when
  // a window exists (recreates g_frameBuffer).
 diff --git a/graphics/frontend/include/gxruntime/aurora_recomp/render_sink.hpp b/graphics/frontend/include/gxruntime/aurora_recomp/render_sink.hpp
-index 88110c8..68269a3 100644
+index 88110c8..68349dd 100644
 --- a/graphics/frontend/include/gxruntime/aurora_recomp/render_sink.hpp
 +++ b/graphics/frontend/include/gxruntime/aurora_recomp/render_sink.hpp
 @@ -1,7 +1,11 @@
@@ -5924,15 +5924,20 @@ index 88110c8..68269a3 100644
  
    const std::vector<ConsumedDraw>& draws() const { return draws_; }
    unsigned long long packets() const { return packets_; }
-@@ -393,6 +554,7 @@ public:
+@@ -393,6 +554,12 @@ public:
    bool cull_all() const { return cull_all_; }
  
    const char* failure_reason() const { return failure_reason_; }
-+  void clear_failure() { failure_reason_ = nullptr; }
++  // After a rejected stream (the frontend starts again): no failure, and no
++  // packet order to keep to.
++  void clear_failure() {
++    failure_reason_ = nullptr;
++    has_last_sequence_ = false;
++  }
    const RenderPacket& failed_packet() const { return failed_packet_; }
  
  private:
-@@ -406,12 +568,34 @@ private:
+@@ -406,12 +573,34 @@ private:
    // Assemble `draw` (if its trailing spans are in) and fold the result into the
    // cumulative counters, guarded by back_assembled_ so a draw is counted once.
    void accumulate_assembly(const ConsumedDraw& draw);
@@ -5967,7 +5972,7 @@ index 88110c8..68269a3 100644
    ConsumedTexture bound_texture_{};
    ConsumedTexture bound_textures_[ConsumedDraw::kMaxTexmaps]{}; // per-texmap slot
    bool cull_all_ = false;
-@@ -517,6 +701,9 @@ std::uint32_t build_array_sizes(const ConsumedDraw& draw, std::uint32_t* out,
+@@ -517,6 +706,9 @@ std::uint32_t build_array_sizes(const ConsumedDraw& draw, std::uint32_t* out,
  
  RenderPacket make_render_packet(std::uint32_t sequence,
                                  const DolGxRecompTraceEvent& event);
@@ -6158,7 +6163,7 @@ index 56ea697..1ef3293 100644
  
  } // namespace gxruntime::aurora_recomp::trace
 diff --git a/graphics/frontend/src/render_sink.cpp b/graphics/frontend/src/render_sink.cpp
-index 2ef5b3d..add8f04 100644
+index 2ef5b3d..314e971 100644
 --- a/graphics/frontend/src/render_sink.cpp
 +++ b/graphics/frontend/src/render_sink.cpp
 @@ -1,10 +1,65 @@
@@ -6238,7 +6243,20 @@ index 2ef5b3d..add8f04 100644
    total_draws_ = 0;
    total_vertices_ = 0;
    payload_bytes_ = 0;
-@@ -82,12 +141,14 @@ bool ConsumingAuroraRenderSink::submit_packet(const RenderPacket& packet) {
+@@ -63,7 +122,11 @@ void ConsumingAuroraRenderSink::reset() {
+ }
+ 
+ bool ConsumingAuroraRenderSink::submit_packet(const RenderPacket& packet) {
+-  if (has_last_sequence_ && packet.sequence <= last_sequence_)
++  // The frontend's 32-bit packet count wraps after about 4.3 billion packets
++  // (an hour or two of play; the renderer stopped for good there): compare
++  // the distance, which survives the wrap, not the values.
++  if (has_last_sequence_ &&
++      static_cast<std::int32_t>(packet.sequence - last_sequence_) <= 0)
+     return fail("non-monotonic packet sequence", packet);
+   has_last_sequence_ = true;
+   last_sequence_ = packet.sequence;
+@@ -82,12 +145,14 @@ bool ConsumingAuroraRenderSink::submit_packet(const RenderPacket& packet) {
        if (packet.state.index < kArrayCount) {
          arrays_[packet.state.index].base_valid = true;
          arrays_[packet.state.index].base = packet.state.value;
@@ -6253,7 +6271,7 @@ index 2ef5b3d..add8f04 100644
        }
        break;
      case RenderStateKind::CullAll:
-@@ -109,10 +170,23 @@ bool ConsumingAuroraRenderSink::submit_packet(const RenderPacket& packet) {
+@@ -109,10 +174,23 @@ bool ConsumingAuroraRenderSink::submit_packet(const RenderPacket& packet) {
        // AFTER the draw it belongs to. So a draw's real array inputs are its
        // spans, not every bound array. Append the read array to the most recent
        // draw and resolve its exact byte span.
@@ -6280,7 +6298,7 @@ index 2ef5b3d..add8f04 100644
            ConsumedArrayInput& input = draw.arrays[draw.array_input_count++];
            input.attr = packet.resource.index;
            input.base = binding.base;
-@@ -128,6 +202,7 @@ bool ConsumingAuroraRenderSink::submit_packet(const RenderPacket& packet) {
+@@ -128,6 +206,7 @@ bool ConsumingAuroraRenderSink::submit_packet(const RenderPacket& packet) {
        break;
      case RenderResourceKind::Texture:
        ++texture_count_;
@@ -6288,7 +6306,7 @@ index 2ef5b3d..add8f04 100644
        if (packet.resource.size == 0u)
          return fail("empty texture packet", packet);
        bound_texture_ = ConsumedTexture{
-@@ -176,6 +251,7 @@ bool ConsumingAuroraRenderSink::submit_packet(const RenderPacket& packet) {
+@@ -176,6 +255,7 @@ bool ConsumingAuroraRenderSink::submit_packet(const RenderPacket& packet) {
        break;
      case RenderResourceKind::Tlut:
        ++tlut_count_;
@@ -6296,7 +6314,7 @@ index 2ef5b3d..add8f04 100644
        if (packet.resource.size == 0u)
          return fail("empty tlut packet", packet);
        break;
-@@ -196,70 +272,55 @@ bool ConsumingAuroraRenderSink::submit_packet(const RenderPacket& packet) {
+@@ -196,70 +276,55 @@ bool ConsumingAuroraRenderSink::submit_packet(const RenderPacket& packet) {
        if (arrays_[i].base_valid && arrays_[i].stride_valid)
          active_mask |= (1u << i);
      }
@@ -6409,7 +6427,7 @@ index 2ef5b3d..add8f04 100644
            packet.draw.vertex_payload,
            packet.draw.vertex_payload + packet.draw.vertex_payload_size);
        payload_bytes_ += packet.draw.vertex_payload_size;
-@@ -274,6 +335,103 @@ bool ConsumingAuroraRenderSink::submit_packet(const RenderPacket& packet) {
+@@ -274,6 +339,103 @@ bool ConsumingAuroraRenderSink::submit_packet(const RenderPacket& packet) {
    }
  }
  
@@ -6513,7 +6531,7 @@ index 2ef5b3d..add8f04 100644
  bool ConsumingAuroraRenderSink::resolve_array_input(
      ConsumedArrayInput& input) {
    input.resolved = false;
-@@ -296,6 +454,15 @@ bool ConsumingAuroraRenderSink::resolve_array_input(
+@@ -296,6 +458,15 @@ bool ConsumingAuroraRenderSink::resolve_array_input(
  void ConsumingAuroraRenderSink::accumulate_assembly(const ConsumedDraw& draw) {
    if (back_assembled_)
      return;
@@ -6529,7 +6547,7 @@ index 2ef5b3d..add8f04 100644
    // Count-only (nullptr): the live path does not retain per-vertex elements.
    const AssembledDrawStats stats = assemble_consumed_draw(draw, nullptr);
    ++assembled_draws_;
-@@ -316,14 +483,16 @@ void ConsumingAuroraRenderSink::accumulate_assembly(const ConsumedDraw& draw) {
+@@ -316,14 +487,16 @@ void ConsumingAuroraRenderSink::accumulate_assembly(const ConsumedDraw& draw) {
      storage_bytes_ += sizes[i];
    if (!stats.ok)
      ++assemble_failed_draws_;
@@ -6549,7 +6567,7 @@ index 2ef5b3d..add8f04 100644
  }
  
  void ConsumingAuroraRenderSink::tally_array_input(bool resolved) {
-@@ -522,11 +691,23 @@ std::uint32_t build_array_sizes(const ConsumedDraw& draw, std::uint32_t* out,
+@@ -522,11 +695,23 @@ std::uint32_t build_array_sizes(const ConsumedDraw& draw, std::uint32_t* out,
  
  RenderPacket make_render_packet(std::uint32_t sequence,
                                  const DolGxRecompTraceEvent& event) {
@@ -6578,7 +6596,7 @@ index 2ef5b3d..add8f04 100644
  
    switch (event.kind) {
    case DOL_GX_RECOMP_EVENT_FIFO_BYTES:
-@@ -681,18 +862,19 @@ RenderPacket make_render_packet(std::uint32_t sequence,
+@@ -681,18 +866,19 @@ RenderPacket make_render_packet(std::uint32_t sequence,
      break;
    case DOL_GX_RECOMP_EVENT_DRAW:
      packet.kind = RenderPacketKind::Draw;

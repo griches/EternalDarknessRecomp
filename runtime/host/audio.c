@@ -45,6 +45,12 @@ static bool g_waiting_for_command_list;
 static bool g_log;
 static u64 g_aid_chunks;
 
+static bool g_fast_forward;
+
+void audio_set_fast_forward(bool on) {
+    g_fast_forward = on;
+}
+
 void audio_init(void) {
     dol_ax_host_init(&g_ax_host);
     dol_audio_dma_init(&g_audio_dma);
@@ -232,6 +238,8 @@ void audio_poll(CPUState* cpu) {
         mute = getenv("ED_MUTE") != NULL;
     if (mute)
         memset(output, 0, sizeof output);
+    if (g_fast_forward)
+        return;
     dol_platform_audio_push(output, 8u);
 }
 

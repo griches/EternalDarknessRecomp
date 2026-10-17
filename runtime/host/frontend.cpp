@@ -12,6 +12,7 @@
 #include "host/texpack.h"
 
 #include <aurora/gfx.h>
+#include <aurora/imgui.h>
 #include <aurora/rmlui.hpp>
 #include <imgui.h>
 
@@ -38,6 +39,7 @@
 #include <ctime>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <string>
 #include <sys/stat.h>
 #include <vector>
@@ -1289,6 +1291,23 @@ extern "C" bool frontend_run_launcher(const char* default_iso, char* iso_out,
     return true;
 }
 
+// dp in ImGui's units (window points) for the overlays drawn through ImGui:
+// the display's content scale, as the menus use (2 on a 4K PS5, 1 on a Retina
+// Mac whose points are 2 pixels).
+float overlay_dp() {
+    float dp = 1.f;
+    int count = 0;
+    SDL_Window** windows = SDL_GetWindows(&count);
+    if (windows != nullptr && count > 0) {
+        const float density = SDL_GetWindowPixelDensity(windows[0]);
+        const float display = SDL_GetWindowDisplayScale(windows[0]);
+        if (density > 0.f && display > 0.f)
+            dp = display / density;
+    }
+    SDL_free(windows);
+    return dp;
+}
+
 // On-screen frames per second (game frames, i.e. calls here), refreshed each
 // second while the FPS counter option is on. With frames in between, the
 // screen's instead: every frame presented, which falls below the screen's
@@ -1317,18 +1336,7 @@ void update_fps_counter() {
     }
     if (shown_fps <= 0 || ImGui::GetCurrentContext() == nullptr)
         return;
-    // dp in ImGui's units (window points): the display's content scale, as the
-    // menus use (2 on a 4K PS5, 1 on a Retina Mac whose points are 2 pixels)
-    float dp = 1.f;
-    int count = 0;
-    SDL_Window** windows = SDL_GetWindows(&count);
-    if (windows != nullptr && count > 0) {
-        const float density = SDL_GetWindowPixelDensity(windows[0]);
-        const float display = SDL_GetWindowDisplayScale(windows[0]);
-        if (density > 0.f && display > 0.f)
-            dp = display / density;
-    }
-    SDL_free(windows);
+    const float dp = overlay_dp();
     ImFont* font = g_fps_font != nullptr ? g_fps_font : ImGui::GetFont();
     char text[32];
     std::snprintf(text, sizeof text, "%d FPS",
@@ -1346,8 +1354,51 @@ void update_fps_counter() {
     draw->AddText(font, size, ImVec2{at.x + pad.x, at.y + pad.y}, IM_COL32(0xf0, 0xe6, 0xc8, 0xff), text);
 }
 
+// While a cutscene plays, the fast-forward prompt at the screen's bottom right
+// (in the letterbox bar): RB's icon and a fast-forward sign, which brightens
+// while RB is held. Through ImGui, as the FPS counter.
+void update_fast_forward_prompt() {
+    const std::string file = controls::fast_forward_glyph();
+    if (file.empty() || ImGui::GetCurrentContext() == nullptr)
+        return;
+    static std::map<std::string, ImTextureID> icons;  // 0: the file did not load
+    auto it = icons.find(file);
+    if (it == icons.end()) {
+        std::vector<uint8_t> rgba;
+        uint32_t w = 0, h = 0;
+        ImTextureID id = 0;
+        if (load_png_rgba(res_dir() + "/ui/glyphs/" + file, &rgba, &w, &h))
+            id = aurora_imgui_add_texture(w, h, rgba.data());
+        it = icons.emplace(file, id).first;
+    }
+    if (it->second == 0)
+        return;
+    const float dp = overlay_dp();
+    const bool fast = controls::fast_forwarding();
+    const ImVec2 screen = ImGui::GetMainViewport()->Size;
+    const float icon = 44.f * dp;
+    const float arrow = 14.f * dp;  // each triangle's width; height is icon / 2
+    const float gap = 8.f * dp;
+    const float right = screen.x - 24.f * dp;
+    const float top = screen.y - 18.f * dp - icon;
+    const float sign_left = right - 2.f * arrow;
+    const float icon_left = sign_left - gap - icon;
+    ImDrawList* draw = ImGui::GetForegroundDrawList(ImGui::GetMainViewport());
+    const ImU32 alpha = fast ? 0xff : 0x99;
+    draw->AddImage(it->second, ImVec2{icon_left, top}, ImVec2{icon_left + icon, top + icon},
+                   ImVec2{0, 0}, ImVec2{1, 1}, IM_COL32(0xff, 0xff, 0xff, alpha));
+    const float mid = top + icon / 2.f;
+    const ImU32 cream = IM_COL32(0xf0, 0xe6, 0xc8, alpha);
+    for (int i = 0; i < 2; i++) {
+        const float x = sign_left + i * arrow;
+        draw->AddTriangleFilled(ImVec2{x, mid - icon / 4.f}, ImVec2{x + arrow, mid},
+                                ImVec2{x, mid + icon / 4.f}, cream);
+    }
+}
+
 extern "C" void frontend_frame(void) {
     update_fps_counter();
+    update_fast_forward_prompt();
     update_cursor();
     static bool menu_was_held = false;
     bool held[kButtonCount];

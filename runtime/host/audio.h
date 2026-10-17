@@ -16,6 +16,9 @@ void audio_set_vi_clock(u64 work_units_per_frame, u32 refresh_hz);
 // audio_chunks_per_second, instead of once per block.
 void audio_use_wall_clock(void);
 u32 audio_chunks_per_second(void);
+// While fast-forwarding the game's audio still runs (its timing drives the
+// movies), but nothing is sent to the speakers.
+void audio_set_fast_forward(bool on);
 
 bool audio_mmio_contains(u32 address);
 u64  audio_mmio_read(u32 address, u8 size);

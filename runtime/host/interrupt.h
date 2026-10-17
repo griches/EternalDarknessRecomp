@@ -18,6 +18,10 @@ void interrupt_init(void);
 // they are counted in blocks (headless, ED_FRAME_BLOCKS).
 bool interrupt_wall_clock(void);
 
+// Fast-forward: run guest time (retraces and audio) at up to speed times the
+// wall clock, as fast as the game keeps up, with the sound muted; 1 is normal.
+void interrupt_set_speed(u32 speed);
+
 // MMIO delegation for the runtime-owned PI/VI/PE interrupt and SI device models.
 bool interrupt_mmio_contains(u32 ea);
 u64  interrupt_mmio_read(u32 ea, u8 size);

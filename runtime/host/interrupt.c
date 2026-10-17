@@ -72,6 +72,17 @@ static bool wall_clock;
 static u64 wall_last_ns;
 static u64 wall_vi_rem;     // ns * 3 not yet turned into units (units = ns*3/50)
 static u64 wall_audio_rem;  // ns * chunks/s not yet turned into chunks
+// Fast-forward: guest time runs up to this many times the wall clock (1 is
+// normal speed; interrupt_poll).
+static u32 wall_speed = 1u;
+
+void interrupt_set_speed(u32 speed) {
+    wall_speed = speed != 0u ? speed : 1u;
+    audio_set_fast_forward(wall_speed > 1u);
+#ifdef ED_AURORA
+    dol_aurora_set_fast_forward(wall_speed > 1u);
+#endif
+}
 
 static u64 wall_ns(void) {
     struct timespec ts;
@@ -411,9 +422,8 @@ void interrupt_poll(CPUState* cpu) {
         wall_last_ns = now;
         if (elapsed > WALL_MAX_STEP_NS)
             elapsed = WALL_MAX_STEP_NS;
-        wall_vi_rem += elapsed * 3u;
-        vi_units = wall_vi_rem / 50u;
-        wall_vi_rem %= 50u;
+        const u64 real_elapsed = elapsed;
+        elapsed *= wall_speed;
         wall_audio_rem += elapsed * audio_chunks_per_second();
         // The time owed comes out as chunks. When a DMA buffer has ended and
         // the game has not yet answered its interrupt (with the next
@@ -422,14 +432,35 @@ void interrupt_poll(CPUState* cpu) {
         // crackle after any pause of the game thread, whose time owed came
         // out as one run of chunks, and through loads). Up to 120 ms of audio
         // (more than one step's 100 ms) waits; past that the DMA plays on, as
-        // the hardware would.
+        // the hardware would. Fast-forwarding never plays on: the time the
+        // game could not keep up with is dropped.
         const u64 hold = 120000000ull * audio_chunks_per_second();
+        u64 chunks = 0;
         while (wall_audio_rem >= 1000000000ull) {
-            if (audio_interrupt_pending() && wall_audio_rem < hold)
+            if (audio_interrupt_pending() &&
+                (wall_speed > 1u || wall_audio_rem < hold)) {
+                if (wall_audio_rem > hold)
+                    wall_audio_rem = hold;
                 break;
+            }
             wall_audio_rem -= 1000000000ull;
             audio_poll(cpu);
+            chunks++;
         }
+        // Fast-forwarding, the retraces follow the audio the game kept up
+        // with, never slower than real time: run on at four times the wall
+        // clock, they raced ahead of a game thread waiting at its presents
+        // (where the guest's audio thread cannot run either), and scenes
+        // timed by their narration stood still.
+        u64 vi_elapsed = elapsed;
+        if (wall_speed > 1u) {
+            vi_elapsed = chunks * 1000000000ull / audio_chunks_per_second();
+            if (vi_elapsed < real_elapsed)
+                vi_elapsed = real_elapsed;
+        }
+        wall_vi_rem += vi_elapsed * 3u;
+        vi_units = wall_vi_rem / 50u;
+        wall_vi_rem %= 50u;
     }
     if (pe_finish_countdown != 0) {
         if (wall_clock)

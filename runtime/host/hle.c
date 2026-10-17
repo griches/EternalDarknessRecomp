@@ -1026,7 +1026,15 @@ static void hle_ARQPostRequest(CPUState* cpu) {
 // DVDInit / DVDClose: the host owns the drive, so init is a no-op and close has
 // nothing to cancel. Both report success.
 static void hle_DVDInit(CPUState* cpu) { (void)cpu; }
-static void hle_DVDClose(CPUState* cpu) { hle_set_u32(cpu, 1); }  // TRUE
+// The DVDFileInfo of the open movie (/fmv/*.avi), 0 when none: a cutscene
+// for fast-forward (cutscene_playing).
+static u32 g_movie_file;
+
+static void hle_DVDClose(CPUState* cpu) {
+    if (hle_arg_u32(cpu, 0) == g_movie_file)
+        g_movie_file = 0u;
+    hle_set_u32(cpu, 1);  // TRUE
+}
 
 // The original status helpers consult the SDK DVD driver's `executing`
 // command pointer and error flags. Host reads bypass that driver entirely, so
@@ -1124,6 +1132,10 @@ static void hle_DVDOpen(CPUState* cpu) {
         fprintf(stderr, "[dvd] open '%s' (frame %llu)\n", path,
                 (unsigned long long)(cpu->timebase / 675000ull));
     skip_intro_note_open(cpu, path);
+    const size_t length = strlen(path);
+    if (strncmp(path, "/fmv/", 5) == 0 && length > 4u &&
+        strcmp(path + length - 4u, ".avi") == 0)
+        g_movie_file = hle_arg_u32(cpu, 1);
     hle_DVDFastOpen(cpu);
 }
 
@@ -3573,13 +3585,33 @@ static bool game_menu_open(CPUState* cpu) {
            (s32)mem_read32(cpu, sda + (u32)g_menu_depth_offset) > 0;
 }
 
+// A cutscene, where RB fast-forwards (controls.cpp): one of the movies is
+// open, or a scene plays in the letterbox bars. The game's scene flag is set
+// while one plays, and the bars' height is a float it keeps at 60 while they
+// show (also on the title screen, where the flag is clear) and 0 in play,
+// 0xBC into an object whose address one function loads. Both from the code
+// (find_letterbox); 0 when not found.
+static u32 g_letterbox_height;
+static s32 g_scene_flag_offset;
+static bool sda_ready(const CPUState* cpu);
+
+static bool cutscene_playing(CPUState* cpu) {
+    if (g_movie_file != 0u)
+        return true;
+    return g_letterbox_height != 0u && g_scene_flag_offset != 0 && sda_ready(cpu) &&
+           mem_read32(cpu, cpu->gpr[13] + (u32)g_scene_flag_offset) != 0u &&
+           guest_read_f32(cpu, g_letterbox_height) > 0.0f;
+}
+
 static void hle_PADRead(CPUState* cpu) {
     u32 out = hle_arg_u32(cpu, 0);
     DolPadState state[4];
     memset(state, 0, sizeof state);
     controls_set_game_menu(game_menu_open(cpu));
+    controls_set_cutscene(cutscene_playing(cpu));
     controls_note_frame(cpu->timebase / 675000ull);
     u32 motor_mask = dol_platform_pad_read(state);
+    interrupt_set_speed(controls_fast_forward() ? 4u : 1u);
     if (g_auto_input) {
         const u64 frame = cpu->timebase / 675000ull;
         if (frame >= 135u && ((frame - 135u) % 90u) < 12u) {
@@ -5275,6 +5307,26 @@ static void find_game_menu(CPUState* cpu) {
     g_menu_depth_offset = (s16)(depth_store & 0xFFFFu);
 }
 
+// The scene flag and the letterbox bars' height (cutscene_playing): the
+// flag's getter (lwz r3, flag(r13); blr), and a function that loads the bars'
+// object's address (lis r4; lis r3; addi r4, r4) and sets one of its flags
+// (li r0, 1).
+static void find_letterbox(CPUState* cpu) {
+    const bool pal = strcmp(ED_GAME_ID, "GEDP01") == 0;
+    const u32 getter = pal ? 0x8012A89Cu : 0x80131458u;
+    const u32 at = pal ? 0x801D41D8u : 0x801DFFD0u;
+    const u32 load = mem_read32(cpu, getter);
+    const u32 high = mem_read32(cpu, at);
+    const u32 low = mem_read32(cpu, at + 8u);
+    if ((load >> 16) != 0x806Du || mem_read32(cpu, getter + 4u) != 0x4E800020u ||
+        (high >> 16) != 0x3C80u || (mem_read32(cpu, at + 4u) >> 16) != 0x3C60u ||
+        (low >> 16) != 0x3884u || mem_read32(cpu, at + 12u) != 0x38000001u) {
+        fprintf(stderr, "[hle] letterbox not found: RB fast-forwards only the movies\n");
+        return;
+    }
+    g_scene_flag_offset = (s16)(load & 0xFFFFu);
+    g_letterbox_height = (high << 16) + (u32)(s32)(s16)(low & 0xFFFFu) + 0xBCu;
+}
 #endif
 
 static bool callback_pending(u32 address, s32 result) {
@@ -5321,6 +5373,7 @@ void hle_state_loaded(CPUState* cpu) {
     for (u32 i = 0; i < g_callback_count; i++)
         delay_callback(cpu, (g_callback_read + i) % HLE_CALLBACK_QUEUE_CAPACITY);
     unstick_disc_streams(cpu);
+    g_movie_file = 0u;  // a state saved during a movie: the next one sets it
 #ifdef ED_AURORA
     g_book.loaded = -1;  // the state's ARAM holds a book of either shape
     g_book.active = false;
@@ -5424,6 +5477,7 @@ void hle_install(CPUState* cpu) {
 #endif
 #ifdef ED_AURORA
     find_game_menu(cpu);
+    find_letterbox(cpu);
 #endif
     publish_codegen_options();
 }

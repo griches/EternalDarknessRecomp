@@ -105,6 +105,13 @@ Binding g_bindings[kActionCount];
 int g_layout = 0;
 // The game's pause menu is open (set on the game thread, read by the icons).
 std::atomic<bool> g_game_menu{false};
+// A cutscene is playing (set on the game thread), where holding RB
+// fast-forwards it; RB pressed in play does not count until let go (held on
+// from one scene, it goes on into the next).
+std::atomic<bool> g_cutscene{false};
+std::atomic<bool> g_fast_forward{false};
+bool g_rb_was = false;
+bool g_rb_from_play = false;
 SDL_Gamepad* g_pad = nullptr;
 
 int g_capture = -1;         // action waiting for an input, or -1
@@ -458,6 +465,22 @@ bool read_pad(DolPadState* state) {
             g_held_over[n] = native_value(pad, n) >= 64;
         g_tome_was = tome;
     }
+    // Fast-forward (not in the pause menu). The game does not see RB while it
+    // runs: held over, RB reads as let go until it is.
+    const bool cutscene = g_cutscene.load(std::memory_order_relaxed);
+    const bool rb = native_value(pad, kRB) >= 128;
+    if (rb && !g_rb_was && !cutscene)
+        g_rb_from_play = true;
+    if (!rb)
+        g_rb_from_play = false;
+    g_rb_was = rb;
+    const bool fast = cutscene && rb && !g_rb_from_play &&
+                      !g_game_menu.load(std::memory_order_relaxed);
+    if (fast)
+        g_held_over[kRB] = true;
+    if (fast != g_fast_forward.exchange(fast, std::memory_order_relaxed))
+        std::fprintf(stderr, "[controls] fast-forward %s at frame %llu\n",
+                     fast ? "on" : "off", g_frame.load());
     DolPadState s{};
     // The main stick first: toggled sprint ends when you stop moving.
     int x = stick(pad, SDL_GAMEPAD_AXIS_LEFTX, false);
@@ -640,6 +663,17 @@ std::string glyph_set() {
     return brand() == kPlayStation ? "ps" : brand() == kNintendo ? "switch" : "xbox";
 }
 
+std::string fast_forward_glyph() {
+    if (!g_cutscene.load(std::memory_order_relaxed))
+        return "";
+    const std::string set = glyph_set();
+    return set == "kb" ? "" : "ink/" + set + "/rb.png";
+}
+
+bool fast_forwarding() {
+    return g_fast_forward.load(std::memory_order_relaxed);
+}
+
 std::string glyph_for(int action, int preference, bool tome) {
     const std::string set = glyph_set();
     if (set == "kb") {
@@ -815,6 +849,16 @@ extern "C" void controls_init(void) {
 
 extern "C" void controls_note_frame(unsigned long long frame) {
     controls::g_frame.store(frame, std::memory_order_relaxed);
+}
+
+extern "C" void controls_set_cutscene(bool playing) {
+    if (controls::g_cutscene.exchange(playing, std::memory_order_relaxed) != playing)
+        std::fprintf(stderr, "[controls] cutscene %s at frame %llu\n",
+                     playing ? "started" : "over", controls::g_frame.load());
+}
+
+extern "C" bool controls_fast_forward(void) {
+    return controls::g_fast_forward.load(std::memory_order_relaxed);
 }
 
 extern "C" void controls_set_game_menu(bool open) {

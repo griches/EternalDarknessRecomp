@@ -56,6 +56,9 @@ void interrupt_commit_pe_finish(void);
 // Raise the PE finish interrupt after a short simulated GPU latency, for a
 // GXSetDrawDone that the guest does not wait on (see interrupt.c).
 void interrupt_defer_pe_finish(void);
+// The message queue the game's draw-done callback receives from (blocking,
+// inside the interrupt): the deferred finish waits until it holds a message.
+void interrupt_set_finish_queue(u32 queue);
 
 // Raise the Pixel Engine draw-sync token interrupt for `token`, as the GPU does
 // when it reaches a GXSetDrawSync token. Called from the GXSetDrawSync hook: the

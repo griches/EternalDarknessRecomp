@@ -98,6 +98,14 @@ void controls_set_cutscene(bool playing);
 bool controls_fast_forward(void);
 // The guest frame (timebase / 675000) of this pad read, for ED_PAD_SCRIPT.
 void controls_note_frame(unsigned long long frame);
+// Input recording, for replaying a stretch of play on another machine
+// (quickstate.c starts it once its save of the moment is written): every pad
+// read from here on goes to path as the game got it, with the camera's stick,
+// until stopped. ED_PAD_REPLAY=path plays such a file back instead of the
+// controller, from the same save.
+void controls_record_start(const char* path);
+void controls_record_stop(void);
+bool controls_recording(void);
 #ifdef __cplusplus
 }
 #endif

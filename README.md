@@ -123,6 +123,10 @@ folder, or the Mac app's
   between the game's 60 (Options > Frame rate).
 - **Fast-forward the cutscenes**: while a movie or a scene in the black bars
   plays, hold RB (Tab on the keyboard) to run it at up to four times speed.
+- **Camera options** (Options > Game > Camera): the game's own fixed cameras,
+  *Third person* (behind the character you play, turned with the right stick, up and down
+  for closer or further, and kept inside the room by the game's own collision)
+  or *First person* (through their eyes, looking around with the right stick). Both hold still while you aim.
 - **New baked shadows** (below): the rooms' light and shadow redrawn sharp.
 - **Crisp game text**: the game's lettering redrawn in two styles, *Sharp* or
   *Tome* (old typefaces), or *Original* as on the disc.
@@ -229,7 +233,8 @@ launcher. Menus work with the keyboard (arrows, Enter, Esc), a controller
 
 Options (kept in `settings.ini`): aspect ratio (4:3 or 16:9, the
 game's own two; it sets the game's widescreen option), widescreen HUD, resolution (each
-choice shows its size), fullscreen, on-screen FPS counter (off by default), baked shadows
+choice shows its size), fullscreen, on-screen FPS counter (off by default), camera
+(Original, Third person or First person; the right stick, or T F G H, turns it), baked shadows
 (Sharp: each room's light maps are upscaled 4x as it loads, with CMPR's blocks
 evened out and edge-directed doubling, so window light and shadows on the
 walls and floors have clean edges; Original: as on the disc), music and

@@ -17,7 +17,7 @@ extern "C" {
 void report_init(void);
 
 // Once the game runs (main.c): start the watchdog. No new game frame for
-// ED_HANG_SECONDS (default 20) while no menu holds the game is a hang.
+// ED_HANG_SECONDS (default 6) while no menu holds the game is a hang.
 void report_start_watchdog(void);
 
 // Each game frame (hle_frame_boundary): the game is alive.

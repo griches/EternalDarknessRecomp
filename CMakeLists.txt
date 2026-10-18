@@ -41,6 +41,7 @@ set(ED_HOST_SOURCES
     runtime/host/dtk.c
     runtime/host/interrupt.c
     runtime/host/settings.c
+    runtime/host/camera.c
     runtime/host/compat.c
 )
 set(ED_DISC_SOURCES

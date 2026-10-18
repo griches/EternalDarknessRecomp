@@ -29,6 +29,7 @@ typedef struct {
     bool target_toggle[3];
     int stick_deadzone[3];  // percent of the stick's travel ignored, per layout
     bool vibration;
+    int camera;           // 0 the game's own, 2 third person, 3 first person (camera.h)
     char controls_custom[512];  // custom bindings (controls.cpp format)
     char disc[1024];      // last disc image chosen in the launcher
 } Settings;

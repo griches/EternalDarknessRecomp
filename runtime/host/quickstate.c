@@ -32,6 +32,9 @@
 #include <time.h>
 
 #include "host/compat.h"
+#ifdef ED_AURORA
+#include "host/controls.h"
+#endif
 
 #define QS_MAGIC "EDQSTATE"
 #define QS_VERSION 1u
@@ -48,6 +51,12 @@ static bool g_boot_saved;
 // SDL scancodes are the USB HID keyboard usages.
 #define QS_KEY_LOAD 30  // '1'
 #define QS_KEY_SAVE 31  // '2'
+// Input recording (controls.c): F8 starts it (a save of the moment first, to
+// replay from) and stops it, as do the files saves/record-now and
+// saves/record-stop.
+#define QS_KEY_RECORD 65  // F8
+#define QS_RECORD_STATE "build/runs/record.state"
+#define QS_RECORD_PAD "build/runs/record.pad"
 // Blocks to wait for the GX FIFO to reach a command boundary before going
 // ahead anyway; the longest draw is written in a small fraction of this.
 #define QS_IDLE_PATIENCE 50000000u
@@ -249,6 +258,21 @@ void quickstate_init(void) {
     }
 }
 
+#ifdef ED_AURORA
+static bool g_record_pending;  // the save to record from is on its way
+
+static void toggle_recording(void) {
+    if (controls_recording() || g_record_pending) {
+        g_record_pending = false;
+        controls_record_stop();
+        return;
+    }
+    g_record_pending = true;
+    request(QS_SAVE, QS_RECORD_STATE);
+    fprintf(stderr, "[record] saving the moment to start from\n");
+}
+#endif
+
 void quickstate_poll(unsigned long long blocks) {
     g_blocks = blocks;
 #ifdef ED_AURORA
@@ -261,6 +285,11 @@ void quickstate_poll(unsigned long long blocks) {
         request(QS_LOAD, g_path);
     g_save_key_down = save_key;
     g_load_key_down = load_key;
+    static bool record_key_down;
+    const bool record_key = dol_aurora_key_down(QS_KEY_RECORD);
+    if (record_key && !record_key_down)
+        toggle_recording();
+    record_key_down = record_key;
 #endif
     if (g_save_signal) {
         g_save_signal = 0;
@@ -282,6 +311,18 @@ void quickstate_poll(unsigned long long blocks) {
             remove(trigger);
             quickstate_request_save(g_path);
         }
+#ifdef ED_AURORA
+        static const char* const kRecordFiles[2] = {"saves/record-now", "saves/record-stop"};
+        for (int i = 0; i < 2; i++) {
+            FILE* r = fopen(kRecordFiles[i], "rb");
+            if (r == NULL)
+                continue;
+            fclose(r);
+            remove(kRecordFiles[i]);
+            if ((i == 0) != (controls_recording() || g_record_pending))
+                toggle_recording();
+        }
+#endif
     }
     if (g_save_at_armed && blocks >= g_save_at) {
         g_save_at_armed = false;
@@ -532,6 +573,12 @@ static bool save_state(CPUState* cpu, const char* path) {
             now_ms() - start);
     if (strcmp(path, QS_BOOT_PATH) == 0)
         g_boot_saved = true;
+#ifdef ED_AURORA
+    if (g_record_pending && strcmp(path, QS_RECORD_STATE) == 0) {
+        g_record_pending = false;
+        controls_record_start(QS_RECORD_PAD);
+    }
+#endif
     return true;
 }
 

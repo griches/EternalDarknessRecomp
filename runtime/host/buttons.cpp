@@ -2,10 +2,10 @@
 // keeps its prompts' icons in one 512x64 CMPR sheet of 32x32 cells (GameCube
 // L, R, Y, X, A, B, the main stick and C-stick with direction arrows, Z, and
 // arrow tiles; the rest are magick runes). When gxcore decodes that sheet it
-// is redrawn at 1024x128 with the icons for the action each GameCube button
+// is redrawn at 2048x256 with the icons for the action each GameCube button
 // performs in the current controls layout (res/ui/glyphs), so "B Examine"
-// shows the button that examines. The sheet is stored upside down, so the
-// icons are drawn flipped.
+// shows the button that examines, and the text boxes' scroll arrows drawn
+// smooth. The sheet is stored upside down, so the icons are drawn flipped.
 #include "host/buttons.h"
 
 #include "gxruntime/aurora_backend.h"
@@ -29,7 +29,7 @@
 namespace {
 
 constexpr uint32_t kCmpr = 14;
-constexpr uint32_t kSheetW = 512, kSheetH = 64, kCell = 32, kScale = 2;
+constexpr uint32_t kSheetW = 512, kSheetH = 64, kCell = 32, kScale = 4;
 
 struct Image {
     uint32_t w = 0, h = 0;
@@ -107,6 +107,68 @@ void draw_cell(std::vector<uint8_t>& out, uint32_t col, uint32_t row, const Imag
         }
 }
 
+// The text boxes' scroll arrows (more above, more below): a white triangle
+// with a one-texel dark outline, alone in its cell, in hard 1-bit alpha.
+// Redrawn from its own shape: the white texels' box and the outline's, the
+// base on the wider side, each edge sampled 4x4 per output texel.
+void smooth_arrow(const uint8_t* rgba, std::vector<uint8_t>& out, uint32_t col, uint32_t row) {
+    int wx0 = kCell, wx1 = -1, wy0 = kCell, wy1 = -1, ox0 = kCell, ox1 = -1, oy0 = kCell, oy1 = -1;
+    for (int y = 0; y < static_cast<int>(kCell); y++)
+        for (int x = 0; x < static_cast<int>(kCell); x++) {
+            const uint8_t* p = rgba + ((row * kCell + y) * kSheetW + col * kCell + x) * 4;
+            if (p[3] == 0)
+                continue;
+            ox0 = std::min(ox0, x), ox1 = std::max(ox1, x), oy0 = std::min(oy0, y), oy1 = std::max(oy1, y);
+            if (p[0] > 200 && p[1] > 200 && p[2] > 200)
+                wx0 = std::min(wx0, x), wx1 = std::max(wx1, x), wy0 = std::min(wy0, y), wy1 = std::max(wy1, y);
+        }
+    if (wx1 < wx0 + 4 || wy1 < wy0 + 3)
+        return;  // not a triangle here
+    auto row_width = [&](int y) {
+        int n = 0;
+        for (int x = wx0; x <= wx1; x++) {
+            const uint8_t* p = rgba + ((row * kCell + y) * kSheetW + col * kCell + x) * 4;
+            n += p[3] != 0 && p[0] > 200;
+        }
+        return n;
+    };
+    const bool base_low = row_width(wy1) > row_width(wy0);  // base at the larger y
+    struct Tri {
+        float ax, ay, bx, by, cx, cy;
+    };
+    auto make = [&](int x0, int x1, int y0, int y1) {
+        const float l = static_cast<float>(x0), r = static_cast<float>(x1 + 1);
+        const float top = static_cast<float>(y0), bottom = static_cast<float>(y1 + 1);
+        const float mid = (l + r) * 0.5f;
+        return base_low ? Tri{mid, top, r, bottom, l, bottom} : Tri{mid, bottom, l, top, r, top};
+    };
+    const Tri outline = make(ox0, ox1, oy0, oy1), white = make(wx0, wx1, wy0, wy1);
+    auto inside = [](const Tri& t, float x, float y) {
+        const float e0 = (t.bx - t.ax) * (y - t.ay) - (t.by - t.ay) * (x - t.ax);
+        const float e1 = (t.cx - t.bx) * (y - t.by) - (t.cy - t.by) * (x - t.bx);
+        const float e2 = (t.ax - t.cx) * (y - t.cy) - (t.ay - t.cy) * (x - t.cx);
+        return (e0 >= 0 && e1 >= 0 && e2 >= 0) || (e0 <= 0 && e1 <= 0 && e2 <= 0);
+    };
+    const uint32_t size = kCell * kScale, ow = kSheetW * kScale;
+    for (uint32_t y = 0; y < size; y++)
+        for (uint32_t x = 0; x < size; x++) {
+            int in_outline = 0, in_white = 0;
+            for (int sy = 0; sy < 4; sy++)
+                for (int sx = 0; sx < 4; sx++) {
+                    const float fx = (static_cast<float>(x) + (sx + 0.5f) / 4.0f) / kScale;
+                    const float fy = (static_cast<float>(y) + (sy + 0.5f) / 4.0f) / kScale;
+                    in_outline += inside(outline, fx, fy);
+                    in_white += inside(white, fx, fy);
+                }
+            uint8_t* d = out.data() + ((row * size + y) * ow + col * size + x) * 4;
+            // White over the dark outline, by coverage.
+            const int a = std::max(in_outline, in_white);
+            const int v = a != 0 ? (24 * (a - in_white) + 255 * in_white) / a : 0;
+            d[0] = d[1] = d[2] = static_cast<uint8_t>(v);
+            d[3] = static_cast<uint8_t>(a * 255 / 16);
+        }
+}
+
 struct Cell {
     uint32_t col, row;
     int action;          // controls::Action, or -1 for a fixed icon
@@ -154,6 +216,8 @@ int apply(const uint8_t* rgba, uint32_t width, uint32_t height, uint8_t** out_rg
     for (uint32_t y = 0; y < oh; y++)
         for (uint32_t x = 0; x < ow; x++)
             std::memcpy(&out[(y * ow + x) * 4], rgba + ((y / kScale) * width + x / kScale) * 4, 4);
+    smooth_arrow(rgba, out, 6, 0);
+    smooth_arrow(rgba, out, 15, 0);
     const std::string set = controls::glyph_set();
     for (const Cell& cell : kCells) {
         std::string file;
@@ -167,6 +231,15 @@ int apply(const uint8_t* rgba, uint32_t width, uint32_t height, uint8_t** out_rg
             continue;  // unbound or no icon: keep the GameCube one
         if (const Image* icon = load_icon(file))
             draw_cell(out, cell.col, cell.row, *icon, cell.dim);
+    }
+    // ED_BUTTONS_DUMP=path.png: the redrawn sheet, as stored (upside down).
+    if (const char* dump = std::getenv("ED_BUTTONS_DUMP")) {
+        png_image png{};
+        png.version = PNG_IMAGE_VERSION;
+        png.width = ow;
+        png.height = oh;
+        png.format = PNG_FORMAT_RGBA;
+        png_image_write_to_file(&png, dump, 0, out.data(), 0, nullptr);
     }
     *out_rgba = static_cast<uint8_t*>(std::malloc(out.size()));
     if (*out_rgba == nullptr)

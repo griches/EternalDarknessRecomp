@@ -234,11 +234,25 @@ void interrupt_init(void) {
 #define PE_FINISH_STALL_NS 2000000ull  // a gap between polls this long is the host
 static u32 pe_finish_countdown;
 static u64 pe_finish_due_ns;
+// The time alone is a race: a game thread held up past it between
+// GXSetDrawDone and its send (a busy host, fast-forward's four frames to one)
+// let the callback find the queue empty and sleep with interrupts off, for
+// good. Once the queue is known the finish also waits for the message.
+static u32 pe_finish_queue;
+#define OS_MESSAGE_QUEUE_USED 28u  // OSMessageQueue.usedCount
+
+void interrupt_set_finish_queue(u32 queue) {
+    pe_finish_queue = queue;
+}
 
 void interrupt_defer_pe_finish(void) {
+    static long long wall_delay = -1;  // ED_PE_FINISH_US (tests: 0 races the send)
+    if (wall_delay < 0)
+        wall_delay = getenv("ED_PE_FINISH_US") != NULL ? atoll(getenv("ED_PE_FINISH_US")) * 1000ll
+                                                       : (long long)PE_FINISH_WALL_NS;
     if (pe_finish_countdown == 0) {
         pe_finish_countdown = PE_FINISH_LATENCY;
-        pe_finish_due_ns = wall_ns() + PE_FINISH_WALL_NS;
+        pe_finish_due_ns = wall_ns() + (u64)wall_delay;
     }
 }
 
@@ -478,8 +492,15 @@ void interrupt_poll(CPUState* cpu) {
             pe_finish_countdown = pe_finish_countdown > units
                                       ? pe_finish_countdown - (u32)units
                                       : 0;
-        if (pe_finish_countdown == 0)
-            interrupt_commit_pe_finish();
+        if (pe_finish_countdown == 0) {
+            static int unsafe = -1;  // ED_PE_FINISH_UNSAFE=1: the old race (tests)
+            if (unsafe < 0)
+                unsafe = getenv("ED_PE_FINISH_UNSAFE") != NULL;
+            if (!unsafe && pe_finish_queue != 0u && mem_read32(cpu, pe_finish_queue + OS_MESSAGE_QUEUE_USED) == 0u)
+                pe_finish_countdown = 1u;  // the send has not happened yet
+            else
+                interrupt_commit_pe_finish();
+        }
     }
 
     sync_audio_interrupt();

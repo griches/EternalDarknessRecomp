@@ -33,6 +33,7 @@
 #endif
 #include "host/compat.h"
 
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -47,6 +48,66 @@
 // --call mode: lr points here so the run loop detects the function's return
 // (blr -> pc == sentinel). Aligned, well outside any real code range.
 #define CALL_RETURN_SENTINEL 0x0BADF00Cu
+
+// hle_guest_call: lr points here, so the call's own return is seen (blr ->
+// pc == sentinel); a function that runs longer than the budget is abandoned.
+#define GUEST_CALL_SENTINEL 0x0BADF010u
+#define GUEST_CALL_MAX_BLOCKS 50000000u
+
+bool hle_guest_call(CPUState* cpu, u32 fn, const u32* args, int count, double f1, u32* result) {
+    return hle_guest_call_within(cpu, fn, args, count, f1, result, GUEST_CALL_MAX_BLOCKS);
+}
+
+bool hle_guest_call_within(CPUState* cpu, u32 fn, const u32* args, int count, double f1, u32* result,
+                           u32 max_blocks) {
+    // A thread that does not own the FPU traps on its first FP instruction and
+    // the OS hands it over; the call would, so do it first, and keep it.
+    if ((cpu->msr & 0x00002000u) == 0u) {  // MSR[FP]
+        cpu->srr0 = cpu->pc;
+        cpu->srr1 = cpu->msr;
+        interrupt_switch_fpu_context(cpu);
+    }
+    // Everything a call can change, up to and including the MSR.
+    const size_t span = offsetof(CPUState, srr0);
+    unsigned char saved[sizeof(CPUState)];
+    memcpy(saved, cpu, span);
+    const u32 exception = cpu->exception;
+    for (int i = 0; i < count && i < 8; i++)
+        cpu->gpr[3 + i] = args[i];
+    cpu->fpr[1] = f1;
+    cpu->ps1[1] = f1;
+    // Below the caller's stack, clear of anything it keeps there.
+    cpu->gpr[1] = (cpu->gpr[1] - 0x800u) & ~15u;
+    cpu->lr = GUEST_CALL_SENTINEL;
+    cpu->pc = fn;
+    bool ok = false;
+    u32 blocks_used = 0;
+    for (u32 blocks = 0; blocks < max_blocks; blocks++, blocks_used = blocks) {
+        if (cpu->pc == GUEST_CALL_SENTINEL) {
+            ok = true;
+            break;
+        }
+        if (!dolrecomp_call(cpu, cpu->pc))
+            break;
+        if (cpu->exception == PPC_EXC_SYSTEM_CALL) {  // as in the run loop
+            cpu->exception = exception;
+            ppc_rfi(cpu, cpu->pc);
+        } else if (cpu->exception != exception) {
+            break;
+        }
+    }
+    if (ok && result != NULL)
+        *result = cpu->gpr[3];
+    if (getenv("ED_GUEST_CALL_LOG") != NULL) {
+        static unsigned shown;
+        if (shown++ < 40u)
+            fprintf(stderr, "[guest-call] 0x%08X %s after %u blocks (pc 0x%08X)\n", fn, ok ? "returned" : "stopped",
+                    blocks_used, cpu->pc);
+    }
+    memcpy(cpu, saved, span);
+    cpu->exception = exception;
+    return ok;
+}
 
 // Deterministic save-state harness (see GXRuntime savestate.h). SIGUSR1 requests
 // a snapshot at the next safe dispatch boundary, so an agent can `kill -USR1` the

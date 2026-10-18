@@ -1074,6 +1074,9 @@ static bool g_log_checked, g_log;
 static u32 g_held_player, g_held_list;
 static u32 g_held_own[HELD_SLOTS], g_held_written[HELD_SLOTS], g_held_shown[HELD_SLOTS];
 static bool g_held_overridden;
+static bool g_menu_open;  // camera_set_menu
+
+void camera_set_menu(bool open) { g_menu_open = open; }
 
 static bool held_list_at(CPUState* cpu, u32 at, u32 player) {
     if (mem_read32(cpu, at) != player || mem_read32(cpu, at + 4u) != 0u)
@@ -1156,6 +1159,15 @@ void camera_look_at(CPUState* cpu) {
     last_frame = frame;
     if (step)
         snapshot(cpu, frame);
+    // The Tome draws the inventory's things with this camera too: while it is
+    // open the game has its own view (and they theirs), and the camera's own
+    // state waits as it was for the Tome to close.
+    if (g_menu_open) {
+        g_view_active = false;
+        if (step)
+            held_override(cpu, -1);
+        return;
+    }
     Vec3 player = v3(0.0f, 0.0f, 0.0f);
     const bool have_player = player_position(cpu, &player);
     if (g_log && step && (frame % 120u == 0u || (getenv("ED_CAM_LOG")[0] == '2' && frame % 10u == 0u)))

@@ -669,6 +669,7 @@ bool read_pad(DolPadState* state) {
     // stick as it is, for picking a target.
     const bool aiming = (s.button & 0x0020) != 0 || s.trigger_right >= 128;
     const bool camera = camera_takes_stick() && !tome && !cutscene;
+    camera_set_menu(tome);
     const float cam_x = camera ? cx / 127.0f : 0.0f, cam_y = camera ? cy / 127.0f : 0.0f;
     camera_set_stick(cam_x, cam_y, aiming, !cutscene);
     camera_set_move(camera ? x / 127.0f : 0.0f, camera ? y / 127.0f : 0.0f);

@@ -387,7 +387,7 @@ static atomic_int g_pauses;
 enum { PROBLEM_NONE, PROBLEM_PENDING, PROBLEM_SHOWN };
 static atomic_int g_problem;
 static char g_problem_text[512];
-static long long g_hang_ms = 20000;
+static long long g_hang_ms = 6000;
 
 void report_frame(void) {
     atomic_store(&g_last_frame, now_ms());

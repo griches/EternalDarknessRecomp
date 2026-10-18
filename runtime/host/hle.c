@@ -5599,6 +5599,61 @@ static void find_camera_perspective(CPUState* cpu, u32 from) {
 
 // The call, a little after the widescreen check in the same function:
 // or r4,r28,r28; addi r3,r31,396; addi r5,r1,24; addi r6,r28,12; bl C_MTXLookAt.
+/* r3 at a call, from the lis/addi/li before it (from `from`); 0: unknown. */
+static u32 r3_at_call(CPUState* cpu, u32 from, u32 call) {
+    u32 value[32] = {0};
+    bool known[32] = {false};
+    for (u32 at = from; at < call; at += 4u) {
+        const u32 w = mem_read32(cpu, at);
+        const u32 op = w >> 26, rt = (w >> 21) & 31u, ra = (w >> 16) & 31u;
+        const s32 simm = (s16)(w & 0xFFFFu);
+        if (op == 15u && ra == 0u)
+            value[rt] = (w & 0xFFFFu) << 16, known[rt] = true;  // lis
+        else if (op == 14u && ra == 0u)
+            value[rt] = (u32)simm, known[rt] = true;  // li
+        else if (op == 14u && known[ra])
+            value[rt] = value[ra] + (u32)simm, known[rt] = true;  // addi
+        else if ((w & 0xFC000001u) == 0x48000001u)
+            known[3] = false;  // a call's result
+        else if (op == 14u || op == 15u)
+            known[rt] = false;
+    }
+    return known[3] ? value[3] : 0u;
+}
+
+/* The game's draw-done callback (set once at boot, so found in the code: the
+ * GXSetDrawDoneCallback call's argument) receives a message the main loop
+ * sends just after GXSetDrawDone, blocking, inside the finish interrupt. The
+ * deferred finish waits for that message (interrupt.c). */
+static void find_finish_queue(CPUState* cpu) {
+    const u32 set_callback = sdk_symbol_address("GXSetDrawDoneCallback");
+    const u32 receive = sdk_symbol_address("OSReceiveMessage");
+    if (set_callback == 0u || receive == 0u)
+        return;
+    for (u32 at = 0x80003100u; at < 0x80400000u; at += 4u) {
+        const u32 w = mem_read32(cpu, at);
+        if ((w & 0xFC000003u) != 0x48000001u || bl_target(cpu, at) != set_callback)
+            continue;
+        const u32 callback = r3_at_call(cpu, at - 32u, at);
+        if (callback < 0x80003100u || callback >= 0x80400000u)
+            continue;
+        for (u32 c = callback; c < callback + 0x200u; c += 4u) {
+            const u32 cw = mem_read32(cpu, c);
+            if (cw == 0x4E800020u)
+                break;  // blr
+            if ((cw & 0xFC000003u) == 0x48000001u && bl_target(cpu, c) == receive) {
+                const u32 queue = r3_at_call(cpu, callback, c);
+                if (queue >= 0x80000000u && queue < 0x81800000u) {
+                    interrupt_set_finish_queue(queue);
+                    fprintf(stderr, "[gx] draw-done callback 0x%08X waits on queue 0x%08X\n", callback, queue);
+                    return;
+                }
+            }
+        }
+    }
+    fprintf(stderr, "[gx] draw-done callback's queue not found\n");
+}
+
 static void find_camera(CPUState* cpu) {
     const bool pal = strcmp(ED_GAME_ID, "GEDP01") == 0;
     const u32 from = pal ? 0x801E4C1Cu : 0x801F0430u;
@@ -5809,6 +5864,7 @@ void hle_install(CPUState* cpu) {
     install_msl_memory_hle(cpu);
     install_xfb_reader_sync(cpu);
 #ifdef ED_AURORA
+    find_finish_queue(cpu);
     find_widescreen_option(cpu);
 #endif
 #ifdef ED_AURORA

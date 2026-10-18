@@ -209,16 +209,13 @@ float camera_stick_turn(void) {
 // one move: the eye on its way from the start while the view turns to the
 // thing over the same time (the thing seen from where the eye is), so the
 // view only rises a little over a thing above the eyes before settling on the
-// game's framing; back, the same in reverse. The player
-// is drawn as the game has them only on the way there (the game draws them
-// again as it lets go), while the eye is FP_BODY_CLEAR or more from their
-// eyes (it flies through their head otherwise).
+// game's framing; back, the same in reverse. The player is drawn as the
+// game has them (and with its near plane) the whole way there and back.
 // On the way the field of view keeps the thing growing (or, back, shrinking)
 // steadily on screen, wherever the eye is: no zooming away and back in.
 #define FP_HAND_TIME 1.4f
 #define FP_HAND_AIM 1.0f
 #define FP_HAND_MOVE 0.0f
-#define FP_BODY_CLEAR 150.0f
 // Walls: the line test's radius, how far short of a wall the eye stops, and
 // the nearest it comes to the point it looks at.
 #define TP_RADIUS 12.0f
@@ -348,8 +345,8 @@ int camera_player_drawn(void) {
         body = getenv("ED_CAM_FP_BODY") != NULL ? atoi(getenv("ED_CAM_FP_BODY")) != 0 : 0;
     // Mostly the game's view: the player as the game has them.
     if (g_last_mode == CAMERA_FIRST_PERSON) {
-        // Not on the way back: the game draws them again as it lets go.
-        if (g_handing && length(sub(g_view_eye, g_fp_eye)) >= FP_BODY_CLEAR)
+        // From the moment it hands over until it is back: no popping.
+        if (g_hand_progress > 0.0f)
             return -1;
     } else if (g_hand > 0.5f) {
         return -1;

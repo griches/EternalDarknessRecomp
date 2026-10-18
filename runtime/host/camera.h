@@ -39,6 +39,9 @@ bool camera_shows_player(void);
 // From hle.c, as the game's camera makes its projection: the field of view
 // (degrees) to use instead of the game's.
 float camera_field_of_view(float game_fov);
+// From hle.c: the game camera's eye and target controllers (each eases
+// toward the point its +112 points at).
+void camera_set_controllers(unsigned eye, unsigned target);
 // The right stick belongs to the camera (a mode is on, the game is in play).
 bool camera_takes_stick(void);
 // The camera's turn from the game's own, for the left stick: the angle (radians,

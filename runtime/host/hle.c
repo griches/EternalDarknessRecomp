@@ -5413,6 +5413,7 @@ static void find_camera_fade(CPUState* cpu) {
     g_fade_target = ((lis5 & 0xFFFFu) << 16) + (u32)(s32)(s16)(add_target & 0xFFFFu);
     g_fade_eye = ((lis4 & 0xFFFFu) << 16) + (u32)(s32)(s16)(add_eye & 0xFFFFu);
     entry->intercept = hle_camera_fade;
+    camera_set_controllers(g_fade_eye, g_fade_target);
 }
 
 // The game draws the player only while two flags are set; looking closely at

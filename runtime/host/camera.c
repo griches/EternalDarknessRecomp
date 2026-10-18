@@ -116,6 +116,29 @@ bool camera_view(float eye[3], float target[3]) {
     return true;
 }
 
+static u32 g_target_controller;  // camera_set_controllers
+
+void camera_set_controllers(unsigned eye, unsigned target) {
+    (void)eye;
+    g_target_controller = target;
+}
+
+/* Where the game's camera is heading to look: the target controller eases
+ * from where it looks now toward the point its +112 points at (the thing the
+ * player looks at, from the moment they press B). */
+static bool game_goal(CPUState* cpu, Vec3* out) {
+    if (g_target_controller == 0u)
+        return false;
+    const u32 goal = mem_read32(cpu, g_target_controller + 112u);
+    if (goal < 0x80000000u || goal - 0x80000000u > cpu->ram_size - 16u)
+        return false;
+    const Vec3 v = read_vec(cpu, goal);
+    if (!isfinite(v.x) || !isfinite(v.y) || !isfinite(v.z))
+        return false;
+    *out = v;
+    return true;
+}
+
 static CameraCollide g_collide;
 void camera_set_collide(CameraCollide fn) { g_collide = fn; }
 
@@ -158,6 +181,9 @@ float camera_stick_turn(void) {
 // Its field of view (degrees, vertical): its own, not the shot's, so the
 // view keeps its size through the game's cuts and its zooms.
 #define TP_FOV 50.0f
+// A sweep's length (seconds) and the share of it spent easing in and out.
+#define SWEEP_TIME 0.8f
+#define SWEEP_EASE 0.15f
 // Walls: the line test's radius, how far short of a wall the eye stops, and
 // the nearest it comes to the point it looks at.
 #define TP_RADIUS 12.0f
@@ -181,9 +207,15 @@ static bool g_have_player;
 static bool g_examining;  // camera_set_examining
 // The game's field of view: the widest in this shot (since its last cut), and
 // whether it has zoomed well in from that (on something the player looks at).
-static float g_fov_base;
-static bool g_zoomed;
-static float g_focus;     // 0 looking at the player .. 1 at what they examine
+static float g_fov_base, g_fov_last;
+static bool g_zoomed, g_zooming_out;
+// Where the camera looks: a sweep in a straight line from one point to the
+// next (Alex, the thing she looks at, and back), and the turn round behind
+// her with it.
+static Vec3 g_aim, g_aim_from, g_aim_to;
+static Vec3 g_back_from, g_back_to;
+static float g_sweep = 1.0f;  // 0..1 along the current sweep
+static bool g_aim_set, g_looking_at, g_back_sweeps;
 static float g_reach, g_lift;  // g_lift: risen over the player's head, for room
 static float g_distance = TP_DISTANCE;  // how far back the player wants it (kept across rooms)
 
@@ -294,6 +326,66 @@ static float wall_reach(CPUState* cpu, Vec3 pivot, Vec3 out) {
     return clampf(length(sub(v3(hit[0], hit[1], hit[2]), pivot)) - TP_MARGIN, TP_NEAREST, g_distance);
 }
 
+/* A sweep's progress (0..1 of its time) to how far along the line it is:
+ * even speed, easing in and out over SWEEP_EASE of the time at each end. */
+static float sweep_ease(float t) {
+    const float a = SWEEP_EASE, v = 1.0f / (1.0f - a);
+    if (t <= 0.0f)
+        return 0.0f;
+    if (t >= 1.0f)
+        return 1.0f;
+    if (t < a)
+        return v * t * t / (2.0f * a);
+    if (t > 1.0f - a)
+        return 1.0f - v * (1.0f - t) * (1.0f - t) / (2.0f * a);
+    return v * (t - a * 0.5f);
+}
+
+/* Once a frame: what the camera looks at. In play that is the player; when
+ * they look closely at something (the game hides them, or zooms in), the
+ * point the game's camera is heading for. A change starts a sweep from where
+ * the camera looks now, and with a thing to look at it also turns round
+ * behind the player on the line to it (unless the stick is turning it). */
+static void sweep_aim(Vec3 focus, Vec3 pivot, Vec3 k, bool jumped) {
+    const bool looking = g_examining || (g_zoomed && !g_zooming_out);
+    const Vec3 goal = looking ? focus : pivot;
+    if (jumped || !g_aim_set) {
+        g_aim = g_aim_from = g_aim_to = pivot;
+        g_sweep = 1.0f;
+        g_aim_set = true;
+        g_looking_at = false;
+        g_back_sweeps = false;
+    }
+    const bool moved = looking && length(sub(goal, g_aim_to)) > 20.0f;
+    if (looking != g_looking_at || moved) {
+        g_aim_from = g_aim;
+        g_sweep = 0.0f;
+        g_looking_at = looking;
+        g_back_sweeps = false;
+        const Vec3 behind = normalize(flatten(sub(pivot, goal), k));
+        if (looking && length(behind) > 0.0f) {
+            g_back_from = g_back;
+            g_back_to = behind;
+            g_back_sweeps = true;
+        }
+    }
+    g_aim_to = goal;  // back to the player: wherever they are now
+    g_sweep = fminf(1.0f, g_sweep + 1.0f / (60.0f * SWEEP_TIME));
+    const float e = sweep_ease(g_sweep);
+    g_aim = add(g_aim_from, scale(sub(g_aim_to, g_aim_from), e));
+    if (fabsf(g_stick_x) >= 0.1f)
+        g_back_sweeps = false;
+    static int log = -1;
+    if (log < 0)
+        log = getenv("ED_CAM_LOG") != NULL && getenv("ED_CAM_LOG")[0] == '3';
+    if (log && g_sweep < 1.0f)
+        fprintf(stderr, "[camera] sweep %.3f aim %.1f %.1f %.1f\n", g_sweep, g_aim.x, g_aim.y, g_aim.z);
+    if (g_back_sweeps) {
+        const float angle = level_angle(g_back_from, g_back_to, k);
+        g_back = normalize(rotate(g_back_from, k, angle * e));
+    }
+}
+
 /* Third person: behind and above the player, trailing after them. Starts
  * from the side the game's camera is on. While the player looks closely at
  * something, the game's camera looks at it (focus): this one turns to it too,
@@ -302,14 +394,8 @@ static void third_person(CPUState* cpu, Vec3 eye, Vec3 focus, Vec3 player, Vec3 
                          Vec3* new_eye, Vec3* new_target) {
     const Vec3 pivot = add(player, scale(k, TP_HEIGHT));
     if (step) {
-        const bool looking = g_examining || g_zoomed;
-        g_focus = clampf(g_focus + (looking ? 3.0f : -3.0f) / 60.0f, 0.0f, 1.0f);
-        if (looking && !still && fabsf(g_stick_x) < 0.1f) {
-            const Vec3 behind = normalize(flatten(sub(pivot, focus), k));
-            if (length(behind) > 0.0f)
-                g_back = normalize(add(scale(g_back, 0.92f), scale(behind, 0.08f)));
-        }
         const bool jumped = !g_have_player || length(sub(player, g_last_player)) > 300.0f;
+        sweep_aim(focus, pivot, k, jumped);
         if (jumped) {
             g_back = normalize(flatten(sub(eye, pivot), k));
             if (length(g_back) == 0.0f)
@@ -353,7 +439,7 @@ static void third_person(CPUState* cpu, Vec3 eye, Vec3 focus, Vec3 player, Vec3 
     const float rise = g_rise + g_lift;
     const Vec3 out = add(scale(g_back, cosf(rise)), scale(k, sinf(rise)));
     *new_eye = add(pivot, scale(out, g_reach));
-    *new_target = add(pivot, scale(sub(focus, pivot), g_focus));
+    *new_target = g_aim;
 }
 
 static bool g_log_checked, g_log;
@@ -383,6 +469,11 @@ void camera_look_at(CPUState* cpu) {
                 frame, eye.x, eye.y, eye.z, target.x, target.y, target.z, up.x, up.y, up.z,
                 have_player ? "" : "(none) ", player.x, player.y, player.z, read_float(cpu, cpu->gpr[4] + 48u),
                 g_examining ? " examining" : g_zoomed ? " zoomed" : "");
+    if (g_log && step && getenv("ED_CAM_LOG")[0] == '2' && frame % 10u == 0u) {
+        Vec3 goal;
+        if (game_goal(cpu, &goal))
+            fprintf(stderr, "[camera]   goal %.1f %.1f %.1f\n", goal.x, goal.y, goal.z);
+    }
     // The game zooms its camera in on what the player looks at (B) without
     // hiding them: a field of view well under the shot's own. A cut to another
     // shot starts the comparison again.
@@ -391,6 +482,10 @@ void camera_look_at(CPUState* cpu) {
         if (game_cut(eye, target) || g_fov_base <= 0.0f || fov > g_fov_base)
             g_fov_base = fov;
         g_zoomed = fov < 0.8f * g_fov_base;
+        // Zooming back out: the look is over (its goal goes back to the
+        // shot's own point first).
+        g_zooming_out = fov > g_fov_last + 0.01f;
+        g_fov_last = fov;
     }
     // Only in play: a character to play, and no cutscene.
     int mode = g_play && have_player ? camera_mode() : CAMERA_ORIGINAL;
@@ -414,8 +509,13 @@ void camera_look_at(CPUState* cpu) {
     Vec3 new_eye, new_target;
     if (mode == CAMERA_FREE_LOOK)
         free_look(eye, target, k, step, still, &new_eye, &new_target);
-    else
-        third_person(cpu, eye, target, player, k, step, still, &new_eye, &new_target);
+    else {
+        // What the player looks at: where the game's camera is heading,
+        // known from the moment they press B (else where it looks now).
+        Vec3 focus = target;
+        game_goal(cpu, &focus);
+        third_person(cpu, eye, focus, player, k, step, still, &new_eye, &new_target);
+    }
     if (step) {
         g_last_eye = eye;
         g_last_target = target;

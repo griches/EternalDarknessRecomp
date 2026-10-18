@@ -191,9 +191,17 @@ float camera_stick_turn(void) {
 #define TP_NEAREST 90.0f
 // Room enough behind the player not to rise over their head.
 #define TP_ROOMY (0.6f * g_distance)
-// Swinging round something in the way (radians a second at most), and
-// coming in short of it (units a second at least).
-#define SWING_RATE 4.0f
+// Swinging round something in the way: its fastest turn (radians a second),
+// how quickly its speed may change (radians a second, a second) and how far
+// past the edge
+// of the obstacle it goes (radians); and coming in short of it (units a
+// second at least).
+#define SWING_RATE 2.5f
+#define SWING_ACCEL 9.0f
+// How far ahead (frames of the player's movement) it looks for something
+// coming between them.
+#define SWING_AHEAD 30.0f
+#define SWING_MARGIN 0.17f
 #define PULL_RATE 600.0f
 
 static int g_last_mode = -1;
@@ -390,6 +398,84 @@ static void sweep_aim(Vec3 focus, Vec3 pivot, Vec3 k, bool jumped) {
     }
 }
 
+/* The swing round something in the way: where it is going (a level
+ * direction from the player to the eye) and how fast it turns (radians a
+ * second, about the up axis). */
+static bool g_swing_active;
+static Vec3 g_swing_goal;
+static float g_swing_speed;
+
+static Vec3 out_dir(Vec3 back, Vec3 k, float rise) { return add(scale(back, cosf(rise)), scale(k, sinf(rise))); }
+
+/* Room enough along dir from the player now and where they will be in half
+ * a second and a second. */
+static bool clear_along(CPUState* cpu, Vec3 pivot, Vec3 step, Vec3 dir) {
+    for (int i = 0; i <= 2; i++)
+        if (wall_reach(cpu, add(pivot, scale(step, (float)i)), dir) < TP_ROOMY)
+            return false;
+    return true;
+}
+
+static void auto_swing(CPUState* cpu, Vec3 pivot, Vec3 step, Vec3 k, float rise, bool hold) {
+    static int blocked_frames;
+    if (g_collide == NULL || hold) {
+        g_swing_active = false;
+        g_swing_speed = 0.0f;
+        blocked_frames = 0;
+        return;
+    }
+    // Blocked now or soon (where the player is heading), for a few frames
+    // running: starting early leaves time to swing smoothly instead of
+    // closing in, and a few frames keep it from hunting.
+    blocked_frames = clear_along(cpu, pivot, step, out_dir(g_back, k, rise)) ? 0 : blocked_frames + 1;
+    const bool blocked_here = blocked_frames >= 4;
+    const bool goal_blocked = g_swing_active && wall_reach(cpu, pivot, out_dir(g_swing_goal, k, rise)) < TP_ROOMY;
+    if ((blocked_here && !g_swing_active) || goal_blocked) {
+        // Nearest first, either side; once turning, its own way first (a
+        // reversal mid-swing is the jolt to avoid).
+        const bool was_swinging = g_swing_active;
+        g_swing_active = false;
+        const int way = g_swing_speed > 0.0f ? 1 : g_swing_speed < 0.0f ? -1 : 0;
+        for (int n = 0; n < 36 && !g_swing_active; n++) {
+            const int i = way != 0 ? n % 18 + 1 : n / 2 + 1;
+            const int side = way != 0 ? (n < 18 ? way : -way) : (n % 2 == 0 ? -1 : 1);
+            const float angle = (float)(side * i) * PI / 36.0f;
+            if (!clear_along(cpu, pivot, step, out_dir(rotate(g_back, k, angle), k, rise)))
+                continue;
+            // A little past the edge, where that is clear too.
+            const float past = angle + (float)side * SWING_MARGIN;
+            const Vec3 beyond = rotate(g_back, k, past);
+            g_swing_goal = wall_reach(cpu, pivot, out_dir(beyond, k, rise)) >= TP_ROOMY ? beyond
+                                                                                         : rotate(g_back, k, angle);
+            g_swing_active = true;
+        }
+        // Nowhere with room: a swing under way slows to a stop where it is.
+        if (!g_swing_active && was_swinging) {
+            g_swing_goal = g_back;
+            g_swing_active = true;
+        }
+    }
+    if (!g_swing_active)
+        return;
+    // The turn's speed changes by at most SWING_ACCEL a second each second,
+    // aiming for the fastest speed it can still stop from in the angle left:
+    // it eases into the turn and out of it, and a new goal bends it smoothly.
+    const float dt = 1.0f / 60.0f;
+    const float left = level_angle(g_back, g_swing_goal, k);
+    const float want = copysignf(fminf(SWING_RATE, sqrtf(2.0f * SWING_ACCEL * fabsf(left))), left);
+    g_swing_speed += clampf(want - g_swing_speed, -SWING_ACCEL * dt, SWING_ACCEL * dt);
+    g_back = normalize(rotate(g_back, k, g_swing_speed * dt));
+    if (fabsf(left) < 0.005f && fabsf(g_swing_speed) < 0.05f) {
+        g_swing_active = false;
+        g_swing_speed = 0.0f;
+    }
+    static int log = -1;
+    if (log < 0)
+        log = getenv("ED_CAM_LOG") != NULL && getenv("ED_CAM_LOG")[0] == '4';
+    if (log)
+        fprintf(stderr, "[camera] swing left %.1f deg, speed %.1f deg/s\n", left * 57.2958f, g_swing_speed * 57.2958f);
+}
+
 /* Third person: behind and above the player, trailing after them. Starts
  * from the side the game's camera is on. While the player looks closely at
  * something, the game's camera looks at it (focus): this one turns to it too,
@@ -418,29 +504,14 @@ static void third_person(CPUState* cpu, Vec3 eye, Vec3 focus, Vec3 player, Vec3 
             g_distance = clampf(g_distance - g_stick_y * TP_ZOOM_RATE * dt, TP_CLOSEST, TP_FARTHEST);
         }
         // Something between the player and the eye (a cabinet, a pillar):
-        // swing round it to the nearest side with room, in 15 degree steps
-        // either way up to 90, easing there, unless the stick is turning the
-        // camera or the player aims.
-        if (g_collide != NULL && !jumped && !still && !g_back_sweeps && fabsf(g_stick_x) < 0.1f) {
-            const float rise = g_rise + g_lift;
-            if (wall_reach(cpu, pivot, add(scale(g_back, cosf(rise)), scale(k, sinf(rise)))) < TP_ROOMY) {
-                float swing = 0.0f, best = -1.0f;
-                for (int i = 1; i <= 6 && best < TP_ROOMY; i++)
-                    for (int side = -1; side <= 1; side += 2) {
-                        const float angle = (float)(side * i) * PI / 12.0f;
-                        const Vec3 b = rotate(g_back, k, angle);
-                        const float r = wall_reach(cpu, pivot, add(scale(b, cosf(rise)), scale(k, sinf(rise))));
-                        if (r > best + 1.0f) {
-                            best = r;
-                            swing = angle;
-                        }
-                    }
-                if (best >= TP_ROOMY) {
-                    const float turn = clampf(swing * 0.35f, -SWING_RATE / 60.0f, SWING_RATE / 60.0f);
-                    g_back = normalize(rotate(g_back, k, turn));
-                }
-            }
-        }
+        // pick the nearest side with room (5 degree steps either way, up to
+        // 90, and a little past the edge) and swing there, easing in and out
+        // of the turn. Not while the stick turns the camera,
+        // the player aims, or it sweeps to a thing; a new side is only looked
+        // for when the one it is swinging to is blocked too.
+        const float rise_now = g_rise + g_lift;
+        const Vec3 step = jumped ? v3(0.0f, 0.0f, 0.0f) : scale(sub(player, g_last_player), SWING_AHEAD);
+        auto_swing(cpu, pivot, step, k, rise_now, jumped || still || g_back_sweeps || fabsf(g_stick_x) >= 0.1f);
         // Walls: where the eye would be has room enough, or it rises over
         // the player's head (looking down on them) to where there is more,
         // easing up and back down.

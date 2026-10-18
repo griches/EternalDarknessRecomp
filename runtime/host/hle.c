@@ -5515,6 +5515,35 @@ static void find_player(CPUState* cpu) {
     camera_set_collide(camera_collide);
 }
 
+// The same function's projection: C_MTXPerspective(mtx, fovy f1, aspect f2,
+// near f3, far f4) from one of two calls (lr = call + 4), whose field of view
+// the camera can replace with its own.
+static u32 g_camera_perspective_return[2];
+
+static void notify_perspective(CPUState* cpu) {
+    if (cpu->lr == g_camera_perspective_return[0] || cpu->lr == g_camera_perspective_return[1]) {
+        const double fov = camera_field_of_view((float)cpu->fpr[1]);
+        cpu->fpr[1] = fov;
+        cpu->ps1[1] = fov;
+    }
+}
+
+static void find_camera_perspective(CPUState* cpu, u32 from) {
+    const u32 perspective = sdk_symbol_address("C_MTXPerspective");
+    HleDispatchEntry* entry = hle_dispatch_entry(perspective);
+    int found = 0;
+    for (u32 at = from; at < from + 0x100u && found < 2; at += 4u) {
+        const u32 bl = mem_read32(cpu, at);
+        if ((bl & 0xFC000003u) == 0x48000001u && at + (u32)(((s32)(bl << 6)) >> 6 & ~3) == perspective)
+            g_camera_perspective_return[found++] = at + 4u;
+    }
+    if (found == 0 || entry == NULL || entry->notify != NULL) {
+        fprintf(stderr, "[camera] the game's projection not found: third person zooms with it\n");
+        return;
+    }
+    entry->notify = notify_perspective;
+}
+
 // The call, a little after the widescreen check in the same function:
 // or r4,r28,r28; addi r3,r31,396; addi r5,r1,24; addi r6,r28,12; bl C_MTXLookAt.
 static void find_camera(CPUState* cpu) {
@@ -5531,6 +5560,7 @@ static void find_camera(CPUState* cpu) {
             g_camera_look_at_return = at + 20u;
             entry->notify = notify_look_at;
             find_player(cpu);
+            find_camera_perspective(cpu, from - 0x40u);
             find_camera_fade(cpu);
             find_show_player(cpu);
             return;

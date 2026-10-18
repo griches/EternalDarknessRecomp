@@ -67,6 +67,13 @@ static Vec3 read_vec(CPUState* cpu, u32 address) {
     return v3(f[0], f[1], f[2]);
 }
 
+static float read_float(CPUState* cpu, u32 address) {
+    const u32 bits = mem_read32(cpu, address);
+    float f;
+    memcpy(&f, &bits, sizeof f);
+    return f;
+}
+
 static void write_vec(CPUState* cpu, u32 address, Vec3 v) {
     const float f[3] = {v.x, v.y, v.z};
     for (int i = 0; i < 3; i++) {
@@ -148,6 +155,9 @@ float camera_stick_turn(void) {
 #define TP_CLOSEST 180.0f
 #define TP_FARTHEST 800.0f
 #define TP_PITCH 0.30f
+// Its field of view (degrees, vertical): its own, not the shot's, so the
+// view keeps its size through the game's cuts and its zooms.
+#define TP_FOV 50.0f
 // Walls: the line test's radius, how far short of a wall the eye stops, and
 // the nearest it comes to the point it looks at.
 #define TP_RADIUS 12.0f
@@ -169,11 +179,19 @@ static float g_rise;
 static Vec3 g_last_player;
 static bool g_have_player;
 static bool g_examining;  // camera_set_examining
+// The game's field of view: the widest in this shot (since its last cut), and
+// whether it has zoomed well in from that (on something the player looks at).
+static float g_fov_base;
+static bool g_zoomed;
 static float g_focus;     // 0 looking at the player .. 1 at what they examine
 static float g_reach, g_lift;  // g_lift: risen over the player's head, for room
 static float g_distance = TP_DISTANCE;  // how far back the player wants it (kept across rooms)
 
 void camera_set_examining(bool examining) { g_examining = examining; }
+
+float camera_field_of_view(float game_fov) {
+    return g_view_active && g_last_mode == CAMERA_THIRD_PERSON ? TP_FOV : game_fov;
+}
 
 bool camera_shows_player(void) { return g_view_active && g_last_mode == CAMERA_THIRD_PERSON; }
 
@@ -284,8 +302,9 @@ static void third_person(CPUState* cpu, Vec3 eye, Vec3 focus, Vec3 player, Vec3 
                          Vec3* new_eye, Vec3* new_target) {
     const Vec3 pivot = add(player, scale(k, TP_HEIGHT));
     if (step) {
-        g_focus = clampf(g_focus + (g_examining ? 3.0f : -3.0f) / 60.0f, 0.0f, 1.0f);
-        if (g_examining && !still && fabsf(g_stick_x) < 0.1f) {
+        const bool looking = g_examining || g_zoomed;
+        g_focus = clampf(g_focus + (looking ? 3.0f : -3.0f) / 60.0f, 0.0f, 1.0f);
+        if (looking && !still && fabsf(g_stick_x) < 0.1f) {
             const Vec3 behind = normalize(flatten(sub(pivot, focus), k));
             if (length(behind) > 0.0f)
                 g_back = normalize(add(scale(g_back, 0.92f), scale(behind, 0.08f)));
@@ -360,9 +379,19 @@ void camera_look_at(CPUState* cpu) {
     Vec3 player = v3(0.0f, 0.0f, 0.0f);
     const bool have_player = player_position(cpu, &player);
     if (g_log && step && (frame % 120u == 0u || (getenv("ED_CAM_LOG")[0] == '2' && frame % 10u == 0u)))
-        fprintf(stderr, "[camera] frame %llu eye %.1f %.1f %.1f target %.1f %.1f %.1f up %.2f %.2f %.2f player %s%.1f %.1f %.1f\n",
+        fprintf(stderr, "[camera] frame %llu eye %.1f %.1f %.1f target %.1f %.1f %.1f up %.2f %.2f %.2f player %s%.1f %.1f %.1f fov %.1f%s\n",
                 frame, eye.x, eye.y, eye.z, target.x, target.y, target.z, up.x, up.y, up.z,
-                have_player ? "" : "(none) ", player.x, player.y, player.z);
+                have_player ? "" : "(none) ", player.x, player.y, player.z, read_float(cpu, cpu->gpr[4] + 48u),
+                g_examining ? " examining" : g_zoomed ? " zoomed" : "");
+    // The game zooms its camera in on what the player looks at (B) without
+    // hiding them: a field of view well under the shot's own. A cut to another
+    // shot starts the comparison again.
+    if (step) {
+        const float fov = read_float(cpu, cpu->gpr[4] + 48u);
+        if (game_cut(eye, target) || g_fov_base <= 0.0f || fov > g_fov_base)
+            g_fov_base = fov;
+        g_zoomed = fov < 0.8f * g_fov_base;
+    }
     // Only in play: a character to play, and no cutscene.
     int mode = g_play && have_player ? camera_mode() : CAMERA_ORIGINAL;
     const Vec3 k = normalize(up);

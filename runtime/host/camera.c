@@ -320,6 +320,8 @@ static float g_hand_progress, g_hand;
 // pulls back out to its shot then, which would swing the view out and in).
 static bool g_handing;
 static float g_fp_hand_fov;  // first person's field of view on the way (0: none)
+static bool g_fp_hand_decided, g_fp_hand_near;
+#define FP_HAND_NEAR 150.0f  // a thing this close to the eye: turn to the game's view
 static Vec3 g_held_eye, g_held_target;
 static float g_held_fov;
 
@@ -1542,7 +1544,15 @@ void camera_look_at(CPUState* cpu) {
         const Vec3 own = sub(new_target, new_eye);
         const Vec3 from = add(new_eye, scale(sub(g_held_eye, new_eye), g_hand));
         const Vec3 thing = sub(g_held_target, from);
-        const Vec3 dir = turn_towards(normalize(own), normalize(thing), aim);
+        // A thing close to first person's eye (beside it, behind it) is no
+        // direction to turn by: the view turns to the game's own instead,
+        // chosen once a move.
+        if (!g_fp_hand_decided) {
+            g_fp_hand_decided = true;
+            g_fp_hand_near = length(sub(g_held_target, g_fp_eye)) < FP_HAND_NEAR;
+        }
+        const Vec3 goal = g_fp_hand_near ? sub(g_held_target, g_held_eye) : thing;
+        const Vec3 dir = turn_towards(normalize(own), normalize(goal), aim);
         new_eye = from;
         new_target = add(from, scale(dir, length(own) + (length(thing) - length(own)) * aim));
         // The thing's size on screen, 1 / (distance x tan(half the field
@@ -1555,9 +1565,14 @@ void camera_look_at(CPUState* cpu) {
         const float game_fov = g_held_fov > 0.0f ? g_held_fov : FP_FOV;
         const float s0 = 1.0f / (d0 * tanf(FP_FOV * half)), s1 = 1.0f / (d1 * tanf(game_fov * half));
         const float size = s0 * powf(s1 / s0, g_hand);
-        g_fp_hand_fov = clampf(atanf(1.0f / (size * d)) / half, 5.0f, 100.0f);
+        // Never wider or narrower than either end (close to the eye the size
+        // runs away).
+        g_fp_hand_fov = g_fp_hand_near ? FP_FOV + (game_fov - FP_FOV) * g_hand
+                                       : clampf(atanf(1.0f / (size * d)) / half, fminf(FP_FOV, game_fov),
+                                                fmaxf(FP_FOV, game_fov));
     } else {
         g_fp_hand_fov = 0.0f;
+        g_fp_hand_decided = false;
         new_eye = add(new_eye, scale(sub(g_held_eye, new_eye), g_hand));
         new_target = add(new_target, scale(sub(g_held_target, new_target), g_hand));
     }

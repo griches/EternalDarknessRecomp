@@ -111,14 +111,13 @@ static Vec3 g_view_eye, g_view_target;
 static Vec3 g_fp_eye;  // first person's own eye, at the player's head
 static Vec3 g_head_eye;  // the player's eyes (any mode)
 // Aiming in first person: the player is turned to the view for the first
-// FP_AIM_TURN frames (the game would carry on turning them), and drawn (arms
-// up, holding the gun) only once they have stood still with the eye caught
-// up on their head for FP_AIM_SETTLE frames: walking, the eye trails the head
-// and would look through the back of it, then their face.
+// FP_AIM_TURN frames (the game would carry on turning them), the eye is held
+// at their eyes (easing after them it would trail, walking or swinging, and
+// look through the back of their head), and they are drawn (arms up, holding
+// the gun or swinging the sword) from FP_AIM_SETTLE frames in, once the eye
+// has caught up.
 #define FP_AIM_TURN 15
 #define FP_AIM_SETTLE 6
-#define FP_AIM_STILL 0.3f   // their speed (per frame) that counts as standing
-#define FP_AIM_CAUGHT 2.0f  // how far the eye may trail the head
 static int g_aim_frames, g_aim_settled;
 
 bool camera_view(float eye[3], float target[3]) {
@@ -198,8 +197,9 @@ float camera_stick_turn(void) {
 // view (degrees, vertical).
 #define FP_HEIGHT 221.0f  // her eyes (measured: the top of her head is ~242)
 #define FP_FOV 60.0f
-// Its near clipping distance: past the hair round the eye.
-#define FP_NEAR 30.0f
+// Its near clipping distance: past the hair round the eye (a ponytail swings
+// forward through 30 with a sword).
+#define FP_NEAR 45.0f
 // The eye this far ahead of the head along the view.
 #define FP_AHEAD 12.0f
 // The eyes below the top of the head (the skeleton's highest bone), kept
@@ -1008,7 +1008,6 @@ static void first_person(Vec3 eye, Vec3 target, Vec3 focus, Vec3 player, Vec3 k,
     }
     if (step) {
         const bool jumped = !g_have_player || length(sub(player, g_last_player)) > 300.0f;
-        const float speed = g_have_player ? length(flatten(sub(player, g_last_player), k)) : 0.0f;
         if (jumped) {
             // Where the player faces (the game's camera can look across them,
             // through a door say), else where it looks.
@@ -1033,9 +1032,13 @@ static void first_person(Vec3 eye, Vec3 target, Vec3 focus, Vec3 player, Vec3 k,
         spring(&pz, &g_s_pivot_v.z, head.z, SMOOTH_FOLLOW, 3000.0f);
         g_s_pivot = v3(px, py, pz);
         if (still) {
+            // Aiming, the eye is at their eyes, not easing after them: a
+            // sword's swing carries them forward, and a trailing eye would
+            // look through the back of their head.
+            g_s_pivot = head;
+            g_s_pivot_v = v3(0.0f, 0.0f, 0.0f);
             g_aim_frames++;
-            const bool settled = speed < FP_AIM_STILL && length(sub(head, g_s_pivot)) < FP_AIM_CAUGHT;
-            g_aim_settled = settled ? g_aim_settled + 1 : 0;
+            g_aim_settled = g_aim_frames;
         } else {
             g_aim_frames = g_aim_settled = 0;
         }

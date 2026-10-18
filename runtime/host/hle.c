@@ -3974,7 +3974,7 @@ static const char* trace_name(u32 address) {
 // interrupt, receives the message the main loop sends just after. Raise the
 // interrupt once the GPU would have finished, after that send.
 static void notify_GXSetDrawDone(CPUState* cpu) {
-    (void)cpu;
+    camera_held_end(cpu);  // the frame is drawn: what the player holds as the game has it
     interrupt_defer_pe_finish();
 }
 

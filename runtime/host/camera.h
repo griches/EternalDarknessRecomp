@@ -72,6 +72,13 @@ void camera_set_move(float x, float y);
 // Whether the game's Tome (its own menu) is open: what the player holds is then
 // left as the game has it (the Tome shows the inventory's things itself).
 void camera_set_menu(bool open);
+// What the player holds set as the camera has them drawn for the frame's
+// draws (from the camera), and the game's own put back once they are done
+// (hle.c, GXSetDrawDone) or before a state is saved: the game's logic and a
+// saved state never see the camera's.
+struct CPUState;
+void camera_held_begin(struct CPUState* cpu);
+void camera_held_end(struct CPUState* cpu);
 
 #ifdef __cplusplus
 }

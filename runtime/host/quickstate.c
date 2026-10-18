@@ -13,6 +13,7 @@
 // A load reads and checks the whole file before it changes anything, so a
 // damaged or mismatched file leaves the running game alone.
 #include "host/quickstate.h"
+#include "host/camera.h"
 
 #include "gxruntime/aram.h"
 #ifdef ED_AURORA
@@ -494,6 +495,7 @@ static void make_parent_dirs(const char* path) {
 }
 
 static bool save_state(CPUState* cpu, const char* path) {
+    camera_held_end(cpu);  // the game's own flags for what the player holds
     const double start = now_ms();
     make_parent_dirs(path);
     // Write beside the target and rename, so a failed save keeps the old one.

@@ -40,6 +40,9 @@ int camera_player_drawn(void);
 // From hle.c, as the game's camera makes its projection: the field of view
 // (degrees) to use instead of the game's.
 float camera_field_of_view(float game_fov);
+// ... and the near clipping distance: in first person it is moved out past
+// the player's hair (drawn round the eye), so their body below still shows.
+float camera_near_plane(float game_near);
 // From hle.c: the game camera's eye and target controllers (each eases
 // toward the point its +112 points at).
 void camera_set_controllers(unsigned eye, unsigned target);

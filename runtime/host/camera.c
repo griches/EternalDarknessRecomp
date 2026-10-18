@@ -171,7 +171,7 @@ float camera_stick_turn(void) {
 #define PITCH_RATE (0.4f * PI)
 // Third person: the point looked at above the player's feet, how far back
 // the eye sits from it, and how high (radians above level) it starts.
-#define TP_HEIGHT 150.0f
+#define TP_HEIGHT 180.0f
 #define TP_DISTANCE 320.0f
 // The right stick's up and down bring the eye closer or take it further
 // (units a second at full stick), between these.
@@ -184,8 +184,10 @@ float camera_stick_turn(void) {
 #define TP_FOV 50.0f
 // First person: the eye's height above the player's feet, and its field of
 // view (degrees, vertical).
-#define FP_HEIGHT 165.0f
+#define FP_HEIGHT 221.0f  // her eyes (measured: the top of her head is ~242)
 #define FP_FOV 60.0f
+// Its near clipping distance: past the hair round the eye.
+#define FP_NEAR 30.0f
 // How far ahead of the eye it looks (only the direction matters).
 #define FP_LOOK 300.0f
 // A sweep's length (seconds) and the share of it spent easing in and out.
@@ -281,10 +283,23 @@ float camera_field_of_view(float game_fov) {
     return g_last_mode == CAMERA_THIRD_PERSON ? TP_FOV : g_last_mode == CAMERA_FIRST_PERSON ? FP_FOV : game_fov;
 }
 
+int camera_player_drawn(void);
+
+float camera_near_plane(float game_near) {
+    static float near = -1.0f;  // ED_CAM_FP_NEAR (tests)
+    if (near < 0.0f)
+        near = getenv("ED_CAM_FP_NEAR") != NULL ? (float)atof(getenv("ED_CAM_FP_NEAR")) : FP_NEAR;
+    return g_view_active && g_last_mode == CAMERA_FIRST_PERSON && camera_player_drawn() == 1 ? fmaxf(game_near, near)
+                                                                                                : game_near;
+}
+
 int camera_player_drawn(void) {
     if (!g_view_active)
         return -1;
-    return g_last_mode == CAMERA_THIRD_PERSON ? 1 : g_last_mode == CAMERA_FIRST_PERSON ? 0 : -1;
+    static int body = -1;  // ED_CAM_FP_BODY=0/1 (tests)
+    if (body < 0)
+        body = getenv("ED_CAM_FP_BODY") != NULL ? atoi(getenv("ED_CAM_FP_BODY")) != 0 : 1;
+    return g_last_mode == CAMERA_THIRD_PERSON ? 1 : g_last_mode == CAMERA_FIRST_PERSON ? body : -1;
 }
 
 static bool g_state_pending;  // camera_set_state: applied at the next frame
@@ -792,8 +807,11 @@ static void third_person(CPUState* cpu, Vec3 eye, Vec3 focus, Vec3 player, Vec3 
     *new_target = add(centre, g_s_aim);
 }
 
-/* First person: the eye in the player's head (they are not drawn), turned
- * with the right stick: across, and up and down. It starts looking where the
+/* First person: the eye in the player's head, turned
+ * with the right stick: across, and up and down. The player is drawn: from
+ * inside, their head's own faces point away and are not drawn, and the near
+ * clipping distance is moved out past their hair, so looking down shows their
+ * body, and raised arms show. It starts looking where the
  * game's camera looks; when the player looks closely at something it sweeps
  * to it and back, like third person. The eye follows the player on the same
  * spring as third person's (a step or a stop does not jolt it). */

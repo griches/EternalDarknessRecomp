@@ -1061,6 +1061,83 @@ static void face_stick(CPUState* cpu, Vec3 view, Vec3 k) {
 
 static bool g_log_checked, g_log;
 
+/* What the player holds (a sword, a gun) is drawn from a list beside their
+ * character: the player object, a zero, then HELD_SLOTS of (thing, flags);
+ * the game clears a thing's flags to hide it (its text boxes do), drawn while
+ * HELD_DRAWN is set. The camera sets them as it has the player drawn (none
+ * in first person, all in third person and on the way to a thing), writing
+ * the game's own back otherwise; a value the game wrote meanwhile is its new
+ * own. The list is found near the player object whenever that changes. */
+#define HELD_SLOTS 8
+#define HELD_DRAWN 0x00010000u  // set while a thing is drawn (it fades out through 0x40000)
+#define HELD_SHOWN 0x00050000u  // a drawn thing's flags, until the game's are seen
+#define HELD_SEARCH 0x100000u
+static u32 g_held_player, g_held_list;
+static u32 g_held_own[HELD_SLOTS], g_held_written[HELD_SLOTS], g_held_shown[HELD_SLOTS];
+static bool g_held_overridden;
+
+static bool held_list_at(CPUState* cpu, u32 at, u32 player) {
+    if (mem_read32(cpu, at) != player || mem_read32(cpu, at + 4u) != 0u)
+        return false;
+    int things = 0;
+    for (u32 k = 0; k < HELD_SLOTS; k++) {
+        const u32 thing = mem_read32(cpu, at + 8u + k * 8u), flags = mem_read32(cpu, at + 12u + k * 8u);
+        if ((flags & 0xFFFFu) != 0u || flags > 0x00FF0000u)
+            return false;
+        if (thing != 0u && (thing < 0x80000000u || thing - 0x80000000u >= cpu->ram_size))
+            return false;
+        things += thing != 0u;
+    }
+    return things > 0;
+}
+
+static void held_find(CPUState* cpu, u32 player) {
+    g_held_player = player;
+    g_held_list = 0u;
+    g_held_overridden = false;
+    const u32 lo = player > 0x80000000u + HELD_SEARCH ? player - HELD_SEARCH : 0x80000000u;
+    const u32 hi = player - 0x80000000u + HELD_SEARCH < cpu->ram_size ? player + HELD_SEARCH
+                                                                       : 0x80000000u + cpu->ram_size - 64u;
+    for (u32 at = lo & ~3u; at < hi; at += 4u)
+        if (held_list_at(cpu, at, player)) {
+            g_held_list = at;
+            for (u32 k = 0; k < HELD_SLOTS; k++) {
+                const u32 flags = mem_read32(cpu, at + 12u + k * 8u);
+                g_held_shown[k] = flags & HELD_DRAWN ? flags : HELD_SHOWN;
+            }
+            if (g_log)
+                fprintf(stderr, "[camera] what the player holds: list at 0x%08X\n", at);
+            return;
+        }
+}
+
+static void held_override(CPUState* cpu, int drawn) {
+    const u32 player = g_player_offset != 0 ? mem_read32(cpu, cpu->gpr[13] + (u32)(s32)g_player_offset) : 0u;
+    if (player != g_held_player || (g_held_list != 0u && !held_list_at(cpu, g_held_list, player))) {
+        if (player >= 0x80000000u && player - 0x80000000u < cpu->ram_size)
+            held_find(cpu, player);
+        else
+            g_held_player = player, g_held_list = 0u, g_held_overridden = false;
+    }
+    if (g_held_list == 0u)
+        return;
+    for (u32 k = 0; k < HELD_SLOTS; k++) {
+        const u32 at = g_held_list + 12u + k * 8u, now = mem_read32(cpu, at);
+        if (mem_read32(cpu, at - 4u) == 0u)
+            continue;  // empty
+        if (!g_held_overridden || now != g_held_written[k])
+            g_held_own[k] = now;  // the game's own (or its new one)
+        if (g_held_own[k] & HELD_DRAWN)
+            g_held_shown[k] = g_held_own[k];
+        const u32 want = drawn < 0 ? g_held_own[k] : drawn ? g_held_shown[k] : 0u;
+        g_held_written[k] = want;
+        if (now != want)
+            mem_write32(cpu, at, want);
+    }
+    g_held_overridden = drawn >= 0;
+}
+
+
 /* Called at C_MTXLookAt from the game's camera (hle.c checks the return
  * address): r4 = eye, r5 = up, r6 = target; r1 = the camera function's stack
  * frame, whose bytes 40..63 it never uses (the eye and target written there
@@ -1119,6 +1196,8 @@ void camera_look_at(CPUState* cpu) {
         g_last_mode = mode;
     }
     if (mode == CAMERA_ORIGINAL) {
+        if (step)
+            held_override(cpu, -1);
         g_turn = 0.0f;
         g_view_active = false;
         g_hand_progress = g_hand = g_fp_hand_fov = 0.0f;
@@ -1205,6 +1284,8 @@ void camera_look_at(CPUState* cpu) {
             g_turn = level_angle(sub(target, eye), sub(new_target, new_eye), k);
     }
     g_view_active = true;
+    if (step)
+        held_override(cpu, camera_player_drawn());
     g_view_eye = new_eye;
     g_view_target = new_target;
     if (g_log && step && getenv("ED_CAM_LOG")[0] == '4')

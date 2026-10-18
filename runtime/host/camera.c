@@ -83,8 +83,8 @@ static void write_vec(CPUState* cpu, u32 address, Vec3 v) {
     }
 }
 
-static const char* const kModeNames[CAMERA_MODE_COUNT] = {"Original", "Original", "Third person",
-                                                            "First person"};
+static const char* const kModeNames[CAMERA_MODE_COUNT] = {"Original", "Original", "Third person (beta)",
+                                                            "First person (beta)"};
 
 const char* camera_mode_name(int mode) {
     return mode >= 0 && mode < CAMERA_MODE_COUNT ? kModeNames[mode] : "";

@@ -355,6 +355,10 @@ int camera_player_drawn(void) {
         // looks hide them, its camera being at their head; ours is not).
         if (g_hand_progress > 0.0f && length(sub(g_view_eye, g_fp_eye)) >= FP_HEAD_CLEAR)
             return 1;
+        // Aiming they stand still with their arms up: drawn, with the near
+        // plane past their head, they hold the gun in front of the view.
+        if (g_aiming && g_hand_progress <= 0.0f)
+            return 1;
     } else if (g_last_mode == CAMERA_THIRD_PERSON) {
         // Always, as first person on the way: only the game's own close look
         // from their head (where it hides them) is left to the game.

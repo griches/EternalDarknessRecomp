@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-enum { CAMERA_ORIGINAL, CAMERA_FREE_LOOK, CAMERA_THIRD_PERSON, CAMERA_MODE_COUNT };
+enum { CAMERA_ORIGINAL, CAMERA_FREE_LOOK, CAMERA_THIRD_PERSON, CAMERA_FIRST_PERSON, CAMERA_MODE_COUNT };
 
 const char* camera_mode_name(int mode);
 // The mode in use: settings.ini's camera, or ED_CAM=0/1/2 for a test run.
@@ -33,9 +33,10 @@ bool camera_view(float eye[3], float target[3]);
 // From hle.c, each frame: the game has hidden the player to look closely at
 // something (its camera at their head, looking at the thing).
 void camera_set_examining(bool examining);
-// Third person is in use: the player stays drawn even when the game hides
-// them to look closely at something.
-bool camera_shows_player(void);
+// Whether the player is drawn: 1 always (third person: even when the game
+// hides them to look closely at something), 0 never (first person: the eye
+// is in their head), -1 as the game has it.
+int camera_player_drawn(void);
 // From hle.c, as the game's camera makes its projection: the field of view
 // (degrees) to use instead of the game's.
 float camera_field_of_view(float game_fov);

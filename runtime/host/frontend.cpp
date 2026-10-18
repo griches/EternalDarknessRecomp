@@ -681,6 +681,8 @@ void build_options() {
         "The game's own fixed cameras.",
         "The game's cameras, turned with the right stick. They hold still while you aim.",
         "Behind Alex: the right stick turns it, up and down bring it closer or further. "
+        "It holds still while you aim.",
+        "Through Alex's eyes: the right stick looks around, and up on the left stick walks where you look. "
         "It holds still while you aim."};
     Row camera{"Camera", camera_mode_name(g_settings.camera)};
     camera.section = "IV \u00b7 Game";

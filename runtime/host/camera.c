@@ -83,7 +83,8 @@ static void write_vec(CPUState* cpu, u32 address, Vec3 v) {
     }
 }
 
-static const char* const kModeNames[CAMERA_MODE_COUNT] = {"Original", "Free look", "Third person"};
+static const char* const kModeNames[CAMERA_MODE_COUNT] = {"Original", "Free look", "Third person",
+                                                            "First person"};
 
 const char* camera_mode_name(int mode) {
     return mode >= 0 && mode < CAMERA_MODE_COUNT ? kModeNames[mode] : "";
@@ -98,7 +99,7 @@ int camera_mode(void) {
         env = text != NULL && text[0] != '\0' ? atoi(text) : -1;
     }
     int mode = env >= 0 ? env : g_settings.camera;
-    if (mode == CAMERA_THIRD_PERSON && g_player_offset == 0)
+    if ((mode == CAMERA_THIRD_PERSON || mode == CAMERA_FIRST_PERSON) && g_player_offset == 0)
         mode = CAMERA_FREE_LOOK;
     return mode >= 0 && mode < CAMERA_MODE_COUNT ? mode : CAMERA_ORIGINAL;
 }
@@ -181,6 +182,12 @@ float camera_stick_turn(void) {
 // Its field of view (degrees, vertical): its own, not the shot's, so the
 // view keeps its size through the game's cuts and its zooms.
 #define TP_FOV 50.0f
+// First person: the eye's height above the player's feet, and its field of
+// view (degrees, vertical).
+#define FP_HEIGHT 165.0f
+#define FP_FOV 60.0f
+// How far ahead of the eye it looks (only the direction matters).
+#define FP_LOOK 300.0f
 // A sweep's length (seconds) and the share of it spent easing in and out.
 #define SWEEP_TIME 0.8f
 #define SWEEP_EASE 0.15f
@@ -269,10 +276,16 @@ static float g_distance = TP_DISTANCE;  // how far back the player wants it (kep
 void camera_set_examining(bool examining) { g_examining = examining; }
 
 float camera_field_of_view(float game_fov) {
-    return g_view_active && g_last_mode == CAMERA_THIRD_PERSON ? TP_FOV : game_fov;
+    if (!g_view_active)
+        return game_fov;
+    return g_last_mode == CAMERA_THIRD_PERSON ? TP_FOV : g_last_mode == CAMERA_FIRST_PERSON ? FP_FOV : game_fov;
 }
 
-bool camera_shows_player(void) { return g_view_active && g_last_mode == CAMERA_THIRD_PERSON; }
+int camera_player_drawn(void) {
+    if (!g_view_active)
+        return -1;
+    return g_last_mode == CAMERA_THIRD_PERSON ? 1 : g_last_mode == CAMERA_FIRST_PERSON ? 0 : -1;
+}
 
 static bool g_state_pending;  // camera_set_state: applied at the next frame
 static float g_pending_state[CAMERA_STATE_SIZE];
@@ -779,6 +792,44 @@ static void third_person(CPUState* cpu, Vec3 eye, Vec3 focus, Vec3 player, Vec3 
     *new_target = add(centre, g_s_aim);
 }
 
+/* First person: the eye in the player's head (they are not drawn), turned
+ * with the right stick: across, and up and down. It starts looking where the
+ * game's camera looks; when the player looks closely at something it sweeps
+ * to it and back, like third person. The eye follows the player on the same
+ * spring as third person's (a step or a stop does not jolt it). */
+static float g_fp_yaw, g_fp_pitch;
+
+static void first_person(Vec3 eye, Vec3 target, Vec3 focus, Vec3 player, Vec3 k, bool step, bool still,
+                         Vec3* new_eye, Vec3* new_target) {
+    const Vec3 head = add(player, scale(k, FP_HEIGHT));
+    if (step) {
+        const bool jumped = !g_have_player || length(sub(player, g_last_player)) > 300.0f;
+        if (jumped) {
+            g_fp_yaw = dir_yaw(normalize(flatten(sub(target, eye), k)), k);
+            g_fp_pitch = 0.0f;
+            g_s_pivot = head;
+            g_s_pivot_v = v3(0.0f, 0.0f, 0.0f);
+        } else if (!still) {
+            const float dt = 1.0f / 60.0f;
+            g_fp_yaw = remainderf(g_fp_yaw - g_stick_x * YAW_RATE * dt, 2.0f * PI);
+            g_fp_pitch = clampf(g_fp_pitch + g_stick_y * PITCH_RATE * dt, -1.2f, 1.2f);
+        }
+        float px = g_s_pivot.x, py = g_s_pivot.y, pz = g_s_pivot.z;
+        spring(&px, &g_s_pivot_v.x, head.x, SMOOTH_FOLLOW, 3000.0f);
+        spring(&py, &g_s_pivot_v.y, head.y, SMOOTH_FOLLOW, 3000.0f);
+        spring(&pz, &g_s_pivot_v.z, head.z, SMOOTH_FOLLOW, 3000.0f);
+        g_s_pivot = v3(px, py, pz);
+        // What it looks at: ahead of the eye, or swept to a thing looked at.
+        const Vec3 ahead = add(g_s_pivot, scale(out_dir(yaw_dir(g_fp_yaw, k), k, g_fp_pitch), FP_LOOK));
+        sweep_aim(focus, ahead, k, jumped);
+        g_back_sweeps = false;  // nothing to turn round behind
+        g_last_player = player;
+        g_have_player = true;
+    }
+    *new_eye = g_s_pivot;
+    *new_target = g_aim;
+}
+
 static bool g_log_checked, g_log;
 
 /* Called at C_MTXLookAt from the game's camera (hle.c checks the return
@@ -846,7 +897,11 @@ void camera_look_at(CPUState* cpu) {
     Vec3 new_eye, new_target;
     if (mode == CAMERA_FREE_LOOK)
         free_look(eye, target, k, step, still, &new_eye, &new_target);
-    else {
+    else if (mode == CAMERA_FIRST_PERSON) {
+        Vec3 focus = target;
+        game_goal(cpu, &focus);
+        first_person(eye, target, focus, player, k, step, still, &new_eye, &new_target);
+    } else {
         // What the player looks at: where the game's camera is heading,
         // known from the moment they press B (else where it looks now).
         Vec3 focus = target;

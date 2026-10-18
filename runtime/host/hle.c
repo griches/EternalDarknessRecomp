@@ -5419,7 +5419,8 @@ static void find_camera_fade(CPUState* cpu) {
 // The game draws the player only while two flags are set; looking closely at
 // something clears them, as its camera is then at the player's head. The
 // third-person camera is not, so while it is in use the characters' draw loop
-// runs with both set, and they get the game's values back as soon as it returns. The
+// runs with both set (and first person, at the player's head, with both
+// clear), and they get the game's values back as soon as it returns. The
 // setter (found by its code) gives the flags: fn(show) stores show at
 // offset(r13), and at a second offset when the player is also the one the
 // camera follows; the draw loop is the function that tests the first.
@@ -5427,15 +5428,16 @@ static u32 g_draw_characters;
 static bool g_draw_characters_running;
 
 static void hle_draw_characters(CPUState* cpu) {
-    if (g_draw_characters_running || !camera_shows_player() || !sda_ready(cpu)) {
+    const int drawn = camera_player_drawn();
+    if (g_draw_characters_running || drawn < 0 || !sda_ready(cpu)) {
         g_hle_passthrough = true;
         return;
     }
     const u32 show = cpu->gpr[13] + (u32)(s32)g_show_player_offset;
     const u32 followed = cpu->gpr[13] + (u32)(s32)g_show_followed_offset;
     const u32 saved_show = mem_read32(cpu, show), saved_followed = mem_read32(cpu, followed);
-    mem_write32(cpu, show, 1u);
-    mem_write32(cpu, followed, 1u);
+    mem_write32(cpu, show, (u32)drawn);
+    mem_write32(cpu, followed, (u32)drawn);
     u32 args[8];
     for (int i = 0; i < 8; i++)
         args[i] = cpu->gpr[3 + i];

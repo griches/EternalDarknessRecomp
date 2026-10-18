@@ -109,6 +109,7 @@ void camera_set_player_offset(int offset) { g_player_offset = (s16)offset; }
 static bool g_view_active;  // camera_view
 static Vec3 g_view_eye, g_view_target;
 static Vec3 g_fp_eye;  // first person's own eye, at the player's head
+static Vec3 g_head_eye;  // the player's eyes (any mode)
 
 bool camera_view(float eye[3], float target[3]) {
     if (!g_view_active)
@@ -356,10 +357,14 @@ int camera_player_drawn(void) {
         // looks hide them, its camera being at their head; ours is not).
         if (g_hand_progress > 0.0f && length(sub(g_view_eye, g_fp_eye)) >= FP_HEAD_CLEAR)
             return 1;
-    } else if (g_hand > 0.5f) {
-        return -1;
+    } else if (g_last_mode == CAMERA_THIRD_PERSON) {
+        // Always, as first person on the way: only the game's own close look
+        // from their head (where it hides them) is left to the game.
+        if (g_hand_progress > 0.0f && length(sub(g_view_eye, g_head_eye)) < FP_HEAD_CLEAR)
+            return -1;
+        return 1;
     }
-    return g_last_mode == CAMERA_THIRD_PERSON ? 1 : g_last_mode == CAMERA_FIRST_PERSON ? body : -1;
+    return g_last_mode == CAMERA_FIRST_PERSON ? body : -1;
 }
 
 static bool g_state_pending;  // camera_set_state: applied at the next frame
@@ -1120,6 +1125,7 @@ void camera_look_at(CPUState* cpu) {
         return;
     }
     const bool still = g_aiming;
+    g_head_eye = add(player, scale(k, g_head_valid ? clampf(g_eye_height, FP_MIN_EYE, FP_MAX_EYE) : FP_HEIGHT));
     Vec3 new_eye, new_target;
     if (mode == CAMERA_FREE_LOOK)
         free_look(eye, target, k, step, still, &new_eye, &new_target);

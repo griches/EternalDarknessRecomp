@@ -110,6 +110,16 @@ static bool g_view_active;  // camera_view
 static Vec3 g_view_eye, g_view_target;
 static Vec3 g_fp_eye;  // first person's own eye, at the player's head
 static Vec3 g_head_eye;  // the player's eyes (any mode)
+// Aiming in first person: the player is turned to the view for the first
+// FP_AIM_TURN frames (the game would carry on turning them), and drawn (arms
+// up, holding the gun) only once they have stood still with the eye caught
+// up on their head for FP_AIM_SETTLE frames: walking, the eye trails the head
+// and would look through the back of it, then their face.
+#define FP_AIM_TURN 15
+#define FP_AIM_SETTLE 6
+#define FP_AIM_STILL 0.3f   // their speed (per frame) that counts as standing
+#define FP_AIM_CAUGHT 2.0f  // how far the eye may trail the head
+static int g_aim_frames, g_aim_settled;
 
 bool camera_view(float eye[3], float target[3]) {
     if (!g_view_active)
@@ -357,7 +367,7 @@ int camera_player_drawn(void) {
             return 1;
         // Aiming they stand still with their arms up: drawn, with the near
         // plane past their head, they hold the gun in front of the view.
-        if (g_aiming && g_hand_progress <= 0.0f)
+        if (g_aiming && g_hand_progress <= 0.0f && g_aim_settled >= FP_AIM_SETTLE)
             return 1;
     } else if (g_last_mode == CAMERA_THIRD_PERSON) {
         // Always, as first person on the way: only the game's own close look
@@ -987,6 +997,7 @@ static void first_person(Vec3 eye, Vec3 target, Vec3 focus, Vec3 player, Vec3 k,
     }
     if (step) {
         const bool jumped = !g_have_player || length(sub(player, g_last_player)) > 300.0f;
+        const float speed = g_have_player ? length(flatten(sub(player, g_last_player), k)) : 0.0f;
         if (jumped) {
             // Where the player faces (the game's camera can look across them,
             // through a door say), else where it looks.
@@ -1010,6 +1021,13 @@ static void first_person(Vec3 eye, Vec3 target, Vec3 focus, Vec3 player, Vec3 k,
         spring(&py, &g_s_pivot_v.y, head.y, SMOOTH_FOLLOW, 3000.0f);
         spring(&pz, &g_s_pivot_v.z, head.z, SMOOTH_FOLLOW, 3000.0f);
         g_s_pivot = v3(px, py, pz);
+        if (still) {
+            g_aim_frames++;
+            const bool settled = speed < FP_AIM_STILL && length(sub(head, g_s_pivot)) < FP_AIM_CAUGHT;
+            g_aim_settled = settled ? g_aim_settled + 1 : 0;
+        } else {
+            g_aim_frames = g_aim_settled = 0;
+        }
         // What it looks at: ahead of the eye, or swept to a thing looked at.
         const Vec3 ahead = add(g_s_pivot, scale(out_dir(yaw_dir(g_fp_yaw, k), k, g_fp_pitch), FP_LOOK));
         sweep_aim(focus, ahead, k, jumped);
@@ -1038,8 +1056,9 @@ void camera_set_move(float x, float y) {
     g_move_y = y;
 }
 
-static void face_stick(CPUState* cpu, Vec3 view, Vec3 k) {
-    if (hypotf(g_move_x, g_move_y) < FACE_MIN_STICK || g_player_offset == 0)
+/* Turns the player to face along dir (level). */
+static void player_set_facing(CPUState* cpu, Vec3 dir) {
+    if (g_player_offset == 0)
         return;
     const u32 object = mem_read32(cpu, cpu->gpr[13] + (u32)(s32)g_player_offset);
     if (object < 0x80000000u || object - 0x80000000u > cpu->ram_size - 64u)
@@ -1048,8 +1067,6 @@ static void face_stick(CPUState* cpu, Vec3 view, Vec3 k) {
                 qz = read_float(cpu, object + PLAYER_TURN + 8u), qw = read_float(cpu, object + PLAYER_TURN + 12u);
     if (!(fabsf(qx) < 0.01f && fabsf(qy) < 0.01f && fabsf(qz * qz + qw * qw - 1.0f) < 0.05f))
         return;
-    const Vec3 forward = normalize(flatten(view, k));
-    const Vec3 dir = add(scale(forward, g_move_y), scale(cross(forward, k), g_move_x));
     const float turn = atan2f(dir.y, dir.x) + 0.5f * PI;
     float z = sinf(0.5f * turn), w = cosf(0.5f * turn);
     if (z * qz + w * qw < 0.0f)
@@ -1060,6 +1077,13 @@ static void face_stick(CPUState* cpu, Vec3 view, Vec3 k) {
         memcpy(&bits, &f[i], sizeof bits);
         mem_write32(cpu, object + PLAYER_TURN + 8u + (u32)i * 4u, bits);
     }
+}
+
+static void face_stick(CPUState* cpu, Vec3 view, Vec3 k) {
+    if (hypotf(g_move_x, g_move_y) < FACE_MIN_STICK)
+        return;
+    const Vec3 forward = normalize(flatten(view, k));
+    player_set_facing(cpu, add(scale(forward, g_move_y), scale(cross(forward, k), g_move_x)));
 }
 
 static bool g_log_checked, g_log;
@@ -1238,6 +1262,9 @@ void camera_look_at(CPUState* cpu) {
         face_all = getenv("ED_CAM_FACE") != NULL && atoi(getenv("ED_CAM_FACE")) != 0;
     if (step && !still && g_hand_progress <= 0.0f && (mode == CAMERA_FIRST_PERSON || face_all))
         face_stick(cpu, sub(new_target, new_eye), k);
+    // Aiming in first person: facing the view, as they raise the gun.
+    if (step && still && g_hand_progress <= 0.0f && mode == CAMERA_FIRST_PERSON && g_aim_frames <= FP_AIM_TURN)
+        player_set_facing(cpu, normalize(flatten(sub(new_target, new_eye), k)));
     // Looking closely at something, the view eases over to the game's own
     // camera (where it stands, what it looks at, its field of view: its framing
     // of the thing) and back when that ends, on the sweep's eased timing.

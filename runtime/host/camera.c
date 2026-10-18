@@ -202,6 +202,8 @@ float camera_stick_turn(void) {
 #define FP_NEAR 45.0f
 // The eye this far ahead of the head along the view.
 #define FP_AHEAD 12.0f
+// Aiming (the player drawn, swinging): further ahead, past their shoulders.
+#define FP_AIM_AHEAD 12.0f
 // The eyes below the top of the head (the skeleton's highest bone), kept
 // within these heights.
 #define FP_BELOW_TOP 25.0f
@@ -326,11 +328,25 @@ void camera_set_examining(bool hidden, int looking) {
     g_looking_known = looking;
 }
 
+static float g_aim_blend;  // 0..1, eased in while aiming in first person (tests: ED_CAM_AIM_FOV, ED_CAM_AIM_DROP)
+
+static float env_float(const char* name, float fallback) {
+    const char* v = getenv(name);
+    return v != NULL ? (float)atof(v) : fallback;
+}
+
+static float fp_fov(void) {
+    static float aim = -1.0f;
+    if (aim < 0.0f)
+        aim = env_float("ED_CAM_AIM_FOV", FP_FOV);
+    return FP_FOV + (aim - FP_FOV) * g_aim_blend;
+}
+
 float camera_field_of_view(float game_fov) {
     if (!g_view_active)
         return game_fov;
     const float own =
-        g_last_mode == CAMERA_THIRD_PERSON ? TP_FOV : g_last_mode == CAMERA_FIRST_PERSON ? FP_FOV : game_fov;
+        g_last_mode == CAMERA_THIRD_PERSON ? TP_FOV : g_last_mode == CAMERA_FIRST_PERSON ? fp_fov() : game_fov;
     if (g_held_fov <= 0.0f)
         g_held_fov = game_fov;  // else held with the eye (camera_look_at)
     if (g_last_mode == CAMERA_FIRST_PERSON && g_fp_hand_fov > 0.0f)
@@ -972,6 +988,180 @@ void camera_bone_matrix(CPUState* cpu, unsigned character, unsigned bone, unsign
         g_bone_n = (int)bone + 1;
 }
 
+/* Aiming in first person the player is drawn for their arms and what they
+ * hold, but not their head, chest or legs (a helmet's crest, a shoulder plate
+ * rising into the view as they swing). The game works out each character's
+ * bones into the scratch block, then skins its mesh from them (hle.c steps in
+ * around that, for the player): every bone but the arms' has its turn set to
+ * nothing there, so what hangs off it shrinks to a point, and gets it back
+ * straight after. The arms are found in the skeleton (model +36: 80 bytes a
+ * bone, its parent's at +60): the branches of the bone with the most of
+ * them that end in a hand (a bone with three or more children, its fingers). */
+#define SKIN_MAX_BONES 128
+// Kept: the hand, its fingers and what it holds, and this many bones above it
+// (forearm and upper arm; above them a shoulder plate hangs off the
+// collarbone, and with only the forearm the upper arm stretches to points).
+#define FP_ARM_BONES 2
+static u32 g_skin_model;
+static bool g_skin_keep[SKIN_MAX_BONES];
+static int g_skin_bones;
+static float g_skin_saved[SKIN_MAX_BONES][3];
+static bool g_skin_collapsed;
+
+static void skin_find_arms(CPUState* cpu, u32 model, int n) {
+    g_skin_model = model;
+    g_skin_bones = 0;
+    const u32 table = mem_read32(cpu, model + 36u);
+    if (table < 0x80000000u || table - 0x80000000u > cpu->ram_size - (u32)n * 80u || n > SKIN_MAX_BONES)
+        return;
+    int parent[SKIN_MAX_BONES], kids[SKIN_MAX_BONES] = {0};
+    for (int i = 0; i < n; i++) {
+        const u32 p = mem_read32(cpu, table + (u32)i * 80u + 60u);
+        parent[i] = p >= table && (p - table) % 80u == 0u && (int)((p - table) / 80u) < n ? (int)((p - table) / 80u) : -1;
+        if (parent[i] >= 0)
+            kids[parent[i]]++;
+    }
+    // Hands: three or more children. The chest: the nearest bone above two
+    // hands that both pass through.
+    int hands[8], h = 0;
+    for (int i = 0; i < n && h < 8; i++) {
+        if (kids[i] < 3 || parent[i] < 0)
+            continue;
+        // A hand's children are its fingers: each a short chain, unbranched.
+        bool fingers = true;
+        for (int j = 0; j < n && fingers; j++) {
+            if (parent[j] != i)
+                continue;
+            int length = 1;
+            for (int c = j; kids[c] == 1 && length <= 4; length++) {
+                int next = -1;
+                for (int x = 0; x < n; x++)
+                    if (parent[x] == c)
+                        next = x;
+                c = next;
+            }
+            int end = j;  // where the chain stops: a leaf, or it branches
+            for (int step = 0; step < length - 1; step++)
+                for (int x = 0; x < n; x++)
+                    if (parent[x] == end) {
+                        end = x;
+                        break;
+                    }
+            fingers = length <= 4 && kids[end] == 0;
+        }
+        if (fingers)
+            hands[h++] = i;
+    }
+    if (h < 1)
+        return;
+    // Each hand's arm: up from the hand to the first bone with more than one
+    // child (the chest), every bone on the way and below it kept.
+    for (int i = 0; i < n; i++)
+        g_skin_keep[i] = false;
+    int arms = 0;
+    static int up = -1;  // ED_CAM_ARM_BONES: bones kept above the hand (tests)
+    if (up < 0)
+        up = getenv("ED_CAM_ARM_BONES") != NULL ? atoi(getenv("ED_CAM_ARM_BONES")) : FP_ARM_BONES;
+    for (int a = 0; a < h; a++) {
+        int top = hands[a];
+        for (int k = 0; k < up && parent[top] >= 0 && kids[parent[top]] == 1; k++)
+            top = parent[top];
+        if (parent[top] < 0)
+            continue;
+        for (int i = 0; i < n; i++)  // the arm's branch: top and all below it
+            for (int j = i; j >= 0; j = parent[j])
+                if (j == top) {
+                    g_skin_keep[i] = true;
+                    break;
+                }
+        arms++;
+    }
+    if (arms > 0)
+        g_skin_bones = n;
+    if (getenv("ED_CAM_LOG") != NULL)
+        fprintf(stderr, "[camera] first person aiming: %d arms in %d bones\n", arms, n);
+}
+
+static u32 g_skin_table;
+
+/* The skeleton's bones: its table's entries while each looks like one (its
+ * scale's three floats near 1 or 0, its parent in the table or none). */
+static int skin_count_bones(CPUState* cpu, u32 table) {
+    int n = 0;
+    while (n < SKIN_MAX_BONES) {
+        const u32 e = table + (u32)n * 80u;
+        if (e - 0x80000000u > cpu->ram_size - 80u)
+            break;
+        bool ok = true;
+        for (int c = 0; c < 3 && ok; c++) {
+            const float v = read_float(cpu, e + (u32)c * 4u);
+            ok = isfinite(v) && v >= 0.0f && v < 4.0f;
+        }
+        const u32 p = mem_read32(cpu, e + 60u);
+        ok = ok && (p == 0u || (p >= table && p < e && (p - table) % 80u == 0u));
+        if (!ok)
+            break;
+        n++;
+    }
+    return n;
+}
+
+void camera_skin_begin(CPUState* cpu, unsigned character) {
+    g_skin_collapsed = false;
+    const u32 player = g_player_offset != 0 ? mem_read32(cpu, cpu->gpr[13] + (u32)(s32)g_player_offset) : 0u;
+    if (character != player || player == 0u)
+        return;
+    static int everywhere = -1;  // ED_CAM_ARMS_ONLY=1: in every mode, always (tests)
+    if (everywhere < 0)
+        everywhere = getenv("ED_CAM_ARMS_ONLY") != NULL;
+    if (!everywhere && !(g_view_active && g_last_mode == CAMERA_FIRST_PERSON && g_aiming && g_hand_progress <= 0.0f))
+        return;
+    const u32 model = mem_read32(cpu, character + 60u);
+    if (model < 0x80000000u || model - 0x80000000u > cpu->ram_size - 64u)
+        return;
+    if (model != g_skin_model) {
+        const u32 table = mem_read32(cpu, model + 36u);
+        const int n = table >= 0x80000000u && table - 0x80000000u < cpu->ram_size ? skin_count_bones(cpu, table) : 0;
+        skin_find_arms(cpu, model, n);
+    }
+    if (g_skin_bones <= 0)
+        return;
+    g_skin_table = mem_read32(cpu, model + 36u);
+    static int all = -1;
+    if (all < 0)
+        all = getenv("ED_SKIN_ALL") != NULL;
+    for (int i = 0; i < g_skin_bones; i++) {
+        if (g_skin_keep[i] && !all)
+            continue;
+        const u32 e = g_skin_table + (u32)i * 80u;
+        for (int c = 0; c < 3; c++) {
+            g_skin_saved[i][c] = read_float(cpu, e + (u32)c * 4u);
+            mem_write32(cpu, e + (u32)c * 4u, 0u);
+        }
+    }
+    g_skin_collapsed = true;
+}
+
+void camera_skin_end(CPUState* cpu, unsigned character) {
+    (void)character;
+    if (!g_skin_collapsed)
+        return;
+    g_skin_collapsed = false;
+    static int all = -1;
+    if (all < 0)
+        all = getenv("ED_SKIN_ALL") != NULL;
+    for (int i = 0; i < g_skin_bones; i++) {
+        if (g_skin_keep[i] && !all)
+            continue;
+        const u32 e = g_skin_table + (u32)i * 80u;
+        for (int c = 0; c < 3; c++) {
+            u32 bits;
+            memcpy(&bits, &g_skin_saved[i][c], sizeof bits);
+            mem_write32(cpu, e + (u32)c * 4u, bits);
+        }
+    }
+}
+
 /* First person: the eye at the player's head (at their own height, from
  * their skeleton), turned with the right stick: across, and up and down. The
  * player is not drawn: their head, hair and helmet swing well forward of
@@ -998,7 +1188,16 @@ static void first_person(Vec3 eye, Vec3 target, Vec3 focus, Vec3 player, Vec3 k,
         static float eye_z = FP_HEIGHT;
         if (step)
             eye_z += (clampf(g_eye_height, FP_MIN_EYE, FP_MAX_EYE) - eye_z) * 0.1f;
-        head = add(add(player, scale(k, eye_z)), scale(yaw_dir(g_fp_yaw, k), FP_AHEAD));
+        static float aim_ahead = -1.0f;  // ED_CAM_AIM_AHEAD (tests)
+        if (aim_ahead < 0.0f)
+            aim_ahead = getenv("ED_CAM_AIM_AHEAD") != NULL ? (float)atof(getenv("ED_CAM_AIM_AHEAD")) : FP_AIM_AHEAD;
+        static float drop = -1.0f;
+        if (drop < 0.0f)
+            drop = env_float("ED_CAM_AIM_DROP", 0.0f);
+        if (step)
+            g_aim_blend = clampf(g_aim_blend + (still ? 1.0f : -1.0f) / 12.0f, 0.0f, 1.0f);
+        head = add(add(player, scale(k, eye_z - drop * g_aim_blend)),
+                   scale(yaw_dir(g_fp_yaw, k), still ? aim_ahead : FP_AHEAD));
         if (log && step) {
             static unsigned n;
             if (n++ % 30u == 0u)

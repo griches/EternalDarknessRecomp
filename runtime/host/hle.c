@@ -5546,6 +5546,60 @@ static void notify_bone_matrix(CPUState* cpu) {
     camera_bone_matrix(cpu, cpu->gpr[3], cpu->gpr[4], cpu->gpr[5]);
 }
 
+/* A character's update works out its bones (fn A(character, 0)), then skins
+ * its mesh from them (fn B(..)): li r4,0; bl A; or r3,r29,r29; bl B, A
+ * calling the bone function. Aiming in first person the player's skinning
+ * runs with only their arms' bones (camera_skin_begin). */
+static u32 g_bone_fn, g_skin_fn, g_skin_character;
+static bool g_skin_running;
+
+static void notify_character_bones(CPUState* cpu) {
+    g_skin_character = cpu->gpr[3];
+    camera_skin_begin(cpu, g_skin_character);
+}
+
+static void hle_skin(CPUState* cpu) {
+    if (g_skin_running || !sda_ready(cpu)) {
+        g_hle_passthrough = true;
+        return;
+    }
+    u32 args[8];
+    for (int i = 0; i < 8; i++)
+        args[i] = cpu->gpr[3 + i];
+    g_skin_running = true;
+    const bool ok = hle_guest_call(cpu, g_skin_fn, args, 8, cpu->fpr[1], NULL);
+    camera_skin_end(cpu, g_skin_character);
+    g_skin_running = false;
+    if (!ok)
+        fprintf(stderr, "[camera] the characters' skinning did not return\n");
+    g_hle_passthrough = false;
+    g_hle_tail_call = false;
+}
+
+static void find_skinning(CPUState* cpu) {
+    for (u32 at = HLE_CODE_BASE; g_bone_fn != 0u && at + 16u < HLE_CODE_LIMIT; at += 4u) {
+        if (mem_read32(cpu, at) != 0x38800000u || mem_read32(cpu, at + 8u) != 0x7FA3EB78u)
+            continue;
+        const u32 a = bl_target(cpu, at + 4u), b = bl_target(cpu, at + 12u);
+        if (a == 0u || b == 0u)
+            continue;
+        bool calls_bones = false;
+        for (u32 c = a; c < a + 0x200u && !calls_bones; c += 4u)
+            calls_bones = bl_target(cpu, c) == g_bone_fn;
+        if (!calls_bones)
+            continue;
+        HleDispatchEntry* ea = hle_dispatch_entry(a);
+        HleDispatchEntry* eb = hle_dispatch_entry(b);
+        if (ea == NULL || eb == NULL || ea->notify != NULL || eb->notify != NULL || eb->intercept != NULL)
+            break;
+        ea->notify = notify_character_bones;
+        eb->intercept = hle_skin;
+        g_skin_fn = b;
+        return;
+    }
+    fprintf(stderr, "[camera] the characters' skinning not found: first person aiming draws the whole player\n");
+}
+
 static void find_bone_matrix(CPUState* cpu) {
     // stwu r1,-32(r1); mflr r0; stw r0,36(r1); stmw r27,12(r1); or r29,r3,r3;
     // or r30,r4,r4; or r31,r5,r5; or r27,r6,r6; bl ...
@@ -5561,6 +5615,12 @@ static void find_bone_matrix(CPUState* cpu) {
         return;
     }
     entry->notify = notify_bone_matrix;
+    for (u32 at = HLE_CODE_BASE; at + 36u < HLE_CODE_LIMIT; at += 4u)
+        if (hle_dispatch_entry(at) == entry) {
+            g_bone_fn = at;
+            break;
+        }
+    find_skinning(cpu);
 }
 
 // The player object (position at +0), for the third-person camera: a pointer

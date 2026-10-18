@@ -79,6 +79,11 @@ void camera_set_menu(bool open);
 struct CPUState;
 void camera_held_begin(struct CPUState* cpu);
 void camera_held_end(struct CPUState* cpu);
+// Around a character's bones being worked out and its mesh skinned (hle.c):
+// aiming in first person, the player's bones but their arms' scaled to
+// nothing (only their arms drawn), and given back after.
+void camera_skin_begin(struct CPUState* cpu, unsigned character);
+void camera_skin_end(struct CPUState* cpu, unsigned character);
 
 #ifdef __cplusplus
 }

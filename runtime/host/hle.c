@@ -5604,7 +5604,7 @@ static void notify_perspective(CPUState* cpu) {
         const double fov = camera_field_of_view((float)cpu->fpr[1]);
         cpu->fpr[1] = fov;
         cpu->ps1[1] = fov;
-        const double near = camera_near_plane((float)cpu->fpr[3]);
+        const double near = camera_near_plane((float)cpu->fpr[3], cpu->timebase / 675000ull);
         cpu->fpr[3] = near;
         cpu->ps1[3] = near;
     }

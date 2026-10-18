@@ -340,18 +340,25 @@ float camera_field_of_view(float game_fov) {
 
 int camera_player_drawn(void);
 
-float camera_near_plane(float game_near) {
+float camera_near_plane(float game_near, unsigned long long frame) {
     static float near = -1.0f;  // ED_CAM_FP_NEAR (tests)
     if (near < 0.0f)
         near = getenv("ED_CAM_FP_NEAR") != NULL ? (float)atof(getenv("ED_CAM_FP_NEAR")) : FP_NEAR;
     // The game sets it before the frame's draws, ahead of the camera: aiming,
     // it moves a frame before the player is drawn (else that frame looks out
     // from inside their head).
-    const bool soon = g_aiming && g_aim_settled >= FP_AIM_SETTLE - 1;
-    return g_view_active && g_last_mode == CAMERA_FIRST_PERSON && g_hand_progress <= 0.0f &&
-                   (camera_player_drawn() == 1 || soon)
-               ? fmaxf(game_near, near)
-               : game_near;
+    // Chosen once a frame: the game makes its projection twice a frame, either
+    // side of the camera's step, and a change between the two drew part of
+    // the frame (the basins' flames) with each.
+    static unsigned long long latched = ~0ull;
+    static bool ours;
+    if (frame != latched) {
+        latched = frame;
+        const bool soon = g_aiming && g_aim_settled >= FP_AIM_SETTLE - 1;
+        ours = g_view_active && g_last_mode == CAMERA_FIRST_PERSON && g_hand_progress <= 0.0f &&
+               (camera_player_drawn() == 1 || soon);
+    }
+    return ours ? fmaxf(game_near, near) : game_near;
 }
 
 int camera_player_drawn(void) {

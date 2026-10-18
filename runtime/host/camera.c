@@ -404,6 +404,25 @@ static bool player_position(CPUState* cpu, Vec3* out) {
            fabsf(out->y) < 1e6f && fabsf(out->z) < 1e6f;
 }
 
+/* The player's turn: a quaternion about the up axis at player +44 (x, y, z,
+ * w); they face (and walk) along it, a quarter turn round. */
+#define PLAYER_TURN 44u
+
+static bool player_facing(CPUState* cpu, Vec3 k, Vec3* dir) {
+    if (g_player_offset == 0)
+        return false;
+    const u32 object = mem_read32(cpu, cpu->gpr[13] + (u32)(s32)g_player_offset);
+    if (object < 0x80000000u || object - 0x80000000u > cpu->ram_size - 64u)
+        return false;
+    const float qx = read_float(cpu, object + PLAYER_TURN), qy = read_float(cpu, object + PLAYER_TURN + 4u),
+                qz = read_float(cpu, object + PLAYER_TURN + 8u), qw = read_float(cpu, object + PLAYER_TURN + 12u);
+    if (!(fabsf(qx) < 0.01f && fabsf(qy) < 0.01f && fabsf(qz * qz + qw * qw - 1.0f) < 0.05f))
+        return false;
+    const float facing = 2.0f * atan2f(qz, qw) - 0.5f * PI;
+    *dir = normalize(flatten(v3(cosf(facing), sinf(facing), 0.0f), k));
+    return length(*dir) > 0.5f;
+}
+
 /* Signed angle (radians, counter-clockwise about k) from a to b, level. */
 static float level_angle(Vec3 a, Vec3 b, Vec3 k) {
     a = normalize(flatten(a, k));
@@ -992,7 +1011,15 @@ static void first_person(Vec3 eye, Vec3 target, Vec3 focus, Vec3 player, Vec3 k,
     if (step) {
         const bool jumped = !g_have_player || length(sub(player, g_last_player)) > 300.0f;
         if (jumped) {
-            g_fp_yaw = dir_yaw(normalize(flatten(sub(target, eye), k)), k);
+            // Where the player faces (the game's camera can look across them,
+            // through a door say), else where it looks.
+            Vec3 facing;
+            if (!player_facing(g_cpu, k, &facing))
+                facing = normalize(flatten(sub(target, eye), k));
+            g_fp_yaw = dir_yaw(facing, k);
+            if (log)
+                fprintf(stderr, "[camera] first person starts facing %.0f deg (the game's camera %.0f)\n",
+                        g_fp_yaw * 180.0f / PI, dir_yaw(normalize(flatten(sub(target, eye), k)), k) * 180.0f / PI);
             g_fp_pitch = 0.0f;
             g_s_pivot = head;
             g_s_pivot_v = v3(0.0f, 0.0f, 0.0f);
@@ -1027,7 +1054,6 @@ static void first_person(Vec3 eye, Vec3 target, Vec3 focus, Vec3 player, Vec3 k,
  * game, already facing that way, just walks. Not while their turn leans off
  * the up axis (x or y set). */
 #define FACE_MIN_STICK 0.25f
-#define PLAYER_TURN 44u
 static float g_move_x, g_move_y;
 
 void camera_set_move(float x, float y) {

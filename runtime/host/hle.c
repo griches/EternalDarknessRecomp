@@ -5337,16 +5337,42 @@ static s16 g_camera_player_offset;
 static u32 g_collide_world, g_collide_segment, g_collide_test;
 static int g_collide_log = -1;
 
+// The test is a query that must not hold the game: a call that runs past
+// COLLIDE_MAX_BLOCKS (one ran on for seconds as the player picked up a gun;
+// a test takes a few) is abandoned, and the camera goes without the game's
+// collision for COLLIDE_REST_FRAMES.
+#define COLLIDE_MAX_BLOCKS 200000u
+#define COLLIDE_REST_FRAMES 300ull
+#define COLLIDE_MAX_REACH 20000.0f
+static unsigned long long g_collide_rest_until;
+
+static bool collide_call(CPUState* cpu, u32 fn, const u32* args, int count, double f1, u32* result) {
+    if (hle_guest_call_within(cpu, fn, args, count, f1, result, COLLIDE_MAX_BLOCKS))
+        return true;
+    g_collide_rest_until = cpu->timebase / 675000ull + COLLIDE_REST_FRAMES;
+    fprintf(stderr, "[camera] the game's collision test 0x%08X ran on: none for %llu frames\n", fn,
+            COLLIDE_REST_FRAMES);
+    return false;
+}
+
 static bool camera_collide(CPUState* cpu, const float start[3], const float end[3], float radius, float hit[3]) {
     const u32 object = mem_read32(cpu, cpu->gpr[13] + (u32)(s32)g_camera_player_offset);
     if (object < 0x80000000u || object - 0x80000000u >= cpu->ram_size)
+        return false;
+    if (cpu->timebase / 675000ull < g_collide_rest_until)
+        return false;
+    for (int i = 0; i < 3; i++)
+        if (!isfinite(start[i]) || !isfinite(end[i]) || fabsf(start[i]) > 1e6f || fabsf(end[i]) > 1e6f ||
+            fabsf(end[i] - start[i]) > COLLIDE_MAX_REACH)
+            return false;
+    if (!(isfinite(radius) && radius >= 0.0f && radius < 1000.0f))
         return false;
     // Scratch below the stack, above the frames hle_guest_call's callee makes.
     const u32 scratch = (cpu->gpr[1] - 0x200u) & ~15u;
     const u32 from = scratch, to = scratch + 16u, segment = scratch + 32u, out = scratch + 112u;
     const u32 offset_at = object + 612u;
     u32 world = 0, surface = 0;
-    if (!hle_guest_call(cpu, g_collide_world, &object, 1, 0.0, &world) || world == 0u)
+    if (!collide_call(cpu, g_collide_world, &object, 1, 0.0, &world) || world == 0u)
         return false;
     float offset[3];
     for (u32 i = 0; i < 3u; i++) {
@@ -5356,8 +5382,11 @@ static bool camera_collide(CPUState* cpu, const float start[3], const float end[
     }
     const u32 segment_args[] = {segment, from, to};
     const u32 test_args[] = {object, world, segment, out, 0u};
-    if (!hle_guest_call(cpu, g_collide_segment, segment_args, 3, radius, NULL) ||
-        !hle_guest_call(cpu, g_collide_test, test_args, 5, 0.0, &surface))
+    for (u32 i = 0; i < 3u; i++)
+        if (!isfinite(offset[i]) || fabsf(offset[i]) > 1e6f)
+            return false;
+    if (!collide_call(cpu, g_collide_segment, segment_args, 3, radius, NULL) ||
+        !collide_call(cpu, g_collide_test, test_args, 5, 0.0, &surface))
         return false;
     if (g_collide_log < 0)
         g_collide_log = getenv("ED_CAM_LOG") != NULL;

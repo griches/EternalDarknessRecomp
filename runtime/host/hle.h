@@ -55,5 +55,8 @@ void hle_gx_state_load(const void* in);
 // (a hook), with r3.. = args and f1, and every register as it was afterwards.
 // False when it did not return within its budget (main.c).
 bool hle_guest_call(CPUState* cpu, u32 fn, const u32* args, int count, double f1, u32* result);
+// The same, abandoned after max_blocks (a query that must not hold the game).
+bool hle_guest_call_within(CPUState* cpu, u32 fn, const u32* args, int count, double f1, u32* result,
+                           u32 max_blocks);
 
 #endif /* ED_HLE_H */

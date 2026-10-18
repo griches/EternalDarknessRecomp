@@ -55,6 +55,11 @@
 #define GUEST_CALL_MAX_BLOCKS 50000000u
 
 bool hle_guest_call(CPUState* cpu, u32 fn, const u32* args, int count, double f1, u32* result) {
+    return hle_guest_call_within(cpu, fn, args, count, f1, result, GUEST_CALL_MAX_BLOCKS);
+}
+
+bool hle_guest_call_within(CPUState* cpu, u32 fn, const u32* args, int count, double f1, u32* result,
+                           u32 max_blocks) {
     // A thread that does not own the FPU traps on its first FP instruction and
     // the OS hands it over; the call would, so do it first, and keep it.
     if ((cpu->msr & 0x00002000u) == 0u) {  // MSR[FP]
@@ -77,7 +82,7 @@ bool hle_guest_call(CPUState* cpu, u32 fn, const u32* args, int count, double f1
     cpu->pc = fn;
     bool ok = false;
     u32 blocks_used = 0;
-    for (u32 blocks = 0; blocks < GUEST_CALL_MAX_BLOCKS; blocks++, blocks_used = blocks) {
+    for (u32 blocks = 0; blocks < max_blocks; blocks++, blocks_used = blocks) {
         if (cpu->pc == GUEST_CALL_SENTINEL) {
             ok = true;
             break;

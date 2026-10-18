@@ -64,6 +64,10 @@ bool camera_takes_stick(void);
 // counter-clockwise seen from above) to turn the stick by so that pushing up
 // walks away from the camera. 0 while aiming or with the game's camera.
 float camera_stick_turn(void);
+// The left stick as the player pushes it (-1..1, up +y), before the turn: in
+// first person the player faces where it points at once, without the game's
+// turn round.
+void camera_set_move(float x, float y);
 
 #ifdef __cplusplus
 }

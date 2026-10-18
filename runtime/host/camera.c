@@ -967,6 +967,47 @@ static void first_person(Vec3 eye, Vec3 target, Vec3 focus, Vec3 player, Vec3 k,
     *new_target = g_aim;
 }
 
+/* Facing where the left stick points at once. The game turns the player
+ * towards the stick at its own rate (about 15 degrees a frame) and walks on
+ * meanwhile, so turning back round is a U-turn of a fifth of a second. Their
+ * turn is a quaternion about the up axis at player +44 (x, y, z, w; z, w at
+ * +52, +56) and they walk along it, a quarter turn round: this sets it to the
+ * stick's direction from the view each frame the stick is pushed, and the
+ * game, already facing that way, just walks. Not while their turn leans off
+ * the up axis (x or y set). */
+#define FACE_MIN_STICK 0.25f
+#define PLAYER_TURN 44u
+static float g_move_x, g_move_y;
+
+void camera_set_move(float x, float y) {
+    g_move_x = x;
+    g_move_y = y;
+}
+
+static void face_stick(CPUState* cpu, Vec3 view, Vec3 k) {
+    if (hypotf(g_move_x, g_move_y) < FACE_MIN_STICK || g_player_offset == 0)
+        return;
+    const u32 object = mem_read32(cpu, cpu->gpr[13] + (u32)(s32)g_player_offset);
+    if (object < 0x80000000u || object - 0x80000000u > cpu->ram_size - 64u)
+        return;
+    const float qx = read_float(cpu, object + PLAYER_TURN), qy = read_float(cpu, object + PLAYER_TURN + 4u),
+                qz = read_float(cpu, object + PLAYER_TURN + 8u), qw = read_float(cpu, object + PLAYER_TURN + 12u);
+    if (!(fabsf(qx) < 0.01f && fabsf(qy) < 0.01f && fabsf(qz * qz + qw * qw - 1.0f) < 0.05f))
+        return;
+    const Vec3 forward = normalize(flatten(view, k));
+    const Vec3 dir = add(scale(forward, g_move_y), scale(cross(forward, k), g_move_x));
+    const float turn = atan2f(dir.y, dir.x) + 0.5f * PI;
+    float z = sinf(0.5f * turn), w = cosf(0.5f * turn);
+    if (z * qz + w * qw < 0.0f)
+        z = -z, w = -w;  // the same turn, on the side it already is
+    const float f[2] = {z, w};
+    for (int i = 0; i < 2; i++) {
+        u32 bits;
+        memcpy(&bits, &f[i], sizeof bits);
+        mem_write32(cpu, object + PLAYER_TURN + 8u + (u32)i * 4u, bits);
+    }
+}
+
 static bool g_log_checked, g_log;
 
 /* Called at C_MTXLookAt from the game's camera (hle.c checks the return
@@ -1047,6 +1088,12 @@ void camera_look_at(CPUState* cpu) {
         game_goal(cpu, &focus);
         third_person(cpu, eye, focus, player, k, step, still, &new_eye, &new_target);
     }
+    // First person (ED_CAM_FACE=1: every mode, tests): no turning round.
+    static int face_all = -1;
+    if (face_all < 0)
+        face_all = getenv("ED_CAM_FACE") != NULL && atoi(getenv("ED_CAM_FACE")) != 0;
+    if (step && !still && g_hand <= 0.0f && (mode == CAMERA_FIRST_PERSON || face_all))
+        face_stick(cpu, sub(new_target, new_eye), k);
     // Looking closely at something, the view eases over to the game's own
     // camera (where it stands, what it looks at, its field of view: its framing
     // of the thing) and back when that ends, on the sweep's eased timing.

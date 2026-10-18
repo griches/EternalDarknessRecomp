@@ -671,6 +671,7 @@ bool read_pad(DolPadState* state) {
     const bool camera = camera_takes_stick() && !tome && !cutscene;
     const float cam_x = camera ? cx / 127.0f : 0.0f, cam_y = camera ? cy / 127.0f : 0.0f;
     camera_set_stick(cam_x, cam_y, aiming, !cutscene);
+    camera_set_move(camera ? x / 127.0f : 0.0f, camera ? y / 127.0f : 0.0f);
     if (camera) {
         cx = cy = 0;
         static const bool turn_stick = std::getenv("ED_CAM_STICK") == nullptr ||

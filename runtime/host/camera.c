@@ -209,10 +209,9 @@ float camera_stick_turn(void) {
 // one move: the eye on its way from the start while the view turns to the
 // thing over the same time (the thing seen from where the eye is), so the
 // view only rises a little over a thing above the eyes before settling on the
-// game's framing; back, the same in reverse. The player is drawn as the
-// game has them (and with its near plane) the whole way there and back, once
-// the eye is FP_HEAD_CLEAR from their eyes, and back until it is within
-// FP_HEAD_BACK.
+// game's framing; back, the same in reverse. The player is drawn (with the
+// game's near plane) the whole way there and back, once the eye is
+// FP_HEAD_CLEAR from their eyes, and back until it is within FP_HEAD_BACK.
 // On the way the field of view keeps the thing growing (or, back, shrinking)
 // steadily on screen, wherever the eye is: no zooming away and back in.
 #define FP_HAND_TIME 1.4f
@@ -337,8 +336,10 @@ float camera_near_plane(float game_near) {
     static float near = -1.0f;  // ED_CAM_FP_NEAR (tests)
     if (near < 0.0f)
         near = getenv("ED_CAM_FP_NEAR") != NULL ? (float)atof(getenv("ED_CAM_FP_NEAR")) : FP_NEAR;
-    return g_view_active && g_last_mode == CAMERA_FIRST_PERSON && camera_player_drawn() == 1 ? fmaxf(game_near, near)
-                                                                                                : game_near;
+    return g_view_active && g_last_mode == CAMERA_FIRST_PERSON && g_hand_progress <= 0.0f &&
+                   camera_player_drawn() == 1
+               ? fmaxf(game_near, near)
+               : game_near;
 }
 
 int camera_player_drawn(void) {
@@ -352,9 +353,11 @@ int camera_player_drawn(void) {
         // From the moment the eye is clear of their head (inside it, the hair
         // and face flip across the view) until, on the way back, it is about
         // to go into it (sooner and they vanish while still in view).
+        // Drawn even where the game hides them (its text boxes and close
+        // looks hide them, its camera being at their head; ours is not).
         const float clear = g_handing ? FP_HEAD_CLEAR : FP_HEAD_BACK;
         if (g_hand_progress > 0.0f && length(sub(g_view_eye, g_fp_eye)) >= clear)
-            return -1;
+            return 1;
     } else if (g_hand > 0.5f) {
         return -1;
     }

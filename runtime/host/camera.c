@@ -206,17 +206,18 @@ float camera_stick_turn(void) {
 #define SWEEP_TIME 0.8f
 #define SWEEP_EASE 0.15f
 // First person's handover to the game's view of a thing and back (seconds):
-// the view turns to the thing first (over the first FP_HAND_AIM of the
-// time), the eye moves after (from FP_HAND_MOVE on); back, the eye comes home
-// still watching the thing, then the view turns to where it was. The player
+// one move: the eye on its way from the start while the view turns to the
+// thing over the same time (the thing seen from where the eye is), so the
+// view only rises a little over a thing above the eyes before settling on the
+// game's framing; back, the same in reverse. The player
 // is drawn as the game has them only on the way there (the game draws them
 // again as it lets go), while the eye is FP_BODY_CLEAR or more from their
 // eyes (it flies through their head otherwise).
 // On the way the field of view keeps the thing growing (or, back, shrinking)
 // steadily on screen, wherever the eye is: no zooming away and back in.
 #define FP_HAND_TIME 1.4f
-#define FP_HAND_AIM 0.4f
-#define FP_HAND_MOVE 0.3f
+#define FP_HAND_AIM 1.0f
+#define FP_HAND_MOVE 0.0f
 #define FP_BODY_CLEAR 150.0f
 // Walls: the line test's radius, how far short of a wall the eye stops, and
 // the nearest it comes to the point it looks at.

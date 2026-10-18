@@ -231,6 +231,7 @@ void interrupt_init(void) {
 // or more, and the game missed retraces. Block-paced runs keep the unit count.
 #define PE_FINISH_LATENCY 4096u
 #define PE_FINISH_WALL_NS 250000ull
+#define PE_FINISH_STALL_NS 2000000ull  // a gap between polls this long is the host
 static u32 pe_finish_countdown;
 static u64 pe_finish_due_ns;
 // The time alone is a race: a game thread held up past it between
@@ -434,6 +435,14 @@ void interrupt_poll(CPUState* cpu) {
         now = wall_ns();
         u64 elapsed = now - wall_last_ns;
         wall_last_ns = now;
+        // A long gap between polls is the game thread held up in the host (a
+        // present waiting on frames in between, the in-game menu), not guest
+        // work, and the draw-done is timed from the game's work. Counted, it
+        // raised PE finish before the main loop's send, the draw-done callback
+        // blocked inside the interrupt, and PE finish, served ahead of the
+        // audio DMA, starved it (the last 5 ms of sound looping).
+        if (pe_finish_countdown != 0 && elapsed > PE_FINISH_STALL_NS)
+            pe_finish_due_ns += elapsed;
         if (elapsed > WALL_MAX_STEP_NS)
             elapsed = WALL_MAX_STEP_NS;
         const u64 real_elapsed = elapsed;

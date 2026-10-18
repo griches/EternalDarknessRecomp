@@ -191,6 +191,10 @@ float camera_stick_turn(void) {
 #define TP_NEAREST 90.0f
 // Room enough behind the player not to rise over their head.
 #define TP_ROOMY (0.6f * g_distance)
+// Swinging round something in the way (radians a second at most), and
+// coming in short of it (units a second at least).
+#define SWING_RATE 4.0f
+#define PULL_RATE 600.0f
 
 static int g_last_mode = -1;
 // Free look: the turn from the game camera's view (yaw about up, pitch).
@@ -413,6 +417,30 @@ static void third_person(CPUState* cpu, Vec3 eye, Vec3 focus, Vec3 player, Vec3 
             g_back = normalize(rotate(g_back, k, -g_stick_x * YAW_RATE * dt));
             g_distance = clampf(g_distance - g_stick_y * TP_ZOOM_RATE * dt, TP_CLOSEST, TP_FARTHEST);
         }
+        // Something between the player and the eye (a cabinet, a pillar):
+        // swing round it to the nearest side with room, in 15 degree steps
+        // either way up to 90, easing there, unless the stick is turning the
+        // camera or the player aims.
+        if (g_collide != NULL && !jumped && !still && !g_back_sweeps && fabsf(g_stick_x) < 0.1f) {
+            const float rise = g_rise + g_lift;
+            if (wall_reach(cpu, pivot, add(scale(g_back, cosf(rise)), scale(k, sinf(rise)))) < TP_ROOMY) {
+                float swing = 0.0f, best = -1.0f;
+                for (int i = 1; i <= 6 && best < TP_ROOMY; i++)
+                    for (int side = -1; side <= 1; side += 2) {
+                        const float angle = (float)(side * i) * PI / 12.0f;
+                        const Vec3 b = rotate(g_back, k, angle);
+                        const float r = wall_reach(cpu, pivot, add(scale(b, cosf(rise)), scale(k, sinf(rise))));
+                        if (r > best + 1.0f) {
+                            best = r;
+                            swing = angle;
+                        }
+                    }
+                if (best >= TP_ROOMY) {
+                    const float turn = clampf(swing * 0.35f, -SWING_RATE / 60.0f, SWING_RATE / 60.0f);
+                    g_back = normalize(rotate(g_back, k, turn));
+                }
+            }
+        }
         // Walls: where the eye would be has room enough, or it rises over
         // the player's head (looking down on them) to where there is more,
         // easing up and back down.
@@ -428,11 +456,28 @@ static void third_person(CPUState* cpu, Vec3 eye, Vec3 focus, Vec3 player, Vec3 
                 break;
         }
         g_lift = jumped ? lift : g_lift + clampf(lift - g_lift, -1.5f / 60.0f, 1.5f / 60.0f);
-        // Then the eye comes in short of the first thing in the way at once,
-        // and goes back out gently once it clears.
+        // Then the eye comes in short of the first thing in the way, quickly
+        // but not in one jump, and goes back out gently once it clears.
         const float rise = g_rise + g_lift;
         const float reach = wall_reach(cpu, pivot, add(scale(g_back, cosf(rise)), scale(k, sinf(rise))));
-        g_reach = jumped || reach < g_reach ? reach : fminf(reach, g_reach + TP_FARTHEST * 1.5f / 60.0f);
+        if (jumped)
+            g_reach = reach;
+        else if (reach < g_reach)
+            g_reach = fmaxf(reach, g_reach - fmaxf(PULL_RATE / 60.0f, (g_reach - reach) * 0.15f));
+        else
+            g_reach = fminf(reach, g_reach + TP_FARTHEST * 1.5f / 60.0f);
+        static int log = -1;
+        if (log < 0)
+            log = getenv("ED_CAM_LOG") != NULL && getenv("ED_CAM_LOG")[0] == '4';
+        if (log) {
+            fprintf(stderr, "[camera] reach %.0f (wall %.0f) lift %.2f player %.0f %.0f ring", g_reach, reach, g_lift,
+                    player.x, player.y);
+            for (int i = 0; i < 16; i++) {
+                const Vec3 b = rotate(g_back, k, (float)i * PI / 8.0f);
+                fprintf(stderr, " %.0f", wall_reach(cpu, pivot, add(scale(b, cosf(g_rise)), scale(k, sinf(g_rise)))));
+            }
+            fprintf(stderr, "\n");
+        }
         g_last_player = player;
         g_have_player = true;
     }

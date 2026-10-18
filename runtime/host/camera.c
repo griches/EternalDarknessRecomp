@@ -283,6 +283,10 @@ static float g_reach, g_lift;  // g_lift: risen over the player's head, for room
 static float g_distance = TP_DISTANCE;  // how far back the player wants it (kept across rooms)
 
 static int g_looking_known = -1;  // camera_set_examining's looking
+// Handing the view to the game's own camera while the player looks closely
+// at something (B, or a close-up the game cuts to: a thing it zooms in on, a
+// hidden player), and back: progress 0..1, and its eased share of the view.
+static float g_hand_progress, g_hand;
 
 void camera_set_examining(bool hidden, int looking) {
     g_examining = hidden;
@@ -292,7 +296,9 @@ void camera_set_examining(bool hidden, int looking) {
 float camera_field_of_view(float game_fov) {
     if (!g_view_active)
         return game_fov;
-    return g_last_mode == CAMERA_THIRD_PERSON ? TP_FOV : g_last_mode == CAMERA_FIRST_PERSON ? FP_FOV : game_fov;
+    const float own =
+        g_last_mode == CAMERA_THIRD_PERSON ? TP_FOV : g_last_mode == CAMERA_FIRST_PERSON ? FP_FOV : game_fov;
+    return own + (game_fov - own) * g_hand;
 }
 
 int camera_player_drawn(void);
@@ -311,6 +317,9 @@ int camera_player_drawn(void) {
     static int body = -1;  // ED_CAM_FP_BODY=0/1 (tests)
     if (body < 0)
         body = getenv("ED_CAM_FP_BODY") != NULL ? atoi(getenv("ED_CAM_FP_BODY")) != 0 : 0;
+    // Mostly the game's view: the player as the game has them.
+    if (g_hand > 0.5f)
+        return -1;
     return g_last_mode == CAMERA_THIRD_PERSON ? 1 : g_last_mode == CAMERA_FIRST_PERSON ? body : -1;
 }
 
@@ -452,16 +461,12 @@ static float sweep_ease(float t) {
     return v * (t - a * 0.5f);
 }
 
-/* Once a frame: what the camera looks at. In play that is the player; when
- * they look closely at something (the game hides them, or zooms in), the
- * point the game's camera is heading for. A change starts a sweep from where
- * the camera looks now, and with a thing to look at it also turns round
- * behind the player on the line to it (unless the stick is turning it). */
+/* Once a frame: what the camera looks at, the player, swept in a straight
+ * line from wherever it looked (a reset, a jump). */
 static void sweep_aim(Vec3 focus, Vec3 pivot, Vec3 k, bool jumped) {
-    // The game's own mode when known; else its camera zooming in (which it
-    // also does as the player walks up to some things).
-    const bool looking =
-        g_looking_known >= 0 ? (g_looking_known != 0 || g_examining) : (g_examining || (g_zoomed && !g_zooming_out));
+    // Looking closely at something now hands the view to the game's own
+    // camera (camera_look_at), so the aim stays on the player.
+    const bool looking = false;
     const Vec3 goal = looking ? focus : pivot;
     if (jumped || !g_aim_set) {
         g_aim = g_aim_from = g_aim_to = pivot;
@@ -1006,6 +1011,7 @@ void camera_look_at(CPUState* cpu) {
     if (mode == CAMERA_ORIGINAL) {
         g_turn = 0.0f;
         g_view_active = false;
+        g_hand_progress = g_hand = 0.0f;
         return;
     }
     const bool still = g_aiming;
@@ -1023,6 +1029,21 @@ void camera_look_at(CPUState* cpu) {
         game_goal(cpu, &focus);
         third_person(cpu, eye, focus, player, k, step, still, &new_eye, &new_target);
     }
+    // Looking closely at something, the view eases over to the game's own
+    // camera (where it stands, what it looks at, its field of view: its framing
+    // of the thing) and back when that ends, on the sweep's eased timing.
+    if (mode != CAMERA_FREE_LOOK) {
+        if (step) {
+            const bool known = g_looking_known >= 0;
+            const bool handing = g_examining || (known && g_looking_known != 0) || (g_zoomed && !g_zooming_out);
+            g_hand_progress = clampf(g_hand_progress + (handing ? 1.0f : -1.0f) / (60.0f * SWEEP_TIME), 0.0f, 1.0f);
+            g_hand = sweep_ease(g_hand_progress);
+        }
+        new_eye = add(new_eye, scale(sub(eye, new_eye), g_hand));
+        new_target = add(new_target, scale(sub(target, new_target), g_hand));
+    } else {
+        g_hand_progress = g_hand = 0.0f;
+    }
     if (step) {
         g_last_eye = eye;
         g_last_target = target;
@@ -1034,8 +1055,8 @@ void camera_look_at(CPUState* cpu) {
     g_view_eye = new_eye;
     g_view_target = new_target;
     if (g_log && step && getenv("ED_CAM_LOG")[0] == '4')
-        fprintf(stderr, "[camera] view %llu eye %.2f %.2f %.2f target %.2f %.2f %.2f\n", frame, new_eye.x, new_eye.y,
-                new_eye.z, new_target.x, new_target.y, new_target.z);
+        fprintf(stderr, "[camera] view %llu eye %.2f %.2f %.2f target %.2f %.2f %.2f hand %.3f\n", frame, new_eye.x,
+                new_eye.y, new_eye.z, new_target.x, new_target.y, new_target.z, g_hand);
     const u32 sp = cpu->gpr[1];
     write_vec(cpu, sp + 40u, new_eye);
     write_vec(cpu, sp + 52u, new_target);

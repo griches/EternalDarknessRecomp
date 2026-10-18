@@ -51,4 +51,9 @@ size_t hle_gx_state_size(void);
 void hle_gx_state_save(void* out);
 void hle_gx_state_load(const void* in);
 
+// Run the guest function fn to its return, from the host, on the game thread
+// (a hook), with r3.. = args and f1, and every register as it was afterwards.
+// False when it did not return within its budget (main.c).
+bool hle_guest_call(CPUState* cpu, u32 fn, const u32* args, int count, double f1, u32* result);
+
 #endif /* ED_HLE_H */

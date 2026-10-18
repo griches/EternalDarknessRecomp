@@ -97,12 +97,20 @@ int camera_mode(void) {
 
 void camera_set_player_offset(int offset) { g_player_offset = (s16)offset; }
 
+static CameraCollide g_collide;
+void camera_set_collide(CameraCollide fn) { g_collide = fn; }
+
 // From the controls (the game thread's pad read).
 static float g_stick_x, g_stick_y;
 static bool g_aiming, g_play;
 static float g_turn;  // camera_stick_turn
 
 void camera_set_stick(float x, float y, bool aiming, bool play) {
+    static int log = -1;
+    if (log < 0)
+        log = getenv("ED_CAM_LOG") != NULL;
+    if (log && (aiming != g_aiming || play != g_play))
+        fprintf(stderr, "[camera] %s%s\n", aiming ? "aiming" : "not aiming", play ? "" : " (cutscene)");
     g_stick_x = x;
     g_stick_y = y;
     g_aiming = aiming;
@@ -123,6 +131,13 @@ float camera_stick_turn(void) {
 #define TP_HEIGHT 150.0f
 #define TP_DISTANCE 420.0f
 #define TP_PITCH 0.30f
+// Walls: the line test's radius, how far short of a wall the eye stops, and
+// the nearest it comes to the point it looks at.
+#define TP_RADIUS 12.0f
+#define TP_MARGIN 30.0f
+#define TP_NEAREST 90.0f
+// Room enough behind the player not to rise over their head.
+#define TP_ROOMY (0.6f * TP_DISTANCE)
 
 static int g_last_mode = -1;
 // Free look: the turn from the game camera's view (yaw about up, pitch).
@@ -130,11 +145,13 @@ static float g_yaw, g_pitch;
 static Vec3 g_last_eye, g_last_target;
 static bool g_have_last;
 // Third person: the level direction from the player to the eye, the eye's
-// height (radians above level), and where the player was.
+// height (radians above level), where the player was, and how far back the
+// eye is now (less than TP_DISTANCE where a wall is in the way).
 static Vec3 g_back;
 static float g_rise;
 static Vec3 g_last_player;
 static bool g_have_player;
+static float g_reach, g_lift;  // g_lift: risen over the player's head, for room
 
 /* The game camera cut to another shot (or a new room): its eye jumped, or it
  * swung round, between one frame and the next. */
@@ -221,9 +238,23 @@ static void free_look(Vec3 eye, Vec3 target, Vec3 k, bool step, bool still, Vec3
     *new_target = add(eye, scale(look, dist));
 }
 
+/* How far out from the pivot along the unit direction out the eye can go:
+ * the game's own line test (a little wider than the camera), stopping short
+ * of the first wall, floor or ceiling in the way. */
+static float wall_reach(CPUState* cpu, Vec3 pivot, Vec3 out) {
+    if (g_collide == NULL)
+        return TP_DISTANCE;
+    const Vec3 far = add(pivot, scale(out, TP_DISTANCE + TP_MARGIN));
+    const float from[3] = {pivot.x, pivot.y, pivot.z}, to[3] = {far.x, far.y, far.z};
+    float hit[3];
+    if (!g_collide(cpu, from, to, TP_RADIUS, hit))
+        return TP_DISTANCE;
+    return clampf(length(sub(v3(hit[0], hit[1], hit[2]), pivot)) - TP_MARGIN, TP_NEAREST, TP_DISTANCE);
+}
+
 /* Third person: behind and above the player, trailing after them. Starts
  * from the side the game's camera is on. */
-static void third_person(Vec3 eye, Vec3 player, Vec3 k, bool step, bool still, Vec3* new_eye,
+static void third_person(CPUState* cpu, Vec3 eye, Vec3 player, Vec3 k, bool step, bool still, Vec3* new_eye,
                          Vec3* new_target) {
     const Vec3 pivot = add(player, scale(k, TP_HEIGHT));
     if (step) {
@@ -245,10 +276,32 @@ static void third_person(Vec3 eye, Vec3 player, Vec3 k, bool step, bool still, V
             g_back = normalize(rotate(g_back, k, -g_stick_x * YAW_RATE * dt));
             g_rise = clampf(g_rise - g_stick_y * PITCH_RATE * dt, -0.35f, 1.2f);
         }
+        // Walls: where the eye would be has room enough, or it rises over
+        // the player's head (looking down on them) to where there is more,
+        // easing up and back down.
+        float best = -1.0f, lift = 0.0f;
+        for (int i = 0; i < 4 && g_collide != NULL; i++) {
+            const float rise = fminf(g_rise + 0.3f * (float)i, 1.35f);
+            const float reach = wall_reach(cpu, pivot, add(scale(g_back, cosf(rise)), scale(k, sinf(rise))));
+            if (reach > best + 1.0f) {
+                best = reach;
+                lift = rise - g_rise;
+            }
+            if (reach >= TP_ROOMY)
+                break;
+        }
+        g_lift = jumped ? lift : g_lift + clampf(lift - g_lift, -1.5f / 60.0f, 1.5f / 60.0f);
+        // Then the eye comes in short of the first thing in the way at once,
+        // and goes back out gently once it clears.
+        const float rise = g_rise + g_lift;
+        const float reach = wall_reach(cpu, pivot, add(scale(g_back, cosf(rise)), scale(k, sinf(rise))));
+        g_reach = jumped || reach < g_reach ? reach : fminf(reach, g_reach + TP_DISTANCE * 1.5f / 60.0f);
         g_last_player = player;
         g_have_player = true;
     }
-    *new_eye = add(pivot, add(scale(g_back, TP_DISTANCE * cosf(g_rise)), scale(k, TP_DISTANCE * sinf(g_rise))));
+    const float rise = g_rise + g_lift;
+    const Vec3 out = add(scale(g_back, cosf(rise)), scale(k, sinf(rise)));
+    *new_eye = add(pivot, scale(out, g_reach));
     *new_target = pivot;
 }
 
@@ -274,13 +327,12 @@ void camera_look_at(CPUState* cpu) {
         snapshot(cpu, frame);
     Vec3 player = v3(0.0f, 0.0f, 0.0f);
     const bool have_player = player_position(cpu, &player);
-    if (g_log && step && frame % 120u == 0u)
+    if (g_log && step && (frame % 120u == 0u || (getenv("ED_CAM_LOG")[0] == '2' && frame % 10u == 0u)))
         fprintf(stderr, "[camera] frame %llu eye %.1f %.1f %.1f target %.1f %.1f %.1f up %.2f %.2f %.2f player %s%.1f %.1f %.1f\n",
                 frame, eye.x, eye.y, eye.z, target.x, target.y, target.z, up.x, up.y, up.z,
                 have_player ? "" : "(none) ", player.x, player.y, player.z);
-    int mode = g_play ? camera_mode() : CAMERA_ORIGINAL;
-    if (mode == CAMERA_THIRD_PERSON && !have_player)
-        mode = CAMERA_FREE_LOOK;
+    // Only in play: a character to play, and no cutscene.
+    int mode = g_play && have_player ? camera_mode() : CAMERA_ORIGINAL;
     const Vec3 k = normalize(up);
     if (length(sub(target, eye)) <= 0.0f || length(k) <= 0.0f)
         mode = CAMERA_ORIGINAL;
@@ -301,7 +353,7 @@ void camera_look_at(CPUState* cpu) {
     if (mode == CAMERA_FREE_LOOK)
         free_look(eye, target, k, step, still, &new_eye, &new_target);
     else
-        third_person(eye, player, k, step, still, &new_eye, &new_target);
+        third_person(cpu, eye, player, k, step, still, &new_eye, &new_target);
     if (step) {
         g_last_eye = eye;
         g_last_target = target;

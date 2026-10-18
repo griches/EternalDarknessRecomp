@@ -5299,6 +5299,54 @@ static void notify_look_at(CPUState* cpu) {
         camera_look_at(cpu);
 }
 
+// The game's collision, for the third-person camera's line test: the world a
+// character collides with (fn(object)), the offset of the coordinates it
+// collides in (the vector at object + 612), the segment builder (fn(out, start,
+// end; f1 radius)) and the static world test (fn(object, world, segment,
+// out, flags) -> the surface hit, or 0; out = the 24-byte hit).
+static s16 g_camera_player_offset;
+static u32 g_collide_world, g_collide_segment, g_collide_test;
+static int g_collide_log = -1;
+
+static bool camera_collide(CPUState* cpu, const float start[3], const float end[3], float radius, float hit[3]) {
+    const u32 object = mem_read32(cpu, cpu->gpr[13] + (u32)(s32)g_camera_player_offset);
+    if (object < 0x80000000u || object - 0x80000000u >= cpu->ram_size)
+        return false;
+    // Scratch below the stack, above the frames hle_guest_call's callee makes.
+    const u32 scratch = (cpu->gpr[1] - 0x200u) & ~15u;
+    const u32 from = scratch, to = scratch + 16u, segment = scratch + 32u, out = scratch + 112u;
+    const u32 offset_at = object + 612u;
+    u32 world = 0, surface = 0;
+    if (!hle_guest_call(cpu, g_collide_world, &object, 1, 0.0, &world) || world == 0u)
+        return false;
+    float offset[3];
+    for (u32 i = 0; i < 3u; i++) {
+        offset[i] = guest_read_f32(cpu, offset_at + i * 4u);
+        guest_write_f32(cpu, from + i * 4u, start[i] + offset[i]);
+        guest_write_f32(cpu, to + i * 4u, end[i] + offset[i]);
+    }
+    const u32 segment_args[] = {segment, from, to};
+    const u32 test_args[] = {object, world, segment, out, 0u};
+    if (!hle_guest_call(cpu, g_collide_segment, segment_args, 3, radius, NULL) ||
+        !hle_guest_call(cpu, g_collide_test, test_args, 5, 0.0, &surface))
+        return false;
+    if (g_collide_log < 0)
+        g_collide_log = getenv("ED_CAM_LOG") != NULL;
+    if (g_collide_log && surface != 0u) {
+        static unsigned shown;
+        if (shown++ < 8u)
+            fprintf(stderr, "[camera] hit 0x%08X: %.1f %.1f %.1f / %.1f %.1f %.1f (from %.1f %.1f %.1f to %.1f %.1f %.1f, offset %.1f %.1f %.1f)\n",
+                    surface, guest_read_f32(cpu, out), guest_read_f32(cpu, out + 4u), guest_read_f32(cpu, out + 8u),
+                    guest_read_f32(cpu, out + 12u), guest_read_f32(cpu, out + 16u), guest_read_f32(cpu, out + 20u),
+                    start[0], start[1], start[2], end[0], end[1], end[2], offset[0], offset[1], offset[2]);
+    }
+    if (surface == 0u)
+        return false;
+    for (u32 i = 0; i < 3u; i++)
+        hit[i] = guest_read_f32(cpu, out + i * 4u) - offset[i];
+    return true;
+}
+
 // The player object (position at +0), for the third-person camera: a pointer
 // at r13 + offset that a small function compares its argument with:
 // or r29,r3,r3; li r3,2; bl ...; lwz r0,offset(r13); or r31,r3,r3; cmplw r29,r0.
@@ -5313,7 +5361,21 @@ static void find_player(CPUState* cpu) {
         fprintf(stderr, "[camera] the player not found: no third-person camera\n");
         return;
     }
-    camera_set_player_offset((s16)(load & 0xFFFFu));
+    g_camera_player_offset = (s16)(load & 0xFFFFu);
+    camera_set_player_offset(g_camera_player_offset);
+    // The collision functions (PAL, USA), each starting stwu r1,-n(r1), and
+    // the offset's getter (addi r3,r3,612; blr).
+    g_collide_world = pal ? 0x80123F70u : 0x8012AB2Cu;
+    g_collide_segment = pal ? 0x801388CCu : 0x8013F3C0u;
+    g_collide_test = pal ? 0x80130684u : 0x80137178u;
+    const u32 offset_getter = pal ? 0x801188D0u : 0x8011F770u;
+    const u32 fns[] = {g_collide_world, g_collide_segment, g_collide_test};
+    for (int i = 0; i < 4; i++)
+        if (i == 3 ? mem_read32(cpu, offset_getter) != 0x38630264u : (mem_read32(cpu, fns[i]) >> 16) != 0x9421u) {
+            fprintf(stderr, "[camera] the game's collision not found: the camera goes through walls\n");
+            return;
+        }
+    camera_set_collide(camera_collide);
 }
 
 // The call, a little after the widescreen check in the same function:

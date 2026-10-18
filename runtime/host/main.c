@@ -33,6 +33,7 @@
 #endif
 #include "host/compat.h"
 
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -47,6 +48,41 @@
 // --call mode: lr points here so the run loop detects the function's return
 // (blr -> pc == sentinel). Aligned, well outside any real code range.
 #define CALL_RETURN_SENTINEL 0x0BADF00Cu
+
+// hle_guest_call: lr points here, so the call's own return is seen (blr ->
+// pc == sentinel); a function that runs longer than the budget is abandoned.
+#define GUEST_CALL_SENTINEL 0x0BADF010u
+#define GUEST_CALL_MAX_BLOCKS 200000u
+
+bool hle_guest_call(CPUState* cpu, u32 fn, const u32* args, int count, double f1, u32* result) {
+    // Everything a call can change, up to and including the MSR.
+    const size_t span = offsetof(CPUState, srr0);
+    unsigned char saved[sizeof(CPUState)];
+    memcpy(saved, cpu, span);
+    const u32 exception = cpu->exception;
+    for (int i = 0; i < count && i < 8; i++)
+        cpu->gpr[3 + i] = args[i];
+    cpu->fpr[1] = f1;
+    cpu->ps1[1] = f1;
+    // Below the caller's stack, clear of anything it keeps there.
+    cpu->gpr[1] = (cpu->gpr[1] - 0x800u) & ~15u;
+    cpu->lr = GUEST_CALL_SENTINEL;
+    cpu->pc = fn;
+    bool ok = false;
+    for (u32 blocks = 0; blocks < GUEST_CALL_MAX_BLOCKS; blocks++) {
+        if (cpu->pc == GUEST_CALL_SENTINEL) {
+            ok = true;
+            break;
+        }
+        if (!dolrecomp_call(cpu, cpu->pc) || cpu->exception != exception)
+            break;
+    }
+    if (ok && result != NULL)
+        *result = cpu->gpr[3];
+    memcpy(cpu, saved, span);
+    cpu->exception = exception;
+    return ok;
+}
 
 // Deterministic save-state harness (see GXRuntime savestate.h). SIGUSR1 requests
 // a snapshot at the next safe dispatch boundary, so an agent can `kill -USR1` the

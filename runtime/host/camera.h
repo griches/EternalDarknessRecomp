@@ -19,6 +19,13 @@ int camera_mode(void);
 void camera_set_stick(float x, float y, bool aiming, bool play);
 // From hle.c: the player object's pointer, at r13 + offset (0: not found).
 void camera_set_player_offset(int offset);
+// From hle.c: the game's own line test against the room's walls, floors and
+// ceilings, from start to end with a radius: true and the first point hit
+// (world coordinates), or false when the line is clear (or the test failed).
+struct CPUState;
+typedef bool (*CameraCollide)(struct CPUState* cpu, const float start[3], const float end[3], float radius,
+                              float hit[3]);
+void camera_set_collide(CameraCollide fn);
 // The right stick belongs to the camera (a mode is on, the game is in play).
 bool camera_takes_stick(void);
 // The camera's turn from the game's own, for the left stick: the angle (radians,

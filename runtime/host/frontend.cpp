@@ -1141,6 +1141,11 @@ void update_cursor() {
 }
 
 // Run the current screen until g_close; false when the window was closed.
+// ED_MENU_TEST=after_s,hold_ms[,every_s]: open the in-game menu by itself
+// after_s seconds in, close it hold_ms later, and again every every_s seconds
+// (test runs without a controller).
+static Uint64 g_test_close_at = 0;
+
 bool run_menu() {
     g_close = false;
     build_rows();
@@ -1188,6 +1193,10 @@ bool run_menu() {
         } else if (pressed[kBack] || (pressed[kMenu] && g_screen == Screen::InGame)) {
             go_back();
             dirty = true;
+        }
+        if (g_test_close_at != 0 && SDL_GetTicks() >= g_test_close_at) {
+            g_test_close_at = 0;
+            g_close = true;
         }
         static const bool log = std::getenv("ED_FRONTEND_LOG") != nullptr;
         if (log && dirty)
@@ -1407,7 +1416,25 @@ extern "C" void frontend_frame(void) {
     const bool press = (menu_held && !menu_was_held) || g_key_pressed[kMenu];
     menu_was_held = menu_held;
     std::fill(std::begin(g_key_pressed), std::end(g_key_pressed), false);
-    if (!press || !ensure_ui())
+    static Uint64 test_open_at = 0, test_hold = 0, test_every = 0;
+    static bool test_checked = false;
+    if (!test_checked) {
+        test_checked = true;
+        unsigned long after = 0, hold = 0, every = 0;
+        if (const char* t = std::getenv("ED_MENU_TEST"); t && std::sscanf(t, "%lu,%lu,%lu", &after, &hold, &every) >= 2) {
+            test_open_at = SDL_GetTicks() + after * 1000u;
+            test_hold = hold;
+            test_every = every * 1000u;
+        }
+    }
+    bool test_press = false;
+    if (test_open_at != 0 && SDL_GetTicks() >= test_open_at) {
+        test_open_at = test_every != 0 ? SDL_GetTicks() + test_hold + test_every : 0;
+        test_press = true;
+        g_test_close_at = SDL_GetTicks() + test_hold;
+        std::fprintf(stderr, "[frontend] test menu open for %llu ms\n", (unsigned long long)test_hold);
+    }
+    if ((!press && !test_press) || !ensure_ui())
         return;
     g_in_game = true;
     g_screen = Screen::InGame;

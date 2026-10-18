@@ -30,6 +30,7 @@ Settings g_settings = {
     .target_toggle = {false, false, false},
     .stick_deadzone = {5, 5, 5},
     .vibration = true,
+    .camera = 0,
     .controls_custom = "",
     .disc = "",
 };
@@ -116,6 +117,8 @@ void settings_load(void) {
         }
         else if (strcmp(key, "vibration") == 0)
             g_settings.vibration = n != 0;
+        else if (strcmp(key, "camera") == 0)
+            g_settings.camera = clamp_int(n, 0, 2);
         else if (strcmp(key, "controls_custom") == 0)
             snprintf(g_settings.controls_custom, sizeof g_settings.controls_custom, "%s", value);
         else if (strcmp(key, "disc") == 0)
@@ -151,6 +154,7 @@ void settings_save(void) {
     for (int i = 0; i < 3; i++)
         fprintf(f, "stick_deadzone_%s = %d\n", kLayoutKeys[i], g_settings.stick_deadzone[i]);
     fprintf(f, "vibration = %d\n", g_settings.vibration ? 1 : 0);
+    fprintf(f, "camera = %d\n", g_settings.camera);
     fprintf(f, "controls_custom = %s\n", g_settings.controls_custom);
     fprintf(f, "disc = %s\n", g_settings.disc);
     fclose(f);

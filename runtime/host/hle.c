@@ -26,6 +26,7 @@
 #include "host/settings.h"
 #ifdef ED_AURORA
 #include "gxruntime/aurora_backend.h"
+#include "host/camera.h"
 #include "host/controls.h"
 #include "host/frontend.h"
 #include "host/report.h"
@@ -5288,6 +5289,55 @@ static void sync_widescreen_option(CPUState* cpu) {
 #endif
 
 #ifdef ED_AURORA
+// The camera options (camera.c): the game's own camera hands C_MTXLookAt its
+// struct's eye (r4) and target (r6); camera.c can swap both for its own.
+void camera_look_at(CPUState* cpu);
+static u32 g_camera_look_at_return;
+
+static void notify_look_at(CPUState* cpu) {
+    if (cpu->lr == g_camera_look_at_return)
+        camera_look_at(cpu);
+}
+
+// The player object (position at +0), for the third-person camera: a pointer
+// at r13 + offset that a small function compares its argument with:
+// or r29,r3,r3; li r3,2; bl ...; lwz r0,offset(r13); or r31,r3,r3; cmplw r29,r0.
+static void find_player(CPUState* cpu) {
+    const bool pal = strcmp(ED_GAME_ID, "GEDP01") == 0;
+    const u32 at = (pal ? 0x80123F70u : 0x8012AB2Cu) + 0x18u;
+    static const u32 kHead[] = {0x7C7D1B78u, 0x38600002u};
+    const u32 load = mem_read32(cpu, at + 12u);
+    if (!code_matches(cpu, at, kHead, 2) || (mem_read32(cpu, at + 8u) & 0xFC000003u) != 0x48000001u ||
+        (load >> 16) != 0x800Du || mem_read32(cpu, at + 16u) != 0x7C7F1B78u ||
+        mem_read32(cpu, at + 20u) != 0x7C1D0040u) {
+        fprintf(stderr, "[camera] the player not found: no third-person camera\n");
+        return;
+    }
+    camera_set_player_offset((s16)(load & 0xFFFFu));
+}
+
+// The call, a little after the widescreen check in the same function:
+// or r4,r28,r28; addi r3,r31,396; addi r5,r1,24; addi r6,r28,12; bl C_MTXLookAt.
+static void find_camera(CPUState* cpu) {
+    const bool pal = strcmp(ED_GAME_ID, "GEDP01") == 0;
+    const u32 from = pal ? 0x801E4C1Cu : 0x801F0430u;
+    const u32 look_at = sdk_symbol_address("C_MTXLookAt");
+    static const u32 kArgs[] = {0x7F84E378u, 0x387F018Cu, 0x38A10018u, 0x38DC000Cu};
+    HleDispatchEntry* entry = hle_dispatch_entry(look_at);
+    for (u32 at = from; at < from + 0x200u && entry != NULL; at += 4u) {
+        const u32 bl = mem_read32(cpu, at + 16u);
+        const u32 target = at + 16u + (u32)(((s32)(bl << 6)) >> 6 & ~3);
+        if (code_matches(cpu, at, kArgs, 4) && (bl & 0xFC000003u) == 0x48000001u && target == look_at &&
+            entry->notify == NULL) {
+            g_camera_look_at_return = at + 20u;
+            entry->notify = notify_look_at;
+            find_player(cpu);
+            return;
+        }
+    }
+    fprintf(stderr, "[camera] the game's camera not found: only its own fixed cameras\n");
+}
+
 // The pause menu's flag and render-state depth (game_menu_open), from the one
 // setter of the flag (flag = r3 != 0) and the reset of the depth to 0.
 static void find_game_menu(CPUState* cpu) {
@@ -5478,6 +5528,7 @@ void hle_install(CPUState* cpu) {
 #ifdef ED_AURORA
     find_game_menu(cpu);
     find_letterbox(cpu);
+    find_camera(cpu);
 #endif
     publish_codegen_options();
 }

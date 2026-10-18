@@ -6,6 +6,7 @@
 
 #include "gxruntime/aurora_backend.h"
 #include "host/buttons.h"
+#include "host/camera.h"
 #include "host/controls.h"
 #include "host/report.h"
 #include "host/settings.h"
@@ -676,9 +677,19 @@ void build_options() {
     };
     g_rows.push_back(more);
 
+    static const char* const kCameraNotes[] = {
+        "The game's own fixed cameras.",
+        "The game's cameras, turned with the right stick. They hold still while you aim.",
+        "Behind Alex, turned with the right stick. It holds still while you aim."};
+    Row camera{"Camera", camera_mode_name(g_settings.camera)};
+    camera.section = "IV \u00b7 Game";
+    camera.page = 1;
+    camera.note = kCameraNotes[g_settings.camera];
+    camera.change = [](int dir) { cycle(g_settings.camera, CAMERA_MODE_COUNT, dir); };
+    g_rows.push_back(camera);
+
     static const char* const kGameFont[] = {"Sharp", "Tome", "Original"};
     Row font{"Game text", kGameFont[g_settings.game_font]};
-    font.section = "IV \u00b7 Game";
     font.page = 1;
     font.note = "The game's own lettering: Sharp redraws it crisply, Tome in old "
                 "typefaces, Original as on the disc.";

@@ -211,11 +211,13 @@ float camera_stick_turn(void) {
 // view only rises a little over a thing above the eyes before settling on the
 // game's framing; back, the same in reverse. The player is drawn as the
 // game has them (and with its near plane) the whole way there and back, once
-// the eye is FP_HEAD_CLEAR from their eyes.
+// the eye is FP_HEAD_CLEAR from their eyes, and back until it is within
+// FP_HEAD_BACK.
 // On the way the field of view keeps the thing growing (or, back, shrinking)
 // steadily on screen, wherever the eye is: no zooming away and back in.
 #define FP_HAND_TIME 1.4f
 #define FP_HEAD_CLEAR 90.0f
+#define FP_HEAD_BACK 30.0f
 #define FP_HAND_AIM 1.0f
 #define FP_HAND_MOVE 0.0f
 // Walls: the line test's radius, how far short of a wall the eye stops, and
@@ -347,9 +349,11 @@ int camera_player_drawn(void) {
         body = getenv("ED_CAM_FP_BODY") != NULL ? atoi(getenv("ED_CAM_FP_BODY")) != 0 : 0;
     // Mostly the game's view: the player as the game has them.
     if (g_last_mode == CAMERA_FIRST_PERSON) {
-        // From the moment the eye is clear of their head until it is back
-        // there (inside it, the hair and face flip across the view).
-        if (g_hand_progress > 0.0f && length(sub(g_view_eye, g_fp_eye)) >= FP_HEAD_CLEAR)
+        // From the moment the eye is clear of their head (inside it, the hair
+        // and face flip across the view) until, on the way back, it is about
+        // to go into it (sooner and they vanish while still in view).
+        const float clear = g_handing ? FP_HEAD_CLEAR : FP_HEAD_BACK;
+        if (g_hand_progress > 0.0f && length(sub(g_view_eye, g_fp_eye)) >= clear)
             return -1;
     } else if (g_hand > 0.5f) {
         return -1;

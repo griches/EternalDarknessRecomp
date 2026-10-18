@@ -171,7 +171,7 @@ float camera_stick_turn(void) {
 // Third person: the point looked at above the player's feet, how far back
 // the eye sits from it, and how high (radians above level) it starts.
 #define TP_HEIGHT 150.0f
-#define TP_DISTANCE 420.0f
+#define TP_DISTANCE 320.0f
 // The right stick's up and down bring the eye closer or take it further
 // (units a second at full stick), between these.
 #define TP_ZOOM_RATE 400.0f
@@ -188,7 +188,11 @@ float camera_stick_turn(void) {
 // the nearest it comes to the point it looks at.
 #define TP_RADIUS 12.0f
 #define TP_MARGIN 30.0f
-#define TP_NEAREST 90.0f
+#define TP_NEAREST 120.0f
+// The second line of sight, to the player's hips (this far below the chest).
+#define TP_HIPS 70.0f
+// How far above the chest the camera turns about when fully close in.
+#define TP_CLOSE_RISE 35.0f
 // Room enough behind the player not to rise over their head.
 #define TP_ROOMY (0.6f * g_distance)
 // Swinging round something in the way: its fastest turn (radians a second),
@@ -196,13 +200,44 @@ float camera_stick_turn(void) {
 // past the edge
 // of the obstacle it goes (radians); and coming in short of it (units a
 // second at least).
-#define SWING_RATE 2.5f
-#define SWING_ACCEL 9.0f
+#define SWING_RATE 1.6f
+#define SWING_ACCEL 4.0f
 // How far ahead (frames of the player's movement) it looks for something
 // coming between them.
 #define SWING_AHEAD 30.0f
 #define SWING_MARGIN 0.17f
 #define PULL_RATE 600.0f
+// A rise over the player's head is kept this many frames before it may
+// come down, and the eye's distance is the nearest of this many frames'
+// readings.
+#define LIFT_HOLD 45
+// Following behind the player: from this speed (units a second), fully at
+// the second, the turn behind them (per second of the angle left), and not
+// past this angle (radians: walking toward the camera keeps it there).
+#define FOLLOW_MIN_SPEED 40.0f
+#define FOLLOW_FULL_SPEED 250.0f
+#define FOLLOW_RATE 1.6f
+#define FOLLOW_MAX_ANGLE 2.1f
+#define REACH_WINDOW 20
+// The drawn view's springs (per second: higher follows sooner) and top
+// speeds (radians or units a second): the angle round the player, the same
+// while the stick turns it, its height, its distance in and out, what it
+// looks at, and the player it follows.
+#define SMOOTH_YAW 4.5f
+#define SMOOTH_YAW_MAX 1.6f
+#define SMOOTH_STEER 14.0f
+#define SMOOTH_RISE 2.5f
+#define SMOOTH_RISE_MAX 0.5f
+#define SMOOTH_DIST_IN 5.0f
+#define SMOOTH_DIST_OUT 2.5f
+#define SMOOTH_DIST_MAX 700.0f
+#define SMOOTH_DIST_ACCEL 3000.0f
+// More than this past the nearest thing in the way, the distance comes in
+// on a much quicker spring.
+#define CLIP_SLACK 40.0f
+#define SMOOTH_DIST_CLIP 14.0f
+#define SMOOTH_AIM 6.0f
+#define SMOOTH_FOLLOW 14.0f
 
 static int g_last_mode = -1;
 // Free look: the turn from the game camera's view (yaw about up, pitch).
@@ -340,15 +375,26 @@ static void free_look(Vec3 eye, Vec3 target, Vec3 k, bool step, bool still, Vec3
 /* How far out from the pivot along the unit direction out the eye can go:
  * the game's own line test (a little wider than the camera), stopping short
  * of the first wall, floor or ceiling in the way. */
+static Vec3 g_up = {0.0f, 0.0f, 1.0f};  // the world's up, for the hip test
+
+static float line_reach(CPUState* cpu, Vec3 from_point, Vec3 eye, float full) {
+    const float from[3] = {from_point.x, from_point.y, from_point.z}, to[3] = {eye.x, eye.y, eye.z};
+    float hit[3];
+    if (!g_collide(cpu, from, to, TP_RADIUS, hit))
+        return full;
+    return length(sub(v3(hit[0], hit[1], hit[2]), from_point)) / length(sub(eye, from_point)) * full;
+}
+
 static float wall_reach(CPUState* cpu, Vec3 pivot, Vec3 out) {
     if (g_collide == NULL)
         return g_distance;
-    const Vec3 far = add(pivot, scale(out, g_distance + TP_MARGIN));
-    const float from[3] = {pivot.x, pivot.y, pivot.z}, to[3] = {far.x, far.y, far.z};
-    float hit[3];
-    if (!g_collide(cpu, from, to, TP_RADIUS, hit))
-        return g_distance;
-    return clampf(length(sub(v3(hit[0], hit[1], hit[2]), pivot)) - TP_MARGIN, TP_NEAREST, g_distance);
+    // The line from the eye to the player's chest, and to their hips (a
+    // cabinet below the first can still hide most of them).
+    const float full = g_distance + TP_MARGIN;
+    const Vec3 far = add(pivot, scale(out, full));
+    const float chest = line_reach(cpu, pivot, far, full);
+    const float hips = line_reach(cpu, sub(pivot, scale(g_up, TP_HIPS)), far, full);
+    return clampf(fminf(chest, hips) - TP_MARGIN, TP_NEAREST, g_distance);
 }
 
 /* A sweep's progress (0..1 of its time) to how far along the line it is:
@@ -411,6 +457,10 @@ static void sweep_aim(Vec3 focus, Vec3 pivot, Vec3 k, bool jumped) {
     }
 }
 
+// 0 .. 1: how badly the drawn view is blocked (1: only the nearest distance
+// is clear); the swing and the drawn turn may go up to twice as fast.
+static float g_urgency;
+
 /* The swing round something in the way: where it is going (a level
  * direction from the player to the eye) and how fast it turns (radians a
  * second, about the up axis). */
@@ -444,14 +494,14 @@ static void auto_swing(CPUState* cpu, Vec3 pivot, Vec3 step, Vec3 k, float rise,
     const bool blocked_here = blocked_frames >= 4;
     const bool goal_blocked = g_swing_active && wall_reach(cpu, pivot, out_dir(g_swing_goal, k, rise)) < TP_ROOMY;
     if ((blocked_here && !g_swing_active) || goal_blocked) {
-        // Nearest first, either side; once turning, its own way first (a
-        // reversal mid-swing is the jolt to avoid).
+        // The nearest side with room, either way (the turn's speed changes
+        // gently, so turning back is smooth too); its own way on a tie.
         const bool was_swinging = g_swing_active;
         g_swing_active = false;
-        const int way = g_swing_speed > 0.0f ? 1 : g_swing_speed < 0.0f ? -1 : 0;
+        const int way = g_swing_speed < 0.0f ? -1 : 1;
         for (int n = 0; n < 36 && !g_swing_active; n++) {
-            const int i = way != 0 ? n % 18 + 1 : n / 2 + 1;
-            const int side = way != 0 ? (n < 18 ? way : -way) : (n % 2 == 0 ? -1 : 1);
+            const int i = n / 2 + 1;
+            const int side = n % 2 == 0 ? way : -way;
             const float angle = (float)(side * i) * PI / 36.0f;
             if (!clear_along(cpu, pivot, step, out_dir(rotate(g_back, k, angle), k, rise)))
                 continue;
@@ -470,13 +520,22 @@ static void auto_swing(CPUState* cpu, Vec3 pivot, Vec3 step, Vec3 k, float rise,
     }
     if (!g_swing_active)
         return;
+    // Clear where it is but blocked just ahead on its way: the way there
+    // runs behind something. It eases to a stop here instead.
+    if (!blocked_here && fabsf(g_swing_speed) > 0.01f) {
+        const Vec3 next = rotate(g_back, k, copysignf(0.26f, g_swing_speed));
+        if (!clear_along(cpu, pivot, step, out_dir(next, k, rise)) &&
+            clear_along(cpu, pivot, step, out_dir(g_back, k, rise)))
+            g_swing_goal = g_back;
+    }
     // The turn's speed changes by at most SWING_ACCEL a second each second,
     // aiming for the fastest speed it can still stop from in the angle left:
     // it eases into the turn and out of it, and a new goal bends it smoothly.
     const float dt = 1.0f / 60.0f;
     const float left = level_angle(g_back, g_swing_goal, k);
-    const float want = copysignf(fminf(SWING_RATE, sqrtf(2.0f * SWING_ACCEL * fabsf(left))), left);
-    g_swing_speed += clampf(want - g_swing_speed, -SWING_ACCEL * dt, SWING_ACCEL * dt);
+    const float boost = 1.0f + g_urgency, accel = SWING_ACCEL * boost;
+    const float want = copysignf(fminf(SWING_RATE * boost, sqrtf(2.0f * accel * fabsf(left))), left);
+    g_swing_speed += clampf(want - g_swing_speed, -accel * dt, accel * dt);
     g_back = normalize(rotate(g_back, k, g_swing_speed * dt));
     if (fabsf(left) < 0.005f && fabsf(g_swing_speed) < 0.05f) {
         g_swing_active = false;
@@ -489,6 +548,86 @@ static void auto_swing(CPUState* cpu, Vec3 pivot, Vec3 step, Vec3 k, float rise,
         fprintf(stderr, "[camera] swing left %.1f deg, speed %.1f deg/s\n", left * 57.2958f, g_swing_speed * 57.2958f);
 }
 
+/* The view as drawn: whatever the logic above decides (where round the
+ * player, how high, how far, what it looks at), the camera follows it on
+ * critically damped springs, its speeds capped, so it never jumps: the angle
+ * round the player, the height and the distance in its own coordinates (an
+ * orbit stays an orbit), and what it looks at relative to the player (no lag
+ * while walking). The stick's own turning follows closely. */
+static bool g_view_jump, g_smooth_reset = true;
+static float g_s_yaw, g_s_yaw_v, g_s_rise, g_s_rise_v, g_s_dist, g_s_dist_v;
+static Vec3 g_s_aim, g_s_aim_v, g_s_pivot, g_s_pivot_v;
+
+static Vec3 yaw_axis(Vec3 k) {
+    Vec3 e1 = normalize(flatten(v3(1.0f, 0.0f, 0.0f), k));
+    if (length(e1) == 0.0f)
+        e1 = normalize(flatten(v3(0.0f, 1.0f, 0.0f), k));
+    return e1;
+}
+
+static float dir_yaw(Vec3 b, Vec3 k) {
+    const Vec3 e1 = yaw_axis(k), e2 = cross(k, e1);
+    return atan2f(dot(b, e2), dot(b, e1));
+}
+
+static Vec3 yaw_dir(float yaw, Vec3 k) {
+    const Vec3 e1 = yaw_axis(k), e2 = cross(k, e1);
+    return add(scale(e1, cosf(yaw)), scale(e2, sinf(yaw)));
+}
+
+static void spring_capped(float* x, float* v, float goal, float w, float cap, float accel) {
+    const float dt = 1.0f / 60.0f;
+    *v += clampf(w * w * (goal - *x) - 2.0f * w * *v, -accel, accel) * dt;
+    *v = clampf(*v, -cap, cap);
+    *x += *v * dt;
+}
+
+static void spring(float* x, float* v, float goal, float w, float cap) {
+    const float dt = 1.0f / 60.0f;
+    *v += (w * w * (goal - *x) - 2.0f * w * *v) * dt;
+    *v = clampf(*v, -cap, cap);
+    *x += *v * dt;
+}
+
+static void smooth_view(Vec3 pivot, Vec3 k, bool reset) {
+    const float yaw = dir_yaw(g_back, k), rise = g_rise + g_lift;
+    const Vec3 aim = sub(g_aim, pivot);
+    if (reset) {
+        g_s_yaw = yaw, g_s_rise = rise, g_s_dist = g_reach, g_s_aim = aim, g_s_pivot = pivot;
+        g_s_yaw_v = g_s_rise_v = g_s_dist_v = 0.0f;
+        g_s_aim_v = g_s_pivot_v = v3(0.0f, 0.0f, 0.0f);
+        return;
+    }
+    // The player stopping short against a wall, or turning on the spot,
+    // is a jolt in their own movement: the camera follows them closely
+    // rather than rigidly.
+    float px = g_s_pivot.x, py = g_s_pivot.y, pz = g_s_pivot.z;
+    spring(&px, &g_s_pivot_v.x, pivot.x, SMOOTH_FOLLOW, 3000.0f);
+    spring(&py, &g_s_pivot_v.y, pivot.y, SMOOTH_FOLLOW, 3000.0f);
+    spring(&pz, &g_s_pivot_v.z, pivot.z, SMOOTH_FOLLOW, 3000.0f);
+    g_s_pivot = v3(px, py, pz);
+    const bool steering = fabsf(g_stick_x) >= 0.1f;
+    // The angle the short way round.
+    const float goal_yaw = g_s_yaw + remainderf(yaw - g_s_yaw, 2.0f * PI);
+    spring(&g_s_yaw, &g_s_yaw_v, goal_yaw, steering ? SMOOTH_STEER : SMOOTH_YAW * (1.0f + g_urgency),
+           steering ? 4.0f : SMOOTH_YAW_MAX * (1.0f + g_urgency));
+    g_s_yaw = remainderf(g_s_yaw, 2.0f * PI);
+    spring(&g_s_rise, &g_s_rise_v, rise, SMOOTH_RISE, SMOOTH_RISE_MAX);
+    // In a little quicker than out: something in the way matters more.
+    // Well past something in the way (inside a cabinet, behind a pillar)
+    // it comes in quickly: smooth is good, but not through furniture.
+    if (g_s_dist > g_reach + CLIP_SLACK)
+        spring_capped(&g_s_dist, &g_s_dist_v, g_reach, SMOOTH_DIST_CLIP, 3000.0f, 40000.0f);
+    else
+        spring_capped(&g_s_dist, &g_s_dist_v, g_reach, g_reach < g_s_dist ? SMOOTH_DIST_IN : SMOOTH_DIST_OUT,
+                      SMOOTH_DIST_MAX, SMOOTH_DIST_ACCEL);
+    float ax = g_s_aim.x, ay = g_s_aim.y, az = g_s_aim.z;
+    spring(&ax, &g_s_aim_v.x, aim.x, SMOOTH_AIM, 2000.0f);
+    spring(&ay, &g_s_aim_v.y, aim.y, SMOOTH_AIM, 2000.0f);
+    spring(&az, &g_s_aim_v.z, aim.z, SMOOTH_AIM, 2000.0f);
+    g_s_aim = v3(ax, ay, az);
+}
+
 /* Third person: behind and above the player, trailing after them. Starts
  * from the side the game's camera is on. While the player looks closely at
  * something, the game's camera looks at it (focus): this one turns to it too,
@@ -496,6 +635,7 @@ static void auto_swing(CPUState* cpu, Vec3 pivot, Vec3 step, Vec3 k, float rise,
 static void third_person(CPUState* cpu, Vec3 eye, Vec3 focus, Vec3 player, Vec3 k, bool step, bool still,
                          Vec3* new_eye, Vec3* new_target) {
     const Vec3 pivot = add(player, scale(k, TP_HEIGHT));
+    g_up = k;
     if (step && g_state_pending) {
         // A replay's start: the camera as it was when the recording began.
         g_state_pending = false;
@@ -506,9 +646,12 @@ static void third_person(CPUState* cpu, Vec3 eye, Vec3 focus, Vec3 player, Vec3 
         g_reach = g_pending_state[6];
         g_last_player = player;
         g_have_player = true;
+        g_smooth_reset = true;
     }
     if (step) {
         const bool jumped = !g_have_player || length(sub(player, g_last_player)) > 300.0f;
+        g_view_jump = jumped || g_smooth_reset;
+        g_smooth_reset = false;
         sweep_aim(focus, pivot, k, jumped);
         if (jumped) {
             g_back = normalize(flatten(sub(eye, pivot), k));
@@ -525,6 +668,22 @@ static void third_person(CPUState* cpu, Vec3 eye, Vec3 focus, Vec3 player, Vec3 
                 g_back = back;
             const float dt = 1.0f / 60.0f;
             g_back = normalize(rotate(g_back, k, -g_stick_x * YAW_RATE * dt));
+            // Follow behind: while the player moves, the camera comes round
+            // behind the way they are going, the faster they move the
+            // sooner, so walking round something keeps it out of the way
+            // (the floor they came over is open). Not when they walk toward
+            // the camera (it keeps their face), nor while the stick turns it
+            // or it swings round something or to a thing looked at.
+            const Vec3 moved = flatten(sub(player, g_last_player), k);
+            const float speed = length(moved) * 60.0f;
+            if (speed > FOLLOW_MIN_SPEED && fabsf(g_stick_x) < 0.1f && !g_swing_active && !g_back_sweeps) {
+                const Vec3 behind = normalize(scale(moved, -1.0f));
+                const float angle = level_angle(g_back, behind, k);
+                if (fabsf(angle) < FOLLOW_MAX_ANGLE) {
+                    const float rate = FOLLOW_RATE * fminf(1.0f, speed / FOLLOW_FULL_SPEED);
+                    g_back = normalize(rotate(g_back, k, clampf(angle * rate * dt, -fabsf(angle), fabsf(angle))));
+                }
+            }
             g_distance = clampf(g_distance - g_stick_y * TP_ZOOM_RATE * dt, TP_CLOSEST, TP_FARTHEST);
         }
         // Something between the player and the eye (a cabinet, a pillar):
@@ -536,13 +695,16 @@ static void third_person(CPUState* cpu, Vec3 eye, Vec3 focus, Vec3 player, Vec3 
         const float rise_now = g_rise + g_lift;
         const Vec3 step = jumped ? v3(0.0f, 0.0f, 0.0f) : scale(sub(player, g_last_player), SWING_AHEAD);
         auto_swing(cpu, pivot, step, k, rise_now, jumped || still || g_back_sweeps || fabsf(g_stick_x) >= 0.1f);
-        // Walls: where the eye would be has room enough, or it rises over
-        // the player's head (looking down on them) to where there is more,
-        // easing up and back down.
+        // Walls are measured along the direction the camera is drawn in (it
+        // eases after where it is going), so the drawn eye is always in front
+        // of what is in the way.
+        const Vec3 drawn = g_view_jump ? g_back : yaw_dir(g_s_yaw, k);
+        // Room enough there, or it rises over the player's head (looking
+        // down on them, over a cabinet) to where there is more.
         float best = -1.0f, lift = 0.0f;
-        for (int i = 0; i < 4 && g_collide != NULL; i++) {
+        for (int i = 0; i < 3 && g_collide != NULL; i++) {
             const float rise = fminf(g_rise + 0.3f * (float)i, 1.35f);
-            const float reach = wall_reach(cpu, pivot, add(scale(g_back, cosf(rise)), scale(k, sinf(rise))));
+            const float reach = wall_reach(cpu, pivot, add(scale(drawn, cosf(rise)), scale(k, sinf(rise))));
             if (reach > best + 1.0f) {
                 best = reach;
                 lift = rise - g_rise;
@@ -550,17 +712,37 @@ static void third_person(CPUState* cpu, Vec3 eye, Vec3 focus, Vec3 player, Vec3 
             if (reach >= TP_ROOMY)
                 break;
         }
-        g_lift = jumped ? lift : g_lift + clampf(lift - g_lift, -1.5f / 60.0f, 1.5f / 60.0f);
-        // Then the eye comes in short of the first thing in the way, quickly
-        // but not in one jump, and goes back out gently once it clears.
+        // Once it has had to rise, it stays up a while: a rise that came and
+        // went with every glance of the line off the furniture was the
+        // up-and-down judder.
+        static int lift_hold;
+        if (jumped || lift >= g_lift) {
+            g_lift = lift;
+            lift_hold = LIFT_HOLD;
+        } else if (lift_hold > 0) {
+            lift_hold--;
+        } else {
+            g_lift = lift;
+        }
+        // Then how far out the eye can go: the nearest of the last few
+        // frames' readings, so a line glancing on and off an edge does not
+        // pump it in and out.
         const float rise = g_rise + g_lift;
-        const float reach = wall_reach(cpu, pivot, add(scale(g_back, cosf(rise)), scale(k, sinf(rise))));
+        const float reach = wall_reach(cpu, pivot, add(scale(drawn, cosf(rise)), scale(k, sinf(rise))));
+        static float window[REACH_WINDOW];
+        static int window_at, window_n;
         if (jumped)
-            g_reach = reach;
-        else if (reach < g_reach)
-            g_reach = fmaxf(reach, g_reach - fmaxf(PULL_RATE / 60.0f, (g_reach - reach) * 0.15f));
-        else
-            g_reach = fminf(reach, g_reach + TP_FARTHEST * 1.5f / 60.0f);
+            window_n = 0;
+        window[window_at] = reach;
+        window_at = (window_at + 1) % REACH_WINDOW;
+        if (window_n < REACH_WINDOW)
+            window_n++;
+        g_reach = reach;
+        for (int i = 0; i < window_n; i++)
+            g_reach = fminf(g_reach, window[i]);
+        // Eased in and out itself: a sudden change of pace is a jolt too.
+        const float urgent = clampf((g_distance * 0.6f - reach) / (g_distance * 0.6f - TP_NEAREST), 0.0f, 1.0f);
+        g_urgency += clampf(urgent - g_urgency, -1.0f / 60.0f, 2.0f / 60.0f);
         static int log = -1;
         if (log < 0)
             log = getenv("ED_CAM_LOG") != NULL && getenv("ED_CAM_LOG")[0] == '4';
@@ -576,10 +758,25 @@ static void third_person(CPUState* cpu, Vec3 eye, Vec3 focus, Vec3 player, Vec3 
         g_last_player = player;
         g_have_player = true;
     }
-    const float rise = g_rise + g_lift;
-    const Vec3 out = add(scale(g_back, cosf(rise)), scale(k, sinf(rise)));
-    *new_eye = add(pivot, scale(out, g_reach));
-    *new_target = g_aim;
+    if (step) {
+        smooth_view(pivot, k, g_view_jump);
+        static int log = -1;
+        if (log < 0)
+            log = getenv("ED_CAM_LOG") != NULL && getenv("ED_CAM_LOG")[0] == '4';
+        if (log && g_collide != NULL) {
+            // Can the drawn eye see the player? (for tuning: ED_CAM_LOG=4)
+            const Vec3 eye_now = add(g_s_pivot, scale(out_dir(yaw_dir(g_s_yaw, k), k, g_s_rise), g_s_dist));
+            const float chest = line_reach(cpu, pivot, eye_now, 1.0f);
+            const float hips = line_reach(cpu, sub(pivot, scale(k, TP_HIPS)), eye_now, 1.0f);
+            fprintf(stderr, "[camera] seen chest %.2f hips %.2f dist %.0f\n", chest, hips, g_s_dist);
+        }
+    }
+    // Close in, it frames the player's head and shoulders rather than their
+    // middle: the point it turns about rises toward head height.
+    const float close = clampf(1.0f - (g_s_dist - TP_NEAREST) / fmaxf(1.0f, g_distance - TP_NEAREST), 0.0f, 1.0f);
+    const Vec3 centre = add(g_s_pivot, scale(k, close * TP_CLOSE_RISE));
+    *new_eye = add(centre, scale(out_dir(yaw_dir(g_s_yaw, k), k, g_s_rise), g_s_dist));
+    *new_target = add(centre, g_s_aim);
 }
 
 static bool g_log_checked, g_log;
@@ -666,6 +863,9 @@ void camera_look_at(CPUState* cpu) {
     g_view_active = true;
     g_view_eye = new_eye;
     g_view_target = new_target;
+    if (g_log && step && getenv("ED_CAM_LOG")[0] == '4')
+        fprintf(stderr, "[camera] view %llu eye %.2f %.2f %.2f target %.2f %.2f %.2f\n", frame, new_eye.x, new_eye.y,
+                new_eye.z, new_target.x, new_target.y, new_target.z);
     const u32 sp = cpu->gpr[1];
     write_vec(cpu, sp + 40u, new_eye);
     write_vec(cpu, sp + 52u, new_target);

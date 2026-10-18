@@ -212,8 +212,10 @@ float camera_stick_turn(void) {
 // is drawn as the game has them only on the way there (the game draws them
 // again as it lets go), while the eye is FP_BODY_CLEAR or more from their
 // eyes (it flies through their head otherwise).
-#define FP_HAND_TIME 1.1f
-#define FP_HAND_AIM 0.55f
+// On the way the field of view keeps the thing growing (or, back, shrinking)
+// steadily on screen, wherever the eye is: no zooming away and back in.
+#define FP_HAND_TIME 1.4f
+#define FP_HAND_AIM 0.4f
 #define FP_HAND_MOVE 0.3f
 #define FP_BODY_CLEAR 150.0f
 // Walls: the line test's radius, how far short of a wall the eye stops, and
@@ -306,6 +308,7 @@ static float g_hand_progress, g_hand;
 // The game's view as the look ends, eased back from (the game's own camera
 // pulls back out to its shot then, which would swing the view out and in).
 static bool g_handing;
+static float g_fp_hand_fov;  // first person's field of view on the way (0: none)
 static Vec3 g_held_eye, g_held_target;
 static float g_held_fov;
 
@@ -319,8 +322,10 @@ float camera_field_of_view(float game_fov) {
         return game_fov;
     const float own =
         g_last_mode == CAMERA_THIRD_PERSON ? TP_FOV : g_last_mode == CAMERA_FIRST_PERSON ? FP_FOV : game_fov;
-    if (g_handing || g_hand <= 0.0f)
-        g_held_fov = game_fov;
+    if (g_held_fov <= 0.0f)
+        g_held_fov = game_fov;  // else held with the eye (camera_look_at)
+    if (g_last_mode == CAMERA_FIRST_PERSON && g_fp_hand_fov > 0.0f)
+        return g_fp_hand_fov;
     return own + (g_held_fov - own) * g_hand;
 }
 
@@ -1105,7 +1110,7 @@ void camera_look_at(CPUState* cpu) {
     if (mode == CAMERA_ORIGINAL) {
         g_turn = 0.0f;
         g_view_active = false;
-        g_hand_progress = g_hand = 0.0f;
+        g_hand_progress = g_hand = g_fp_hand_fov = 0.0f;
         return;
     }
     const bool still = g_aiming;
@@ -1149,6 +1154,7 @@ void camera_look_at(CPUState* cpu) {
         if (g_handing || g_hand_progress <= 0.0f) {
             g_held_eye = eye;
             g_held_target = target;
+            g_held_fov = read_float(cpu, cpu->gpr[4] + 48u);
         }
         if (mode == CAMERA_FIRST_PERSON && g_hand_progress > 0.0f) {
             // The eye on its way (g_hand also eases the field of view), the
@@ -1160,12 +1166,24 @@ void camera_look_at(CPUState* cpu) {
             const Vec3 dir = turn_towards(normalize(own), normalize(thing), aim);
             new_eye = from;
             new_target = add(from, scale(dir, length(own) + (length(thing) - length(own)) * aim));
+            // The thing's size on screen, 1 / (distance x tan(half the field
+            // of view)), eased from first person's to the game's (evenly in
+            // proportion), and the field of view that gives it from here.
+            const float d0 = fmaxf(length(sub(g_held_target, g_fp_eye)), 1.0f);
+            const float d1 = fmaxf(length(sub(g_held_target, g_held_eye)), 1.0f);
+            const float d = fmaxf(length(thing), 1.0f);
+            const float half = PI / 360.0f;
+            const float game_fov = g_held_fov > 0.0f ? g_held_fov : FP_FOV;
+            const float s0 = 1.0f / (d0 * tanf(FP_FOV * half)), s1 = 1.0f / (d1 * tanf(game_fov * half));
+            const float size = s0 * powf(s1 / s0, g_hand);
+            g_fp_hand_fov = clampf(atanf(1.0f / (size * d)) / half, 5.0f, 100.0f);
         } else {
+            g_fp_hand_fov = 0.0f;
             new_eye = add(new_eye, scale(sub(g_held_eye, new_eye), g_hand));
             new_target = add(new_target, scale(sub(g_held_target, new_target), g_hand));
         }
     } else {
-        g_hand_progress = g_hand = 0.0f;
+        g_hand_progress = g_hand = g_fp_hand_fov = 0.0f;
     }
     if (step) {
         g_last_eye = eye;
@@ -1180,10 +1198,10 @@ void camera_look_at(CPUState* cpu) {
     if (g_log && step && getenv("ED_CAM_LOG")[0] == '4')
         fprintf(stderr,
                 "[camera] view %llu eye %.2f %.2f %.2f target %.2f %.2f %.2f hand %.3f game %.2f %.2f %.2f %.2f %.2f "
-                "%.2f fov %.1f look %d hidden %d\n",
+                "%.2f fov %.1f look %d hidden %d ours %.2f\n",
                 frame, new_eye.x, new_eye.y, new_eye.z, new_target.x, new_target.y, new_target.z, g_hand, eye.x,
                 eye.y, eye.z, target.x, target.y, target.z, read_float(cpu, cpu->gpr[4] + 48u), g_looking_known,
-                g_examining);
+                g_examining, camera_field_of_view(read_float(cpu, cpu->gpr[4] + 48u)));
     const u32 sp = cpu->gpr[1];
     write_vec(cpu, sp + 40u, new_eye);
     write_vec(cpu, sp + 52u, new_target);

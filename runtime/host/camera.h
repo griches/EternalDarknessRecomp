@@ -26,6 +26,16 @@ struct CPUState;
 typedef bool (*CameraCollide)(struct CPUState* cpu, const float start[3], const float end[3], float radius,
                               float hit[3]);
 void camera_set_collide(CameraCollide fn);
+// The eye and target this camera drew the last frame from, while it is the
+// one in use (false with the game's own), for game code that measures from
+// the camera (hle.c: the fade of things close to it).
+bool camera_view(float eye[3], float target[3]);
+// From hle.c, each frame: the game has hidden the player to look closely at
+// something (its camera at their head, looking at the thing).
+void camera_set_examining(bool examining);
+// Third person is in use: the player stays drawn even when the game hides
+// them to look closely at something.
+bool camera_shows_player(void);
 // The right stick belongs to the camera (a mode is on, the game is in play).
 bool camera_takes_stick(void);
 // The camera's turn from the game's own, for the left stick: the angle (radians,

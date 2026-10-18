@@ -5294,9 +5294,14 @@ static void sync_widescreen_option(CPUState* cpu) {
 void camera_look_at(CPUState* cpu);
 static u32 g_camera_look_at_return;
 
+static s16 g_show_player_offset, g_show_followed_offset;
+
 static void notify_look_at(CPUState* cpu) {
-    if (cpu->lr == g_camera_look_at_return)
-        camera_look_at(cpu);
+    if (cpu->lr != g_camera_look_at_return)
+        return;
+    if (g_show_player_offset != 0 && sda_ready(cpu))
+        camera_set_examining(mem_read32(cpu, cpu->gpr[13] + (u32)(s32)g_show_player_offset) == 0u);
+    camera_look_at(cpu);
 }
 
 // The game's collision, for the third-person camera's line test: the world a
@@ -5347,6 +5352,138 @@ static bool camera_collide(CPUState* cpu, const float start[3], const float end[
     return true;
 }
 
+// The game fades out whatever is at or behind its camera (Alex, when its
+// camera looks from her head at something she examines), measured from its
+// camera's eye and target controllers. With another camera that is the wrong
+// place: while the fade runs, the controllers hold the camera in use, and get
+// their own values back as soon as it returns.
+static u32 g_fade_fn, g_fade_eye, g_fade_target;
+static bool g_fade_running;
+
+static void hle_camera_fade(CPUState* cpu) {
+    float eye[3], target[3];
+    if (g_fade_running || !camera_view(eye, target)) {
+        g_hle_passthrough = true;
+        return;
+    }
+    u32 saved[6];
+    for (u32 i = 0; i < 3u; i++) {
+        saved[i] = mem_read32(cpu, g_fade_eye + i * 4u);
+        saved[3 + i] = mem_read32(cpu, g_fade_target + i * 4u);
+        guest_write_f32(cpu, g_fade_eye + i * 4u, eye[i]);
+        guest_write_f32(cpu, g_fade_target + i * 4u, target[i]);
+    }
+    const u32 args[] = {cpu->gpr[3], cpu->gpr[4], cpu->gpr[5]};
+    g_fade_running = true;
+    const bool ok = hle_guest_call(cpu, g_fade_fn, args, 3, cpu->fpr[1], NULL);
+    g_fade_running = false;
+    for (u32 i = 0; i < 3u; i++) {
+        mem_write32(cpu, g_fade_eye + i * 4u, saved[i]);
+        mem_write32(cpu, g_fade_target + i * 4u, saved[3 + i]);
+    }
+    if (!ok)
+        fprintf(stderr, "[camera] the fade did not return\n");
+    if (g_collide_log > 0) {
+        static unsigned n;
+        const u32 player = mem_read32(cpu, cpu->gpr[13] + (u32)(s32)g_camera_player_offset);
+        if (n++ % 30u == 0u)
+            fprintf(stderr, "[camera] fade: player fade %.2f flags 0x%08X eye %.0f %.0f %.0f\n",
+                    guest_read_f32(cpu, player + 684u), mem_read32(cpu, player + 596u), eye[0], eye[1], eye[2]);
+    }
+    // The nested dispatch passed itself through; this call is done here.
+    g_hle_passthrough = false;
+    g_hle_tail_call = false;
+}
+
+// The fade function (PAL, USA) and its controllers, from its own code:
+// lis r5,hi; lis r4,hi; ...; addi r0,r5,target; ...; addi r4,r4,eye.
+static void find_camera_fade(CPUState* cpu) {
+    const bool pal = strcmp(ED_GAME_ID, "GEDP01") == 0;
+    const u32 fn = pal ? 0x8011CA04u : 0x801237F0u;
+    const u32 lis5 = mem_read32(cpu, fn + 0x4Cu), lis4 = mem_read32(cpu, fn + 0x50u);
+    const u32 add_target = mem_read32(cpu, fn + 0x58u), add_eye = mem_read32(cpu, fn + 0x64u);
+    HleDispatchEntry* entry = hle_dispatch_entry(fn);
+    if ((mem_read32(cpu, fn) >> 16) != 0x9421u || (lis5 >> 16) != 0x3CA0u || (lis4 >> 16) != 0x3C80u ||
+        (add_target >> 16) != 0x3805u || (add_eye >> 16) != 0x3884u || entry == NULL ||
+        entry->intercept != NULL || entry->notify != NULL) {
+        fprintf(stderr, "[camera] the game's fade not found: it measures from its own camera\n");
+        return;
+    }
+    g_fade_fn = fn;
+    g_fade_target = ((lis5 & 0xFFFFu) << 16) + (u32)(s32)(s16)(add_target & 0xFFFFu);
+    g_fade_eye = ((lis4 & 0xFFFFu) << 16) + (u32)(s32)(s16)(add_eye & 0xFFFFu);
+    entry->intercept = hle_camera_fade;
+}
+
+// The game draws the player only while two flags are set; looking closely at
+// something clears them, as its camera is then at the player's head. The
+// third-person camera is not, so while it is in use the characters' draw loop
+// runs with both set, and they get the game's values back as soon as it returns. The
+// setter (found by its code) gives the flags: fn(show) stores show at
+// offset(r13), and at a second offset when the player is also the one the
+// camera follows; the draw loop is the function that tests the first.
+static u32 g_draw_characters;
+static bool g_draw_characters_running;
+
+static void hle_draw_characters(CPUState* cpu) {
+    if (g_draw_characters_running || !camera_shows_player() || !sda_ready(cpu)) {
+        g_hle_passthrough = true;
+        return;
+    }
+    const u32 show = cpu->gpr[13] + (u32)(s32)g_show_player_offset;
+    const u32 followed = cpu->gpr[13] + (u32)(s32)g_show_followed_offset;
+    const u32 saved_show = mem_read32(cpu, show), saved_followed = mem_read32(cpu, followed);
+    mem_write32(cpu, show, 1u);
+    mem_write32(cpu, followed, 1u);
+    u32 args[8];
+    for (int i = 0; i < 8; i++)
+        args[i] = cpu->gpr[3 + i];
+    g_draw_characters_running = true;
+    const bool ok = hle_guest_call(cpu, g_draw_characters, args, 8, cpu->fpr[1], NULL);
+    g_draw_characters_running = false;
+    mem_write32(cpu, show, saved_show);
+    mem_write32(cpu, followed, saved_followed);
+    if (!ok)
+        fprintf(stderr, "[camera] the characters' draw did not return\n");
+    g_hle_passthrough = false;  // the nested dispatch passed itself through
+    g_hle_tail_call = false;
+}
+
+static void find_show_player(CPUState* cpu) {
+    static const u32 kHead[] = {0x9421FFF0u, 0x7C0802A6u, 0x90010014u, 0x93E1000Cu, 0x93C10008u, 0x7C7E1B78u};
+    u32 setter = 0;
+    for (u32 at = HLE_CODE_BASE; at + 64u < HLE_CODE_LIMIT && setter == 0; at += 4u) {
+        if (mem_read32(cpu, at) != kHead[0] || !code_matches(cpu, at, kHead, 6))
+            continue;
+        const u32 store = mem_read32(cpu, at + 40u), store2 = mem_read32(cpu, at + 48u);
+        if ((mem_read32(cpu, at + 24u) & 0xFC000003u) != 0x48000001u || mem_read32(cpu, at + 28u) != 0x7C7F1B78u ||
+            (mem_read32(cpu, at + 32u) & 0xFC000003u) != 0x48000001u || mem_read32(cpu, at + 36u) != 0x7C1F1800u ||
+            (store >> 16) != 0x93CDu || mem_read32(cpu, at + 44u) != 0x40820008u || (store2 >> 16) != 0x93CDu)
+            continue;
+        setter = at;
+        g_show_player_offset = (s16)(store & 0xFFFFu);
+        g_show_followed_offset = (s16)(store2 & 0xFFFFu);
+    }
+    // The draw loop: lwz r0,show(r13); cmpwi r0,0; bne +16, a little after
+    // its stwu r1,-n(r1).
+    const u32 test = 0x800D0000u | ((u32)g_show_player_offset & 0xFFFFu);
+    for (u32 at = HLE_CODE_BASE; setter != 0 && at + 12u < HLE_CODE_LIMIT; at += 4u) {
+        if (mem_read32(cpu, at) != test || mem_read32(cpu, at + 4u) != 0x2C000000u ||
+            mem_read32(cpu, at + 8u) != 0x40820010u)
+            continue;
+        for (u32 back = 4u; back <= 0x100u; back += 4u)
+            if ((mem_read32(cpu, at - back) >> 16) == 0x9421u) {
+                HleDispatchEntry* entry = hle_dispatch_entry(at - back);
+                if (entry == NULL || entry->notify != NULL || entry->intercept != NULL)
+                    break;
+                g_draw_characters = at - back;
+                entry->intercept = hle_draw_characters;
+                return;
+            }
+    }
+    fprintf(stderr, "[camera] the player's draw flags not found: looking closely hides the player\n");
+}
+
 // The player object (position at +0), for the third-person camera: a pointer
 // at r13 + offset that a small function compares its argument with:
 // or r29,r3,r3; li r3,2; bl ...; lwz r0,offset(r13); or r31,r3,r3; cmplw r29,r0.
@@ -5394,6 +5531,8 @@ static void find_camera(CPUState* cpu) {
             g_camera_look_at_return = at + 20u;
             entry->notify = notify_look_at;
             find_player(cpu);
+            find_camera_fade(cpu);
+            find_show_player(cpu);
             return;
         }
     }

@@ -52,9 +52,16 @@
 // hle_guest_call: lr points here, so the call's own return is seen (blr ->
 // pc == sentinel); a function that runs longer than the budget is abandoned.
 #define GUEST_CALL_SENTINEL 0x0BADF010u
-#define GUEST_CALL_MAX_BLOCKS 200000u
+#define GUEST_CALL_MAX_BLOCKS 50000000u
 
 bool hle_guest_call(CPUState* cpu, u32 fn, const u32* args, int count, double f1, u32* result) {
+    // A thread that does not own the FPU traps on its first FP instruction and
+    // the OS hands it over; the call would, so do it first, and keep it.
+    if ((cpu->msr & 0x00002000u) == 0u) {  // MSR[FP]
+        cpu->srr0 = cpu->pc;
+        cpu->srr1 = cpu->msr;
+        interrupt_switch_fpu_context(cpu);
+    }
     // Everything a call can change, up to and including the MSR.
     const size_t span = offsetof(CPUState, srr0);
     unsigned char saved[sizeof(CPUState)];
@@ -69,16 +76,29 @@ bool hle_guest_call(CPUState* cpu, u32 fn, const u32* args, int count, double f1
     cpu->lr = GUEST_CALL_SENTINEL;
     cpu->pc = fn;
     bool ok = false;
-    for (u32 blocks = 0; blocks < GUEST_CALL_MAX_BLOCKS; blocks++) {
+    u32 blocks_used = 0;
+    for (u32 blocks = 0; blocks < GUEST_CALL_MAX_BLOCKS; blocks++, blocks_used = blocks) {
         if (cpu->pc == GUEST_CALL_SENTINEL) {
             ok = true;
             break;
         }
-        if (!dolrecomp_call(cpu, cpu->pc) || cpu->exception != exception)
+        if (!dolrecomp_call(cpu, cpu->pc))
             break;
+        if (cpu->exception == PPC_EXC_SYSTEM_CALL) {  // as in the run loop
+            cpu->exception = exception;
+            ppc_rfi(cpu, cpu->pc);
+        } else if (cpu->exception != exception) {
+            break;
+        }
     }
     if (ok && result != NULL)
         *result = cpu->gpr[3];
+    if (getenv("ED_GUEST_CALL_LOG") != NULL) {
+        static unsigned shown;
+        if (shown++ < 40u)
+            fprintf(stderr, "[guest-call] 0x%08X %s after %u blocks (pc 0x%08X)\n", fn, ok ? "returned" : "stopped",
+                    blocks_used, cpu->pc);
+    }
     memcpy(cpu, saved, span);
     cpu->exception = exception;
     return ok;

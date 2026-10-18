@@ -98,6 +98,17 @@ int camera_mode(void) {
 
 void camera_set_player_offset(int offset) { g_player_offset = (s16)offset; }
 
+static bool g_view_active;  // camera_view
+static Vec3 g_view_eye, g_view_target;
+
+bool camera_view(float eye[3], float target[3]) {
+    if (!g_view_active)
+        return false;
+    eye[0] = g_view_eye.x, eye[1] = g_view_eye.y, eye[2] = g_view_eye.z;
+    target[0] = g_view_target.x, target[1] = g_view_target.y, target[2] = g_view_target.z;
+    return true;
+}
+
 static CameraCollide g_collide;
 void camera_set_collide(CameraCollide fn) { g_collide = fn; }
 
@@ -157,8 +168,14 @@ static Vec3 g_back;
 static float g_rise;
 static Vec3 g_last_player;
 static bool g_have_player;
+static bool g_examining;  // camera_set_examining
+static float g_focus;     // 0 looking at the player .. 1 at what they examine
 static float g_reach, g_lift;  // g_lift: risen over the player's head, for room
 static float g_distance = TP_DISTANCE;  // how far back the player wants it (kept across rooms)
+
+void camera_set_examining(bool examining) { g_examining = examining; }
+
+bool camera_shows_player(void) { return g_view_active && g_last_mode == CAMERA_THIRD_PERSON; }
 
 /* The game camera cut to another shot (or a new room): its eye jumped, or it
  * swung round, between one frame and the next. */
@@ -260,11 +277,19 @@ static float wall_reach(CPUState* cpu, Vec3 pivot, Vec3 out) {
 }
 
 /* Third person: behind and above the player, trailing after them. Starts
- * from the side the game's camera is on. */
-static void third_person(CPUState* cpu, Vec3 eye, Vec3 player, Vec3 k, bool step, bool still, Vec3* new_eye,
-                         Vec3* new_target) {
+ * from the side the game's camera is on. While the player looks closely at
+ * something, the game's camera looks at it (focus): this one turns to it too,
+ * from behind the player, so a thing high on a wall comes into view. */
+static void third_person(CPUState* cpu, Vec3 eye, Vec3 focus, Vec3 player, Vec3 k, bool step, bool still,
+                         Vec3* new_eye, Vec3* new_target) {
     const Vec3 pivot = add(player, scale(k, TP_HEIGHT));
     if (step) {
+        g_focus = clampf(g_focus + (g_examining ? 3.0f : -3.0f) / 60.0f, 0.0f, 1.0f);
+        if (g_examining && !still && fabsf(g_stick_x) < 0.1f) {
+            const Vec3 behind = normalize(flatten(sub(pivot, focus), k));
+            if (length(behind) > 0.0f)
+                g_back = normalize(add(scale(g_back, 0.92f), scale(behind, 0.08f)));
+        }
         const bool jumped = !g_have_player || length(sub(player, g_last_player)) > 300.0f;
         if (jumped) {
             g_back = normalize(flatten(sub(eye, pivot), k));
@@ -309,7 +334,7 @@ static void third_person(CPUState* cpu, Vec3 eye, Vec3 player, Vec3 k, bool step
     const float rise = g_rise + g_lift;
     const Vec3 out = add(scale(g_back, cosf(rise)), scale(k, sinf(rise)));
     *new_eye = add(pivot, scale(out, g_reach));
-    *new_target = pivot;
+    *new_target = add(pivot, scale(sub(focus, pivot), g_focus));
 }
 
 static bool g_log_checked, g_log;
@@ -353,6 +378,7 @@ void camera_look_at(CPUState* cpu) {
     }
     if (mode == CAMERA_ORIGINAL) {
         g_turn = 0.0f;
+        g_view_active = false;
         return;
     }
     const bool still = g_aiming;
@@ -360,7 +386,7 @@ void camera_look_at(CPUState* cpu) {
     if (mode == CAMERA_FREE_LOOK)
         free_look(eye, target, k, step, still, &new_eye, &new_target);
     else
-        third_person(cpu, eye, player, k, step, still, &new_eye, &new_target);
+        third_person(cpu, eye, target, player, k, step, still, &new_eye, &new_target);
     if (step) {
         g_last_eye = eye;
         g_last_target = target;
@@ -368,6 +394,9 @@ void camera_look_at(CPUState* cpu) {
         if (!still)
             g_turn = level_angle(sub(target, eye), sub(new_target, new_eye), k);
     }
+    g_view_active = true;
+    g_view_eye = new_eye;
+    g_view_target = new_target;
     const u32 sp = cpu->gpr[1];
     write_vec(cpu, sp + 40u, new_eye);
     write_vec(cpu, sp + 52u, new_target);

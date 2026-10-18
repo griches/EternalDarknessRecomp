@@ -1193,14 +1193,28 @@ void camera_held_begin(CPUState* cpu) {
     g_held_overridden = true;
 }
 
+/* Hidden by the camera, a thing gets back its own flags, on the step the
+ * frame's draw would have taken them (it took the camera's instead):
+ * appearing (HELD_DRAWN alone) to shown, going (HELD_GOING alone) to gone.
+ * Shown by the camera where the game hides it (a text box), a thing is left
+ * as the draw left it, shown: ending the text the game brings it back from
+ * whatever it finds, and given back its hidden own the draw would have
+ * missed the start of that, leaving it hidden. */
+#define HELD_GOING 0x00040000u
+static u32 held_step(u32 own) {
+    const u32 state = own & (HELD_DRAWN | HELD_GOING);
+    return state == HELD_DRAWN ? own | HELD_GOING : state == HELD_GOING ? own & ~HELD_GOING : own;
+}
+
 void camera_held_end(CPUState* cpu) {
     if (!g_held_overridden || g_held_list == 0u)
         return;
     g_held_overridden = false;
     for (u32 k = 0; k < HELD_SLOTS; k++) {
         const u32 at = g_held_list + 12u + k * 8u;
-        if (mem_read32(cpu, at) == g_held_written[k] && g_held_written[k] != g_held_own[k])
-            mem_write32(cpu, at, g_held_own[k]);
+        if (mem_read32(cpu, at) == g_held_written[k] && g_held_written[k] != g_held_own[k] &&
+            (g_held_written[k] & HELD_DRAWN) == 0u)
+            mem_write32(cpu, at, held_step(g_held_own[k]));
     }
 }
 

@@ -1265,6 +1265,9 @@ static void first_person(Vec3 eye, Vec3 target, Vec3 focus, Vec3 player, Vec3 k,
  * the up axis (x or y set). */
 #define FACE_MIN_STICK 0.25f
 static float g_move_x, g_move_y;
+static bool g_menu_open;  // camera_set_menu
+
+void camera_set_menu(bool open) { g_menu_open = open; }
 
 void camera_set_move(float x, float y) {
     g_move_x = x;
@@ -1294,14 +1297,49 @@ static void player_set_facing(CPUState* cpu, Vec3 dir) {
     }
 }
 
+static bool g_log_checked, g_log;
+
+/* Stepping sideways or back leaves them facing that way, not the view's: as
+ * the stick lets go, and as the action button (B: pick up, open, look) goes
+ * down, they turn to face the view, so what they reach for is what the view
+ * is on. The game gets no stick for FACE_HOLD frames after the button (it
+ * would turn them back the way they walk). */
+#define FACE_HOLD 20
+#define PAD_ACTION 0x0200u  // the GameCube B button
+static bool g_face_moving;
+static int g_face_hold;
+static Vec3 g_view_up = {0.0f, 0.0f, 1.0f};
+
 static void face_stick(CPUState* cpu, Vec3 view, Vec3 k) {
-    if (hypotf(g_move_x, g_move_y) < FACE_MIN_STICK)
-        return;
+    const bool moving = hypotf(g_move_x, g_move_y) >= FACE_MIN_STICK;
     const Vec3 forward = normalize(flatten(view, k));
-    player_set_facing(cpu, add(scale(forward, g_move_y), scale(cross(forward, k), g_move_x)));
+    if (g_face_hold > 0)
+        return;
+    if (moving)
+        player_set_facing(cpu, add(scale(forward, g_move_y), scale(cross(forward, k), g_move_x)));
+    else if (g_face_moving) {
+        player_set_facing(cpu, forward);
+        if (g_log)
+            fprintf(stderr, "[camera] stopped: facing the view\n");
+    }
+    g_face_moving = moving;
 }
 
-static bool g_log_checked, g_log;
+bool camera_pad_buttons(CPUState* cpu, unsigned buttons) {
+    static unsigned last;
+    const bool pressed = (buttons & PAD_ACTION) != 0 && (last & PAD_ACTION) == 0;
+    last = buttons;
+    if (g_face_hold > 0)
+        g_face_hold--;
+    if (!pressed || !g_view_active || g_last_mode != CAMERA_FIRST_PERSON || g_hand_progress > 0.0f || g_aiming ||
+        g_menu_open)
+        return g_face_hold > 0;
+    player_set_facing(cpu, normalize(flatten(sub(g_view_target, g_view_eye), g_view_up)));
+    g_face_hold = FACE_HOLD;
+    if (g_log)
+        fprintf(stderr, "[camera] action: facing the view\n");
+    return true;
+}
 
 /* What the player holds (a sword, a gun) is drawn from a list beside their
  * character: the player object, a zero, then HELD_SLOTS of (thing, flags);
@@ -1318,10 +1356,6 @@ static u32 g_held_player, g_held_list;
 static u32 g_held_own[HELD_SLOTS], g_held_written[HELD_SLOTS], g_held_shown[HELD_SLOTS];
 static bool g_held_overridden;
 static bool g_held_was_drawn[HELD_SLOTS];
-static bool g_menu_open;  // camera_set_menu
-
-void camera_set_menu(bool open) { g_menu_open = open; }
-
 static bool held_list_at(CPUState* cpu, u32 at, u32 player) {
     if (mem_read32(cpu, at) != player || mem_read32(cpu, at + 4u) != 0u)
         return false;
@@ -1511,6 +1545,7 @@ void camera_look_at(CPUState* cpu) {
     static int face_all = -1;
     if (face_all < 0)
         face_all = getenv("ED_CAM_FACE") != NULL && atoi(getenv("ED_CAM_FACE")) != 0;
+    g_view_up = k;
     if (step && !still && g_hand_progress <= 0.0f && (mode == CAMERA_FIRST_PERSON || face_all))
         face_stick(cpu, sub(new_target, new_eye), k);
     // Aiming in first person: facing the view, as they raise the gun.

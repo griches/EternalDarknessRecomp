@@ -3612,6 +3612,8 @@ static void hle_PADRead(CPUState* cpu) {
     controls_set_cutscene(cutscene_playing(cpu));
     controls_note_frame(cpu->timebase / 675000ull);
     u32 motor_mask = dol_platform_pad_read(state);
+    if (camera_pad_buttons(cpu, state[0].button))
+        state[0].stick_x = state[0].stick_y = 0;
     interrupt_set_speed(controls_fast_forward() ? 4u : 1u);
     if (g_auto_input) {
         const u64 frame = cpu->timebase / 675000ull;

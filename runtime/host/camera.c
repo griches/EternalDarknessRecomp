@@ -119,6 +119,9 @@ static Vec3 g_head_eye;  // the player's eyes (any mode)
 #define FP_AIM_TURN 15
 #define FP_AIM_SETTLE 6
 static int g_aim_frames, g_aim_settled;
+// First person draws the player's arms (and what they hold) and nothing else
+// of them, once camera_skin_begin has found their arms.
+static bool g_fp_arms;
 
 bool camera_view(float eye[3], float target[3]) {
     if (!g_view_active)
@@ -200,6 +203,9 @@ float camera_stick_turn(void) {
 // Its near clipping distance: past the hair round the eye (a ponytail swings
 // forward through 30 with a sword).
 #define FP_NEAR 45.0f
+// With only their arms drawn: in at the shoulders, as looking down they are
+// just under the eye (at FP_NEAR the near one is cut open, a flat wedge).
+#define FP_ARMS_NEAR 20.0f
 // The eye this far ahead of the head along the view.
 #define FP_AHEAD 12.0f
 // Aiming (the player drawn, swinging): further ahead, past their shoulders.
@@ -361,7 +367,7 @@ int camera_player_drawn(void);
 float camera_near_plane(float game_near, unsigned long long frame) {
     static float near = -1.0f;  // ED_CAM_FP_NEAR (tests)
     if (near < 0.0f)
-        near = getenv("ED_CAM_FP_NEAR") != NULL ? (float)atof(getenv("ED_CAM_FP_NEAR")) : FP_NEAR;
+        near = getenv("ED_CAM_FP_NEAR") != NULL ? (float)atof(getenv("ED_CAM_FP_NEAR")) : 0.0f;
     // The game sets it before the frame's draws, ahead of the camera: aiming,
     // it moves a frame before the player is drawn (else that frame looks out
     // from inside their head).
@@ -376,7 +382,7 @@ float camera_near_plane(float game_near, unsigned long long frame) {
         ours = g_view_active && g_last_mode == CAMERA_FIRST_PERSON && g_hand_progress <= 0.0f &&
                (camera_player_drawn() == 1 || soon);
     }
-    return ours ? fmaxf(game_near, near) : game_near;
+    return ours ? fmaxf(game_near, near > 0.0f ? near : g_fp_arms ? FP_ARMS_NEAR : FP_NEAR) : game_near;
 }
 
 int camera_player_drawn(void) {
@@ -393,6 +399,10 @@ int camera_player_drawn(void) {
         // Drawn even where the game hides them (its text boxes and close
         // looks hide them, its camera being at their head; ours is not).
         if (g_hand_progress > 0.0f && length(sub(g_view_eye, g_fp_eye)) >= FP_HEAD_CLEAR)
+            return 1;
+        // Their arms only, the rest of them collapsed (camera_skin_begin):
+        // looking down they hold what they hold.
+        if (g_fp_arms)
             return 1;
         // Aiming they stand still with their arms up: drawn, with the near
         // plane past their head, they hold the gun in front of the view.
@@ -990,7 +1000,7 @@ void camera_bone_matrix(CPUState* cpu, unsigned character, unsigned bone, unsign
         g_bone_n = (int)bone + 1;
 }
 
-/* Aiming in first person the player is drawn for their arms and what they
+/* In first person the player is drawn for their arms and what they
  * hold, but not their head, chest or legs (a helmet's crest, a shoulder plate
  * rising into the view as they swing). The game works out each character's
  * bones into the scratch block, then skins its mesh from them (hle.c steps in
@@ -1002,10 +1012,15 @@ void camera_bone_matrix(CPUState* cpu, unsigned character, unsigned bone, unsign
 #define SKIN_MAX_BONES 128
 // Kept: the hand, its fingers and what it holds, and this many bones above it
 // (forearm and upper arm; above them a shoulder plate hangs off the
-// collarbone, and with only the forearm the upper arm stretches to points).
+// collarbone), as the arms come up in front (aiming, swinging). Hanging at
+// their sides, looked down on, an upper arm is a sleeve open at the top
+// (loose ones stretch to the chest): the forearm only, tapering to the
+// shoulder.
 #define FP_ARM_BONES 2
+#define FP_ARM_BONES_DOWN 1
 static u32 g_skin_model;
-static bool g_skin_keep[SKIN_MAX_BONES];
+static bool g_skin_keep[2][SKIN_MAX_BONES];  // arms down, arms up
+static int g_skin_set;
 static int g_skin_bones;
 static float g_skin_saved[SKIN_MAX_BONES][3];
 static bool g_skin_collapsed;
@@ -1023,6 +1038,12 @@ static void skin_find_arms(CPUState* cpu, u32 model, int n) {
         if (parent[i] >= 0)
             kids[parent[i]]++;
     }
+    // Children that have their own: an arm bone has one (the next down the
+    // arm), beside any single-bone attachments (a pad, a cuff).
+    int limbs[SKIN_MAX_BONES] = {0};
+    for (int i = 0; i < n; i++)
+        if (parent[i] >= 0 && kids[i] > 0)
+            limbs[parent[i]]++;
     // Hands: three or more children. The chest: the nearest bone above two
     // hands that both pass through.
     int hands[8], h = 0;
@@ -1051,37 +1072,46 @@ static void skin_find_arms(CPUState* cpu, u32 model, int n) {
                     }
             fingers = length <= 4 && kids[end] == 0;
         }
-        if (fingers)
+        // And at the end of an arm: forearm, upper arm and collarbone, one
+        // child each (a head's jaw and eyes look like fingers, on the neck).
+        int arm = 0;
+        for (int c = parent[i]; c >= 0 && limbs[c] == 1 && arm < 3; c = parent[c])
+            arm++;
+        if (fingers && arm >= 3)
             hands[h++] = i;
     }
     if (h < 1)
         return;
     // Each hand's arm: up from the hand to the first bone with more than one
-    // child (the chest), every bone on the way and below it kept.
-    for (int i = 0; i < n; i++)
-        g_skin_keep[i] = false;
+    // limb (the chest), every bone on the way and below it kept.
     int arms = 0;
-    static int up = -1;  // ED_CAM_ARM_BONES: bones kept above the hand (tests)
-    if (up < 0)
-        up = getenv("ED_CAM_ARM_BONES") != NULL ? atoi(getenv("ED_CAM_ARM_BONES")) : FP_ARM_BONES;
-    for (int a = 0; a < h; a++) {
-        int top = hands[a];
-        for (int k = 0; k < up && parent[top] >= 0 && kids[parent[top]] == 1; k++)
-            top = parent[top];
-        if (parent[top] < 0)
-            continue;
-        for (int i = 0; i < n; i++)  // the arm's branch: top and all below it
-            for (int j = i; j >= 0; j = parent[j])
-                if (j == top) {
-                    g_skin_keep[i] = true;
-                    break;
-                }
-        arms++;
+    static int env = -2;  // ED_CAM_ARM_BONES: bones kept above the hand, both ways (tests)
+    if (env == -2)
+        env = getenv("ED_CAM_ARM_BONES") != NULL ? atoi(getenv("ED_CAM_ARM_BONES")) : -1;
+    for (int set = 0; set < 2; set++) {
+        const int up = env >= 0 ? env : set ? FP_ARM_BONES : FP_ARM_BONES_DOWN;
+        for (int i = 0; i < n; i++)
+            g_skin_keep[set][i] = false;
+        arms = 0;
+        for (int a = 0; a < h; a++) {
+            int top = hands[a];
+            for (int k = 0; k < up && parent[top] >= 0 && limbs[parent[top]] == 1; k++)
+                top = parent[top];
+            if (parent[top] < 0)
+                continue;
+            for (int i = 0; i < n; i++)  // the arm's branch: top and all below it
+                for (int j = i; j >= 0; j = parent[j])
+                    if (j == top) {
+                        g_skin_keep[set][i] = true;
+                        break;
+                    }
+            arms++;
+        }
     }
     if (arms > 0)
         g_skin_bones = n;
     if (getenv("ED_CAM_LOG") != NULL)
-        fprintf(stderr, "[camera] first person aiming: %d arms in %d bones\n", arms, n);
+        fprintf(stderr, "[camera] first person: %d arms in %d bones\n", arms, n);
 }
 
 static u32 g_skin_table;
@@ -1116,7 +1146,8 @@ void camera_skin_begin(CPUState* cpu, unsigned character) {
     static int everywhere = -1;  // ED_CAM_ARMS_ONLY=1: in every mode, always (tests)
     if (everywhere < 0)
         everywhere = getenv("ED_CAM_ARMS_ONLY") != NULL;
-    if (!everywhere && !(g_view_active && g_last_mode == CAMERA_FIRST_PERSON && g_aiming && g_hand_progress <= 0.0f))
+    if (!everywhere && !(g_view_active && g_last_mode == CAMERA_FIRST_PERSON &&
+                         (g_hand_progress <= 0.0f || length(sub(g_view_eye, g_fp_eye)) < FP_HEAD_CLEAR)))
         return;
     const u32 model = mem_read32(cpu, character + 60u);
     if (model < 0x80000000u || model - 0x80000000u > cpu->ram_size - 64u)
@@ -1125,15 +1156,17 @@ void camera_skin_begin(CPUState* cpu, unsigned character) {
         const u32 table = mem_read32(cpu, model + 36u);
         const int n = table >= 0x80000000u && table - 0x80000000u < cpu->ram_size ? skin_count_bones(cpu, table) : 0;
         skin_find_arms(cpu, model, n);
+        g_fp_arms = g_skin_bones > 0;
     }
     if (g_skin_bones <= 0)
         return;
     g_skin_table = mem_read32(cpu, model + 36u);
+    g_skin_set = g_aiming ? 1 : 0;  // the arms up in front, or hanging
     static int all = -1;
     if (all < 0)
         all = getenv("ED_SKIN_ALL") != NULL;
     for (int i = 0; i < g_skin_bones; i++) {
-        if (g_skin_keep[i] && !all)
+        if (g_skin_keep[g_skin_set][i] && !all)
             continue;
         const u32 e = g_skin_table + (u32)i * 80u;
         for (int c = 0; c < 3; c++) {
@@ -1153,7 +1186,7 @@ void camera_skin_end(CPUState* cpu, unsigned character) {
     if (all < 0)
         all = getenv("ED_SKIN_ALL") != NULL;
     for (int i = 0; i < g_skin_bones; i++) {
-        if (g_skin_keep[i] && !all)
+        if (g_skin_keep[g_skin_set][i] && !all)
             continue;
         const u32 e = g_skin_table + (u32)i * 80u;
         for (int c = 0; c < 3; c++) {
@@ -1165,10 +1198,11 @@ void camera_skin_end(CPUState* cpu, unsigned character) {
 }
 
 /* First person: the eye at the player's head (at their own height, from
- * their skeleton), turned with the right stick: across, and up and down. The
- * player is not drawn: their head, hair and helmet swing well forward of
- * where they stand as they walk (ED_CAM_FP_BODY=1 draws them, with the near
- * clipping distance past their hair). It starts looking where the
+ * their skeleton), turned with the right stick: across, and up and down. Of
+ * the player only their arms are drawn: their head, hair and helmet swing
+ * well forward of where they stand as they walk (ED_CAM_FP_BODY=1 draws all
+ * of them where their arms are not found, with the near clipping distance
+ * past their hair). It starts looking where the
  * game's camera looks; when the player looks closely at something it sweeps
  * to it and back, like third person. The eye follows the player on the same
  * spring as third person's (a step or a stop does not jolt it). */

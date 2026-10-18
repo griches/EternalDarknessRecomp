@@ -8,11 +8,11 @@
  * carries on as before and the view goes back to it the moment the option is
  * off, or a cutscene plays.
  *
- * Free look turns the view about the game camera's eye. Third person puts the
- * eye behind and above the character you play (the game's player object,
- * position at +0) and trails after them as they walk. The right stick turns
- * both (in third person its up and down bring the camera closer or take it
- * further); while aiming they hold still. The game moves the player relative to
+ * Third person puts the eye behind and above the character you play (the
+ * game's player object, position at +0) and trails after them as they walk;
+ * first person puts it at their eyes. The right stick turns both (in third
+ * person its up and down bring the camera closer or take it further); while
+ * aiming they hold still. The game moves the player relative to
  * its own camera, so the controls turn the left stick by the angle between
  * the two views (camera_stick_turn), and up walks away from this camera.
  */
@@ -83,7 +83,7 @@ static void write_vec(CPUState* cpu, u32 address, Vec3 v) {
     }
 }
 
-static const char* const kModeNames[CAMERA_MODE_COUNT] = {"Original", "Free look", "Third person",
+static const char* const kModeNames[CAMERA_MODE_COUNT] = {"Original", "Original", "Third person",
                                                             "First person"};
 
 const char* camera_mode_name(int mode) {
@@ -99,9 +99,9 @@ int camera_mode(void) {
         env = text != NULL && text[0] != '\0' ? atoi(text) : -1;
     }
     int mode = env >= 0 ? env : g_settings.camera;
-    if ((mode == CAMERA_THIRD_PERSON || mode == CAMERA_FIRST_PERSON) && g_player_offset == 0)
-        mode = CAMERA_FREE_LOOK;
-    return mode >= 0 && mode < CAMERA_MODE_COUNT ? mode : CAMERA_ORIGINAL;
+    if (mode != CAMERA_THIRD_PERSON && mode != CAMERA_FIRST_PERSON)
+        return CAMERA_ORIGINAL;
+    return g_player_offset != 0 ? mode : CAMERA_ORIGINAL;
 }
 
 void camera_set_player_offset(int offset) { g_player_offset = (s16)offset; }
@@ -275,8 +275,6 @@ float camera_stick_turn(void) {
 #define SMOOTH_FOLLOW 14.0f
 
 static int g_last_mode = -1;
-// Free look: the turn from the game camera's view (yaw about up, pitch).
-static float g_yaw, g_pitch;
 static Vec3 g_last_eye, g_last_target;
 static bool g_have_last;
 // Third person: the level direction from the player to the eye, the eye's
@@ -457,31 +455,6 @@ static void snapshot(CPUState* cpu, unsigned long long frame) {
             fprintf(stderr, "[camera] RAM to %s\n", path);
             return;
         }
-}
-
-/* Free look: the game camera's view turned by g_yaw about up and tipped by
- * g_pitch, from its own eye. A cut to another shot starts it straight again. */
-static void free_look(Vec3 eye, Vec3 target, Vec3 k, bool step, bool still, Vec3* new_eye, Vec3* new_target) {
-    if (step) {
-        if (game_cut(eye, target))
-            g_yaw = g_pitch = 0.0f;
-        if (!still) {
-            const float dt = 1.0f / 60.0f;
-            g_yaw = remainderf(g_yaw - g_stick_x * YAW_RATE * dt, 2.0f * PI);
-            g_pitch = clampf(g_pitch + g_stick_y * PITCH_RATE * dt, -1.2f, 1.2f);
-        }
-    }
-    const Vec3 dir = sub(target, eye);
-    const float dist = length(dir);
-    Vec3 look = rotate(scale(dir, 1.0f / dist), k, g_yaw);
-    // Tipped about its own right, short of straight up or down.
-    const float game_pitch = asinf(clampf(dot(look, k), -1.0f, 1.0f));
-    const float pitch = clampf(game_pitch + g_pitch, -1.4f, 1.4f) - game_pitch;
-    const Vec3 right = normalize(cross(look, k));
-    if (length(right) > 0.0f)
-        look = rotate(look, right, pitch);
-    *new_eye = eye;
-    *new_target = add(eye, scale(look, dist));
 }
 
 /* How far out from the pivot along the unit direction out the eye can go:
@@ -1232,9 +1205,7 @@ void camera_look_at(CPUState* cpu) {
     const bool still = g_aiming;
     g_head_eye = add(player, scale(k, g_head_valid ? clampf(g_eye_height, FP_MIN_EYE, FP_MAX_EYE) : FP_HEIGHT));
     Vec3 new_eye, new_target;
-    if (mode == CAMERA_FREE_LOOK)
-        free_look(eye, target, k, step, still, &new_eye, &new_target);
-    else if (mode == CAMERA_FIRST_PERSON) {
+    if (mode == CAMERA_FIRST_PERSON) {
         Vec3 focus = target;
         game_goal(cpu, &focus);
         first_person(eye, target, focus, player, k, step, still, &new_eye, &new_target);
@@ -1254,53 +1225,49 @@ void camera_look_at(CPUState* cpu) {
     // Looking closely at something, the view eases over to the game's own
     // camera (where it stands, what it looks at, its field of view: its framing
     // of the thing) and back when that ends, on the sweep's eased timing.
-    if (mode != CAMERA_FREE_LOOK) {
-        if (step) {
-            // In first person only the player's own look (B) hands over: the
-            // game's zoom as they walk up to a thing is left to the prompt.
-            const bool known = g_looking_known >= 0;
-            const bool zoom = g_zoomed && !g_zooming_out && (mode != CAMERA_FIRST_PERSON || !known);
-            const bool handing = g_examining || (known && g_looking_known != 0) || zoom;
-            const float time = mode == CAMERA_FIRST_PERSON ? FP_HAND_TIME : SWEEP_TIME;
-            g_hand_progress = clampf(g_hand_progress + (handing ? 1.0f : -1.0f) / (60.0f * time), 0.0f, 1.0f);
-            g_hand = mode == CAMERA_FIRST_PERSON
-                         ? smoother((g_hand_progress - FP_HAND_MOVE) / (1.0f - FP_HAND_MOVE))
-                         : sweep_ease(g_hand_progress);
-            g_handing = handing;
-        }
-        if (g_handing || g_hand_progress <= 0.0f) {
-            g_held_eye = eye;
-            g_held_target = target;
-            g_held_fov = read_float(cpu, cpu->gpr[4] + 48u);
-        }
-        if (mode == CAMERA_FIRST_PERSON && g_hand_progress > 0.0f) {
-            // The eye on its way (g_hand also eases the field of view), the
-            // view turned from its own way to the thing seen from there.
-            const float aim = smoother(g_hand_progress / FP_HAND_AIM);
-            const Vec3 own = sub(new_target, new_eye);
-            const Vec3 from = add(new_eye, scale(sub(g_held_eye, new_eye), g_hand));
-            const Vec3 thing = sub(g_held_target, from);
-            const Vec3 dir = turn_towards(normalize(own), normalize(thing), aim);
-            new_eye = from;
-            new_target = add(from, scale(dir, length(own) + (length(thing) - length(own)) * aim));
-            // The thing's size on screen, 1 / (distance x tan(half the field
-            // of view)), eased from first person's to the game's (evenly in
-            // proportion), and the field of view that gives it from here.
-            const float d0 = fmaxf(length(sub(g_held_target, g_fp_eye)), 1.0f);
-            const float d1 = fmaxf(length(sub(g_held_target, g_held_eye)), 1.0f);
-            const float d = fmaxf(length(thing), 1.0f);
-            const float half = PI / 360.0f;
-            const float game_fov = g_held_fov > 0.0f ? g_held_fov : FP_FOV;
-            const float s0 = 1.0f / (d0 * tanf(FP_FOV * half)), s1 = 1.0f / (d1 * tanf(game_fov * half));
-            const float size = s0 * powf(s1 / s0, g_hand);
-            g_fp_hand_fov = clampf(atanf(1.0f / (size * d)) / half, 5.0f, 100.0f);
-        } else {
-            g_fp_hand_fov = 0.0f;
-            new_eye = add(new_eye, scale(sub(g_held_eye, new_eye), g_hand));
-            new_target = add(new_target, scale(sub(g_held_target, new_target), g_hand));
-        }
+    if (step) {
+        // In first person only the player's own look (B) hands over: the
+        // game's zoom as they walk up to a thing is left to the prompt.
+        const bool known = g_looking_known >= 0;
+        const bool zoom = g_zoomed && !g_zooming_out && (mode != CAMERA_FIRST_PERSON || !known);
+        const bool handing = g_examining || (known && g_looking_known != 0) || zoom;
+        const float time = mode == CAMERA_FIRST_PERSON ? FP_HAND_TIME : SWEEP_TIME;
+        g_hand_progress = clampf(g_hand_progress + (handing ? 1.0f : -1.0f) / (60.0f * time), 0.0f, 1.0f);
+        g_hand = mode == CAMERA_FIRST_PERSON
+                     ? smoother((g_hand_progress - FP_HAND_MOVE) / (1.0f - FP_HAND_MOVE))
+                     : sweep_ease(g_hand_progress);
+        g_handing = handing;
+    }
+    if (g_handing || g_hand_progress <= 0.0f) {
+        g_held_eye = eye;
+        g_held_target = target;
+        g_held_fov = read_float(cpu, cpu->gpr[4] + 48u);
+    }
+    if (mode == CAMERA_FIRST_PERSON && g_hand_progress > 0.0f) {
+        // The eye on its way (g_hand also eases the field of view), the
+        // view turned from its own way to the thing seen from there.
+        const float aim = smoother(g_hand_progress / FP_HAND_AIM);
+        const Vec3 own = sub(new_target, new_eye);
+        const Vec3 from = add(new_eye, scale(sub(g_held_eye, new_eye), g_hand));
+        const Vec3 thing = sub(g_held_target, from);
+        const Vec3 dir = turn_towards(normalize(own), normalize(thing), aim);
+        new_eye = from;
+        new_target = add(from, scale(dir, length(own) + (length(thing) - length(own)) * aim));
+        // The thing's size on screen, 1 / (distance x tan(half the field
+        // of view)), eased from first person's to the game's (evenly in
+        // proportion), and the field of view that gives it from here.
+        const float d0 = fmaxf(length(sub(g_held_target, g_fp_eye)), 1.0f);
+        const float d1 = fmaxf(length(sub(g_held_target, g_held_eye)), 1.0f);
+        const float d = fmaxf(length(thing), 1.0f);
+        const float half = PI / 360.0f;
+        const float game_fov = g_held_fov > 0.0f ? g_held_fov : FP_FOV;
+        const float s0 = 1.0f / (d0 * tanf(FP_FOV * half)), s1 = 1.0f / (d1 * tanf(game_fov * half));
+        const float size = s0 * powf(s1 / s0, g_hand);
+        g_fp_hand_fov = clampf(atanf(1.0f / (size * d)) / half, 5.0f, 100.0f);
     } else {
-        g_hand_progress = g_hand = g_fp_hand_fov = 0.0f;
+        g_fp_hand_fov = 0.0f;
+        new_eye = add(new_eye, scale(sub(g_held_eye, new_eye), g_hand));
+        new_target = add(new_target, scale(sub(g_held_target, new_target), g_hand));
     }
     if (step) {
         g_last_eye = eye;

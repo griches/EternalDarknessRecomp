@@ -679,7 +679,7 @@ void build_options() {
 
     static const char* const kCameraNotes[] = {
         "The game's own fixed cameras.",
-        "The game's cameras, turned with the right stick. They hold still while you aim.",
+        "The game's own fixed cameras.",
         "Behind Alex: the right stick turns it, up and down bring it closer or further. "
         "It holds still while you aim.",
         "Through Alex's eyes: the right stick looks around, and up on the left stick walks where you look. "
@@ -688,7 +688,15 @@ void build_options() {
     camera.section = "IV \u00b7 Game";
     camera.page = 1;
     camera.note = kCameraNotes[g_settings.camera];
-    camera.change = [](int dir) { cycle(g_settings.camera, CAMERA_MODE_COUNT, dir); };
+    camera.change = [](int dir) {
+        static const int kModes[] = {CAMERA_ORIGINAL, CAMERA_THIRD_PERSON, CAMERA_FIRST_PERSON};
+        int at = 0;
+        for (int i = 0; i < 3; i++)
+            if (kModes[i] == g_settings.camera)
+                at = i;
+        cycle(at, 3, dir);
+        g_settings.camera = kModes[at];
+    };
     g_rows.push_back(camera);
 
     static const char* const kGameFont[] = {"Sharp", "Tome", "Original"};

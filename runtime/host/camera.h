@@ -1,17 +1,18 @@
 #pragma once
-// Camera options (camera.c): the game's own fixed cameras, a free look from
-// where the game's camera stands, or a third-person camera that follows Alex.
-// The right stick turns it; while aiming it holds still.
+// Camera options (camera.c): the game's own fixed cameras, a third-person
+// camera that follows Alex, or first person through her eyes. The right
+// stick turns it; while aiming it holds still.
 #include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-enum { CAMERA_ORIGINAL, CAMERA_FREE_LOOK, CAMERA_THIRD_PERSON, CAMERA_FIRST_PERSON, CAMERA_MODE_COUNT };
+// settings.ini's numbers (1 was a free look, gone: it reads as the original).
+enum { CAMERA_ORIGINAL = 0, CAMERA_THIRD_PERSON = 2, CAMERA_FIRST_PERSON = 3, CAMERA_MODE_COUNT = 4 };
 
 const char* camera_mode_name(int mode);
-// The mode in use: settings.ini's camera, or ED_CAM=0/1/2 for a test run.
+// The mode in use: settings.ini's camera, or ED_CAM=0/2/3 for a test run.
 int camera_mode(void);
 // From the controls, once a pad read: the right stick (-1..1, up positive)
 // while it turns the camera, whether the player is aiming (R held), and

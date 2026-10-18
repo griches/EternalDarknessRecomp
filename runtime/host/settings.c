@@ -118,7 +118,7 @@ void settings_load(void) {
         else if (strcmp(key, "vibration") == 0)
             g_settings.vibration = n != 0;
         else if (strcmp(key, "camera") == 0)
-            g_settings.camera = clamp_int(n, 0, 3);
+            g_settings.camera = n == 1 ? 0 : clamp_int(n, 0, 3);  // 1 was a free look
         else if (strcmp(key, "controls_custom") == 0)
             snprintf(g_settings.controls_custom, sizeof g_settings.controls_custom, "%s", value);
         else if (strcmp(key, "disc") == 0)

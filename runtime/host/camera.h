@@ -69,6 +69,9 @@ float camera_stick_turn(void);
 // first person the player faces where it points at once, without the game's
 // turn round.
 void camera_set_move(float x, float y);
+// Whether the game's Tome (its own menu) is open: what the player holds is then
+// left as the game has it (the Tome shows the inventory's things itself).
+void camera_set_menu(bool open);
 
 #ifdef __cplusplus
 }

@@ -31,8 +31,10 @@ void camera_set_collide(CameraCollide fn);
 // the camera (hle.c: the fade of things close to it).
 bool camera_view(float eye[3], float target[3]);
 // From hle.c, each frame: the game has hidden the player to look closely at
-// something (its camera at their head, looking at the thing).
-void camera_set_examining(bool examining);
+// something (its camera at their head), and whether the player is looking
+// closely at something at all (B until they return; -1: not known, the
+// game's zoom tells instead).
+void camera_set_examining(bool hidden, int looking);
 // Whether the player is drawn: 1 always (third person: even when the game
 // hides them to look closely at something), 0 never (first person: the eye
 // is in their head), -1 as the game has it.
@@ -46,6 +48,11 @@ float camera_near_plane(float game_near);
 // From hle.c: the game camera's eye and target controllers (each eases
 // toward the point its +112 points at).
 void camera_set_controllers(unsigned eye, unsigned target);
+// From hle.c: the game works out each bone of a character relative to its
+// parent, one at a time (fn(character, bone, out matrix)); camera.c follows
+// the player's to find their head (first person).
+void camera_bone_matrix(struct CPUState* cpu, unsigned character, unsigned bone, unsigned out);
+
 // The third-person camera's own state (where it is round the player, how
 // high and far), for input recordings: a replay starts where it was.
 enum { CAMERA_STATE_SIZE = 8 };

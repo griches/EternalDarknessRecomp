@@ -188,6 +188,13 @@ float camera_stick_turn(void) {
 #define FP_FOV 60.0f
 // Its near clipping distance: past the hair round the eye.
 #define FP_NEAR 30.0f
+// The eye this far ahead of the head along the view.
+#define FP_AHEAD 12.0f
+// The eyes below the top of the head (the skeleton's highest bone), kept
+// within these heights.
+#define FP_BELOW_TOP 25.0f
+#define FP_MIN_EYE 180.0f
+#define FP_MAX_EYE 235.0f
 // How far ahead of the eye it looks (only the direction matters).
 #define FP_LOOK 300.0f
 // A sweep's length (seconds) and the share of it spent easing in and out.
@@ -275,7 +282,12 @@ static bool g_aim_set, g_looking_at, g_back_sweeps;
 static float g_reach, g_lift;  // g_lift: risen over the player's head, for room
 static float g_distance = TP_DISTANCE;  // how far back the player wants it (kept across rooms)
 
-void camera_set_examining(bool examining) { g_examining = examining; }
+static int g_looking_known = -1;  // camera_set_examining's looking
+
+void camera_set_examining(bool hidden, int looking) {
+    g_examining = hidden;
+    g_looking_known = looking;
+}
 
 float camera_field_of_view(float game_fov) {
     if (!g_view_active)
@@ -298,7 +310,7 @@ int camera_player_drawn(void) {
         return -1;
     static int body = -1;  // ED_CAM_FP_BODY=0/1 (tests)
     if (body < 0)
-        body = getenv("ED_CAM_FP_BODY") != NULL ? atoi(getenv("ED_CAM_FP_BODY")) != 0 : 1;
+        body = getenv("ED_CAM_FP_BODY") != NULL ? atoi(getenv("ED_CAM_FP_BODY")) != 0 : 0;
     return g_last_mode == CAMERA_THIRD_PERSON ? 1 : g_last_mode == CAMERA_FIRST_PERSON ? body : -1;
 }
 
@@ -446,7 +458,10 @@ static float sweep_ease(float t) {
  * the camera looks now, and with a thing to look at it also turns round
  * behind the player on the line to it (unless the stick is turning it). */
 static void sweep_aim(Vec3 focus, Vec3 pivot, Vec3 k, bool jumped) {
-    const bool looking = g_examining || (g_zoomed && !g_zooming_out);
+    // The game's own mode when known; else its camera zooming in (which it
+    // also does as the player walks up to some things).
+    const bool looking =
+        g_looking_known >= 0 ? (g_looking_known != 0 || g_examining) : (g_examining || (g_zoomed && !g_zooming_out));
     const Vec3 goal = looking ? focus : pivot;
     if (jumped || !g_aim_set) {
         g_aim = g_aim_from = g_aim_to = pivot;
@@ -807,11 +822,70 @@ static void third_person(CPUState* cpu, Vec3 eye, Vec3 focus, Vec3 player, Vec3 
     *new_target = add(centre, g_s_aim);
 }
 
-/* First person: the eye in the player's head, turned
- * with the right stick: across, and up and down. The player is drawn: from
- * inside, their head's own faces point away and are not drawn, and the near
- * clipping distance is moved out past their hair, so looking down shows their
- * body, and raised arms show. It starts looking where the
+/* The player's head, from their skeleton. The game works out each bone of a
+ * character (fn(character, bone, out)) and, as it goes, each bone's place
+ * relative to the character's feet into a scratch block, bone i at the
+ * root's out + 48 * i, character after character. The player's block is
+ * read once theirs is done (another character's begin, or at the camera if
+ * theirs came last): the highest bone is the top of the head (or helmet),
+ * with where it leans. Alex: 246; the eyes FP_BELOW_TOP under it. */
+#define MAX_BONES 128
+static CPUState* g_cpu;  // the game's CPU, for the camera's own reads
+static u32 g_bone_block;  // the player's (0: none pending)
+static int g_bone_n;
+static bool g_head_valid;
+static Vec3 g_head_top;  // from the player's position
+
+static void read_player_bones(CPUState* cpu) {
+    const u32 block = g_bone_block;
+    const int n = g_bone_n;
+    g_bone_block = 0u;
+    g_bone_n = 0;
+    if (block < 0x80000000u || block - 0x80000000u > cpu->ram_size - (u32)n * 48u || n <= 0)
+        return;
+    float best = -1e9f;
+    Vec3 top = v3(0.0f, 0.0f, 0.0f);
+    for (int i = 0; i < n; i++) {
+        const u32 m = block + (u32)i * 48u;
+        const Vec3 t = v3(read_float(cpu, m + 12u), read_float(cpu, m + 28u), read_float(cpu, m + 44u));
+        if (isfinite(t.x) && isfinite(t.y) && isfinite(t.z) && fabsf(t.x) < 200.0f && fabsf(t.y) < 200.0f &&
+            t.z > best)
+            best = t.z, top = t;
+    }
+    if (best > 100.0f && best < 500.0f) {
+        g_head_top = top;
+        g_head_valid = true;
+    }
+}
+
+void camera_bone_matrix(CPUState* cpu, unsigned character, unsigned bone, unsigned out) {
+    static u32 last_character;
+    const u32 player = g_player_offset != 0 ? mem_read32(cpu, cpu->gpr[13] + (u32)(s32)g_player_offset) : 0u;
+    if (character != last_character && g_bone_block != 0u)
+        read_player_bones(cpu);  // the player's are done, still in place
+    last_character = character;
+    if (character != player || player == 0u || bone >= MAX_BONES)
+        return;
+    // Single bones are also asked for elsewhere (where a sword hangs), into
+    // the stack: only the root's out off the stack starts the block.
+    const bool on_stack = out + 0x4000u > cpu->gpr[1] && out < cpu->gpr[1] + 0x4000u;
+    if (bone == 0u && !on_stack) {
+        g_bone_block = out;
+        static int log = -1;
+        if (log < 0)
+            log = getenv("ED_CAM_LOG") != NULL && getenv("ED_CAM_LOG")[0] == '5';
+        if (log)
+            fprintf(stderr, "[camera] player 0x%08X bones from 0x%08X\n", character, out);
+    }
+    if (!on_stack && (int)bone + 1 > g_bone_n)
+        g_bone_n = (int)bone + 1;
+}
+
+/* First person: the eye at the player's head (at their own height, from
+ * their skeleton), turned with the right stick: across, and up and down. The
+ * player is not drawn: their head, hair and helmet swing well forward of
+ * where they stand as they walk (ED_CAM_FP_BODY=1 draws them, with the near
+ * clipping distance past their hair). It starts looking where the
  * game's camera looks; when the player looks closely at something it sweeps
  * to it and back, like third person. The eye follows the player on the same
  * spring as third person's (a step or a stop does not jolt it). */
@@ -819,7 +893,29 @@ static float g_fp_yaw, g_fp_pitch;
 
 static void first_person(Vec3 eye, Vec3 target, Vec3 focus, Vec3 player, Vec3 k, bool step, bool still,
                          Vec3* new_eye, Vec3* new_target) {
-    const Vec3 head = add(player, scale(k, FP_HEIGHT));
+    // A little ahead of the head along the view.
+    Vec3 head = add(add(player, scale(k, FP_HEIGHT)), scale(yaw_dir(g_fp_yaw, k), FP_AHEAD));
+    // Better, at the player's own height, from their skeleton.
+    static int log = -1;
+    if (log < 0)
+        log = getenv("ED_CAM_LOG") != NULL;
+    if (step && g_bone_block != 0u)
+        read_player_bones(g_cpu);  // the player's came last
+    if (g_head_valid) {
+        // Their own height: the eyes FP_BELOW_TOP under the top of the
+        // skeleton, within FP_MIN_EYE..FP_MAX_EYE (a helmet's crest or a
+        // ponytail is the top of some, and leans well off the face).
+        static float eye_z = FP_HEIGHT;
+        if (step)
+            eye_z += (clampf(dot(g_head_top, k) - FP_BELOW_TOP, FP_MIN_EYE, FP_MAX_EYE) - eye_z) * 0.1f;
+        head = add(add(player, scale(k, eye_z)), scale(yaw_dir(g_fp_yaw, k), FP_AHEAD));
+        if (log && step) {
+            static unsigned n;
+            if (n++ % 30u == 0u)
+                fprintf(stderr, "[camera] head top %.1f %.1f %.1f from the feet\n", g_head_top.x, g_head_top.y,
+                        g_head_top.z);
+        }
+    }
     if (step) {
         const bool jumped = !g_have_player || length(sub(player, g_last_player)) > 300.0f;
         if (jumped) {
@@ -856,6 +952,7 @@ static bool g_log_checked, g_log;
  * are read once, by LookAt). The world's up is the camera's up vector (+Z in
  * this game). */
 void camera_look_at(CPUState* cpu) {
+    g_cpu = cpu;
     if (!g_log_checked) {
         g_log_checked = true;
         g_log = getenv("ED_CAM_LOG") != NULL;

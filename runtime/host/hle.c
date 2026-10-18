@@ -5296,11 +5296,35 @@ static u32 g_camera_look_at_return;
 
 static s16 g_show_player_offset, g_show_followed_offset;
 
+// The player's mode bits (r13 + offset), bit 2 while they look closely at
+// something (B, until they return), from their setter: lwz r0,x(r13);
+// andc r4,r0,r3; beq +8; or r4,r0,r3; cmplwi r4,0; stw r4,x(r13).
+static s16 g_player_modes_offset;
+
+static void find_player_modes(CPUState* cpu) {
+    for (u32 at = HLE_CODE_BASE; at + 24u < HLE_CODE_LIMIT; at += 4u) {
+        const u32 load = mem_read32(cpu, at);
+        if ((load >> 16) != 0x800Du || mem_read32(cpu, at + 4u) != 0x7C041878u ||
+            mem_read32(cpu, at + 8u) != 0x41820008u || mem_read32(cpu, at + 12u) != 0x7C041B78u ||
+            mem_read32(cpu, at + 16u) != 0x28040000u || mem_read32(cpu, at + 20u) != (0x908D0000u | (load & 0xFFFFu)))
+            continue;
+        g_player_modes_offset = (s16)(load & 0xFFFFu);
+        return;
+    }
+    fprintf(stderr, "[camera] the player's mode bits not found: looking closely is told by the game's zoom\n");
+}
+
 static void notify_look_at(CPUState* cpu) {
     if (cpu->lr != g_camera_look_at_return)
         return;
-    if (g_show_player_offset != 0 && sda_ready(cpu))
-        camera_set_examining(mem_read32(cpu, cpu->gpr[13] + (u32)(s32)g_show_player_offset) == 0u);
+    if (sda_ready(cpu)) {
+        const bool hidden = g_show_player_offset != 0 &&
+                            mem_read32(cpu, cpu->gpr[13] + (u32)(s32)g_show_player_offset) == 0u;
+        const int looking = g_player_modes_offset == 0
+                                ? -1
+                                : (mem_read32(cpu, cpu->gpr[13] + (u32)(s32)g_player_modes_offset) & 2u) != 0u;
+        camera_set_examining(hidden, looking);
+    }
     camera_look_at(cpu);
 }
 
@@ -5487,6 +5511,29 @@ static void find_show_player(CPUState* cpu) {
     fprintf(stderr, "[camera] the player's draw flags not found: looking closely hides the player\n");
 }
 
+// A character's bone, worked out relative to its parent: fn(character, bone,
+// out matrix, flag); camera.c follows the player's to their head.
+static void notify_bone_matrix(CPUState* cpu) {
+    camera_bone_matrix(cpu, cpu->gpr[3], cpu->gpr[4], cpu->gpr[5]);
+}
+
+static void find_bone_matrix(CPUState* cpu) {
+    // stwu r1,-32(r1); mflr r0; stw r0,36(r1); stmw r27,12(r1); or r29,r3,r3;
+    // or r30,r4,r4; or r31,r5,r5; or r27,r6,r6; bl ...
+    static const u32 kCode[] = {0x9421FFE0u, 0x7C0802A6u, 0x90010024u, 0xBF61000Cu,
+                                0x7C7D1B78u, 0x7C9E2378u, 0x7CBF2B78u, 0x7CDB3378u};
+    HleDispatchEntry* entry = NULL;
+    for (u32 at = HLE_CODE_BASE; entry == NULL && at + 36u < HLE_CODE_LIMIT; at += 4u)
+        if (mem_read32(cpu, at) == kCode[0] && code_matches(cpu, at, kCode, 8) &&
+            (mem_read32(cpu, at + 32u) & 0xFC000003u) == 0x48000001u)
+            entry = hle_dispatch_entry(at);
+    if (entry == NULL || entry->notify != NULL || entry->intercept != NULL) {
+        fprintf(stderr, "[camera] the characters' bones not found: first person at a set height\n");
+        return;
+    }
+    entry->notify = notify_bone_matrix;
+}
+
 // The player object (position at +0), for the third-person camera: a pointer
 // at r13 + offset that a small function compares its argument with:
 // or r29,r3,r3; li r3,2; bl ...; lwz r0,offset(r13); or r31,r3,r3; cmplw r29,r0.
@@ -5569,6 +5616,8 @@ static void find_camera(CPUState* cpu) {
             find_camera_perspective(cpu, from - 0x40u);
             find_camera_fade(cpu);
             find_show_player(cpu);
+            find_bone_matrix(cpu);
+            find_player_modes(cpu);
             return;
         }
     }

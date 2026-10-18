@@ -11,7 +11,8 @@
  * Free look turns the view about the game camera's eye. Third person puts the
  * eye behind and above the character you play (the game's player object,
  * position at +0) and trails after them as they walk. The right stick turns
- * both; while aiming they hold still. The game moves the player relative to
+ * both (in third person its up and down bring the camera closer or take it
+ * further); while aiming they hold still. The game moves the player relative to
  * its own camera, so the controls turn the left stick by the angle between
  * the two views (camera_stick_turn), and up walks away from this camera.
  */
@@ -130,6 +131,11 @@ float camera_stick_turn(void) {
 // the eye sits from it, and how high (radians above level) it starts.
 #define TP_HEIGHT 150.0f
 #define TP_DISTANCE 420.0f
+// The right stick's up and down bring the eye closer or take it further
+// (units a second at full stick), between these.
+#define TP_ZOOM_RATE 400.0f
+#define TP_CLOSEST 180.0f
+#define TP_FARTHEST 800.0f
 #define TP_PITCH 0.30f
 // Walls: the line test's radius, how far short of a wall the eye stops, and
 // the nearest it comes to the point it looks at.
@@ -137,7 +143,7 @@ float camera_stick_turn(void) {
 #define TP_MARGIN 30.0f
 #define TP_NEAREST 90.0f
 // Room enough behind the player not to rise over their head.
-#define TP_ROOMY (0.6f * TP_DISTANCE)
+#define TP_ROOMY (0.6f * g_distance)
 
 static int g_last_mode = -1;
 // Free look: the turn from the game camera's view (yaw about up, pitch).
@@ -146,12 +152,13 @@ static Vec3 g_last_eye, g_last_target;
 static bool g_have_last;
 // Third person: the level direction from the player to the eye, the eye's
 // height (radians above level), where the player was, and how far back the
-// eye is now (less than TP_DISTANCE where a wall is in the way).
+// eye is now (less than g_distance where a wall is in the way).
 static Vec3 g_back;
 static float g_rise;
 static Vec3 g_last_player;
 static bool g_have_player;
 static float g_reach, g_lift;  // g_lift: risen over the player's head, for room
+static float g_distance = TP_DISTANCE;  // how far back the player wants it (kept across rooms)
 
 /* The game camera cut to another shot (or a new room): its eye jumped, or it
  * swung round, between one frame and the next. */
@@ -243,13 +250,13 @@ static void free_look(Vec3 eye, Vec3 target, Vec3 k, bool step, bool still, Vec3
  * of the first wall, floor or ceiling in the way. */
 static float wall_reach(CPUState* cpu, Vec3 pivot, Vec3 out) {
     if (g_collide == NULL)
-        return TP_DISTANCE;
-    const Vec3 far = add(pivot, scale(out, TP_DISTANCE + TP_MARGIN));
+        return g_distance;
+    const Vec3 far = add(pivot, scale(out, g_distance + TP_MARGIN));
     const float from[3] = {pivot.x, pivot.y, pivot.z}, to[3] = {far.x, far.y, far.z};
     float hit[3];
     if (!g_collide(cpu, from, to, TP_RADIUS, hit))
-        return TP_DISTANCE;
-    return clampf(length(sub(v3(hit[0], hit[1], hit[2]), pivot)) - TP_MARGIN, TP_NEAREST, TP_DISTANCE);
+        return g_distance;
+    return clampf(length(sub(v3(hit[0], hit[1], hit[2]), pivot)) - TP_MARGIN, TP_NEAREST, g_distance);
 }
 
 /* Third person: behind and above the player, trailing after them. Starts
@@ -268,13 +275,13 @@ static void third_person(CPUState* cpu, Vec3 eye, Vec3 player, Vec3 k, bool step
             // Trail: the eye stays where it was as the player walks off,
             // drawn back out to its distance along the line to them.
             const Vec3 old_eye = add(add(g_last_player, scale(k, TP_HEIGHT)),
-                                     scale(g_back, TP_DISTANCE * cosf(g_rise)));
+                                     scale(g_back, g_distance * cosf(g_rise)));
             const Vec3 back = normalize(flatten(sub(old_eye, pivot), k));
             if (length(back) > 0.0f)
                 g_back = back;
             const float dt = 1.0f / 60.0f;
             g_back = normalize(rotate(g_back, k, -g_stick_x * YAW_RATE * dt));
-            g_rise = clampf(g_rise - g_stick_y * PITCH_RATE * dt, -0.35f, 1.2f);
+            g_distance = clampf(g_distance - g_stick_y * TP_ZOOM_RATE * dt, TP_CLOSEST, TP_FARTHEST);
         }
         // Walls: where the eye would be has room enough, or it rises over
         // the player's head (looking down on them) to where there is more,
@@ -295,7 +302,7 @@ static void third_person(CPUState* cpu, Vec3 eye, Vec3 player, Vec3 k, bool step
         // and goes back out gently once it clears.
         const float rise = g_rise + g_lift;
         const float reach = wall_reach(cpu, pivot, add(scale(g_back, cosf(rise)), scale(k, sinf(rise))));
-        g_reach = jumped || reach < g_reach ? reach : fminf(reach, g_reach + TP_DISTANCE * 1.5f / 60.0f);
+        g_reach = jumped || reach < g_reach ? reach : fminf(reach, g_reach + TP_FARTHEST * 1.5f / 60.0f);
         g_last_player = player;
         g_have_player = true;
     }

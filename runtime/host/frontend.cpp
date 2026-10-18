@@ -680,7 +680,8 @@ void build_options() {
     static const char* const kCameraNotes[] = {
         "The game's own fixed cameras.",
         "The game's cameras, turned with the right stick. They hold still while you aim.",
-        "Behind Alex, turned with the right stick. It holds still while you aim."};
+        "Behind Alex: the right stick turns it, up and down bring it closer or further. "
+        "It holds still while you aim."};
     Row camera{"Camera", camera_mode_name(g_settings.camera)};
     camera.section = "IV \u00b7 Game";
     camera.page = 1;

@@ -239,6 +239,19 @@ float camera_field_of_view(float game_fov) {
 
 bool camera_shows_player(void) { return g_view_active && g_last_mode == CAMERA_THIRD_PERSON; }
 
+static bool g_state_pending;  // camera_set_state: applied at the next frame
+static float g_pending_state[CAMERA_STATE_SIZE];
+
+void camera_get_state(float out[CAMERA_STATE_SIZE]) {
+    const float s[CAMERA_STATE_SIZE] = {g_back.x, g_back.y, g_back.z, g_rise, g_lift, g_distance, g_reach, 0.0f};
+    memcpy(out, s, sizeof s);
+}
+
+void camera_set_state(const float in[CAMERA_STATE_SIZE]) {
+    memcpy(g_pending_state, in, sizeof g_pending_state);
+    g_state_pending = true;
+}
+
 /* The game camera cut to another shot (or a new room): its eye jumped, or it
  * swung round, between one frame and the next. */
 static bool game_cut(Vec3 eye, Vec3 target) {
@@ -483,6 +496,17 @@ static void auto_swing(CPUState* cpu, Vec3 pivot, Vec3 step, Vec3 k, float rise,
 static void third_person(CPUState* cpu, Vec3 eye, Vec3 focus, Vec3 player, Vec3 k, bool step, bool still,
                          Vec3* new_eye, Vec3* new_target) {
     const Vec3 pivot = add(player, scale(k, TP_HEIGHT));
+    if (step && g_state_pending) {
+        // A replay's start: the camera as it was when the recording began.
+        g_state_pending = false;
+        g_back = v3(g_pending_state[0], g_pending_state[1], g_pending_state[2]);
+        g_rise = g_pending_state[3];
+        g_lift = g_pending_state[4];
+        g_distance = g_pending_state[5];
+        g_reach = g_pending_state[6];
+        g_last_player = player;
+        g_have_player = true;
+    }
     if (step) {
         const bool jumped = !g_have_player || length(sub(player, g_last_player)) > 300.0f;
         sweep_aim(focus, pivot, k, jumped);
@@ -541,8 +565,8 @@ static void third_person(CPUState* cpu, Vec3 eye, Vec3 focus, Vec3 player, Vec3 
         if (log < 0)
             log = getenv("ED_CAM_LOG") != NULL && getenv("ED_CAM_LOG")[0] == '4';
         if (log) {
-            fprintf(stderr, "[camera] reach %.0f (wall %.0f) lift %.2f player %.0f %.0f ring", g_reach, reach, g_lift,
-                    player.x, player.y);
+            fprintf(stderr, "[camera] reach %.0f (wall %.0f) lift %.2f player %.0f %.0f frame %llu ring", g_reach, reach,
+                    g_lift, player.x, player.y, (unsigned long long)(cpu->timebase / 675000ull));
             for (int i = 0; i < 16; i++) {
                 const Vec3 b = rotate(g_back, k, (float)i * PI / 8.0f);
                 fprintf(stderr, " %.0f", wall_reach(cpu, pivot, add(scale(b, cosf(g_rise)), scale(k, sinf(g_rise)))));

@@ -42,6 +42,11 @@ float camera_field_of_view(float game_fov);
 // From hle.c: the game camera's eye and target controllers (each eases
 // toward the point its +112 points at).
 void camera_set_controllers(unsigned eye, unsigned target);
+// The third-person camera's own state (where it is round the player, how
+// high and far), for input recordings: a replay starts where it was.
+enum { CAMERA_STATE_SIZE = 8 };
+void camera_get_state(float out[CAMERA_STATE_SIZE]);
+void camera_set_state(const float in[CAMERA_STATE_SIZE]);
 // The right stick belongs to the camera (a mode is on, the game is in play).
 bool camera_takes_stick(void);
 // The camera's turn from the game's own, for the left stick: the angle (radians,

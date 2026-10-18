@@ -472,7 +472,106 @@ int live_value(SDL_Gamepad* pad, int n) {
     return 0;
 }
 
+// Input recording and replay (controls_record_start, ED_PAD_REPLAY): one
+// line a pad read, "frame button stick_x stick_y substick_x substick_y
+// trigger_l trigger_r analog_a analog_b cam_x cam_y aiming play", after a
+// "camera" line with the camera's state when it began.
+FILE* g_record = nullptr;
+
+struct ReplayRead {
+    unsigned long long frame;
+    DolPadState pad;
+    float cam_x, cam_y;
+    bool aiming, play;
+};
+std::vector<ReplayRead> g_replay;
+size_t g_replay_at = 0;
+bool g_replay_loaded = false;
+
+void load_replay() {
+    g_replay_loaded = true;
+    const char* path = std::getenv("ED_PAD_REPLAY");
+    if (path == nullptr || path[0] == '\0')
+        return;
+    FILE* f = std::fopen(path, "r");
+    if (f == nullptr) {
+        std::fprintf(stderr, "[replay] cannot read %s\n", path);
+        return;
+    }
+    char line[512];
+    while (std::fgets(line, sizeof line, f) != nullptr) {
+        float cam[CAMERA_STATE_SIZE];
+        if (std::sscanf(line, "camera %f %f %f %f %f %f %f %f", &cam[0], &cam[1], &cam[2], &cam[3], &cam[4],
+                        &cam[5], &cam[6], &cam[7]) == 8) {
+            camera_set_state(cam);
+            continue;
+        }
+        ReplayRead r{};
+        unsigned v[10];
+        int aiming = 0, play = 0;
+        if (std::sscanf(line, "%llu %u %u %u %u %u %u %u %u %u %u %f %f %d %d", &r.frame, &v[0], &v[1], &v[2],
+                        &v[3], &v[4], &v[5], &v[6], &v[7], &v[8], &v[9], &r.cam_x, &r.cam_y, &aiming,
+                        &play) != 15)
+            continue;
+        r.pad.button = static_cast<u16>(v[0]);
+        r.pad.stick_x = static_cast<s8>(v[1]);
+        r.pad.stick_y = static_cast<s8>(v[2]);
+        r.pad.substick_x = static_cast<s8>(v[3]);
+        r.pad.substick_y = static_cast<s8>(v[4]);
+        r.pad.trigger_left = static_cast<u8>(v[5]);
+        r.pad.trigger_right = static_cast<u8>(v[6]);
+        r.pad.analog_a = static_cast<u8>(v[7]);
+        r.pad.analog_b = static_cast<u8>(v[8]);
+        r.pad.error = static_cast<s8>(v[9]);
+        r.aiming = aiming != 0;
+        r.play = play != 0;
+        g_replay.push_back(r);
+    }
+    std::fclose(f);
+    std::fprintf(stderr, "[replay] %zu pad reads from %s (frames %llu to %llu)\n", g_replay.size(), path,
+                 g_replay.empty() ? 0ull : g_replay.front().frame, g_replay.empty() ? 0ull : g_replay.back().frame);
+}
+
+void record_read(const DolPadState& s, float cam_x, float cam_y, bool aiming, bool play) {
+    if (g_record == nullptr)
+        return;
+    std::fprintf(g_record, "%llu %u %u %u %u %u %u %u %u %u %u %.4f %.4f %d %d\n", g_frame.load(),
+                 static_cast<unsigned>(s.button), static_cast<unsigned>(static_cast<u8>(s.stick_x)),
+                 static_cast<unsigned>(static_cast<u8>(s.stick_y)), static_cast<unsigned>(static_cast<u8>(s.substick_x)),
+                 static_cast<unsigned>(static_cast<u8>(s.substick_y)), static_cast<unsigned>(s.trigger_left),
+                 static_cast<unsigned>(s.trigger_right), static_cast<unsigned>(s.analog_a),
+                 static_cast<unsigned>(s.analog_b), static_cast<unsigned>(static_cast<u8>(s.error)), cam_x, cam_y,
+                 aiming ? 1 : 0, play ? 1 : 0);
+}
+
+bool replay_pad(DolPadState* state) {
+    if (!g_replay_loaded)
+        load_replay();
+    if (g_replay.empty())
+        return false;
+    const unsigned long long frame = g_frame.load(std::memory_order_relaxed);
+    if (frame < g_replay.front().frame)
+        return false;  // before the recording began: as it was
+    while (g_replay_at + 1 < g_replay.size() && g_replay[g_replay_at + 1].frame <= frame)
+        g_replay_at++;
+    if (g_replay_at + 1 >= g_replay.size() && frame > g_replay.back().frame + 1) {
+        static bool said;
+        if (!said)
+            std::fprintf(stderr, "[replay] finished at frame %llu\n", frame);
+        said = true;
+        *state = DolPadState{};
+        camera_set_stick(0.0f, 0.0f, false, true);
+        return true;
+    }
+    const ReplayRead& r = g_replay[g_replay_at];
+    *state = r.pad;
+    camera_set_stick(r.cam_x, r.cam_y, r.aiming, r.play);
+    return true;
+}
+
 bool read_pad(DolPadState* state) {
+    if (replay_pad(state))
+        return true;
     static bool scripted = (attach_virtual_pad(), true);
     (void)scripted;
     drive_virtual_pad();
@@ -570,7 +669,8 @@ bool read_pad(DolPadState* state) {
     // stick as it is, for picking a target.
     const bool aiming = (s.button & 0x0020) != 0 || s.trigger_right >= 128;
     const bool camera = camera_takes_stick() && !tome && !cutscene;
-    camera_set_stick(camera ? cx / 127.0f : 0.0f, camera ? cy / 127.0f : 0.0f, aiming, !cutscene);
+    const float cam_x = camera ? cx / 127.0f : 0.0f, cam_y = camera ? cy / 127.0f : 0.0f;
+    camera_set_stick(cam_x, cam_y, aiming, !cutscene);
     if (camera) {
         cx = cy = 0;
         static const bool turn_stick = std::getenv("ED_CAM_STICK") == nullptr ||
@@ -595,6 +695,7 @@ bool read_pad(DolPadState* state) {
                      tome ? " (Tome buttons)" : "");
     last = s.button;
     *state = s;
+    record_read(s, cam_x, cam_y, aiming, !cutscene);
     return true;
 }
 
@@ -891,6 +992,30 @@ extern "C" void controls_init(void) {
 extern "C" void controls_note_frame(unsigned long long frame) {
     controls::g_frame.store(frame, std::memory_order_relaxed);
 }
+
+extern "C" void controls_record_start(const char* path) {
+    controls_record_stop();
+    controls::g_record = std::fopen(path, "w");
+    if (controls::g_record == nullptr) {
+        std::fprintf(stderr, "[record] cannot write %s\n", path);
+        return;
+    }
+    float cam[CAMERA_STATE_SIZE];
+    camera_get_state(cam);
+    std::fprintf(controls::g_record, "camera %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f\n", cam[0], cam[1], cam[2], cam[3], cam[4],
+                 cam[5], cam[6], cam[7]);
+    std::fprintf(stderr, "[record] recording the controller to %s from frame %llu\n", path, controls::g_frame.load());
+}
+
+extern "C" void controls_record_stop(void) {
+    if (controls::g_record == nullptr)
+        return;
+    std::fclose(controls::g_record);
+    controls::g_record = nullptr;
+    std::fprintf(stderr, "[record] stopped at frame %llu\n", controls::g_frame.load());
+}
+
+extern "C" bool controls_recording(void) { return controls::g_record != nullptr; }
 
 extern "C" void controls_set_cutscene(bool playing) {
     if (controls::g_cutscene.exchange(playing, std::memory_order_relaxed) != playing)

@@ -1861,10 +1861,18 @@ void begin() {
     reset_view();
     g_legend = true;
     g_aspect = 0;
-    const int lines = current_lines();
+    int lines = current_lines();
+    if (lines == 0) {
+        // The screen's own resolution (Screen/Window): its height, as the
+        // nearest of photo mode's choices (a 4K TV is 4K, not the 1080p
+        // it fell back to).
+        uint32_t w = 0, h = 0;
+        dol_aurora_get_display_info(nullptr, &w, &h);
+        lines = static_cast<int>(h);
+    }
     g_resolution = 1;
     for (int i = 0; i < 4; i++)
-        if (kLines[i] == lines)
+        if (std::abs(kLines[i] - lines) < std::abs(kLines[g_resolution] - lines))
             g_resolution = i;
     g_saved = aurora_photo_saved();
     g_saving = false;

@@ -226,8 +226,10 @@ float camera_stick_turn(void) {
 // forward through 30 with a sword).
 #define FP_NEAR 45.0f
 // With only their arms drawn (aiming): in at the shoulders, where at FP_NEAR
-// an arm close under the eye is cut open, a flat wedge.
-#define FP_ARMS_NEAR 20.0f
+// an arm close under the eye is cut open, a flat wedge; past what the arms-only
+// skin leaves round the head and shoulders (Ellia's hair piece and her sleeves
+// swung through the view at 20 as she attacked).
+#define FP_ARMS_NEAR 35.0f
 // The eye this far ahead of the head along the view.
 #define FP_AHEAD 12.0f
 // Aiming (the player drawn, swinging): further ahead, past their shoulders.

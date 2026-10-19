@@ -1542,6 +1542,10 @@ void draw_hdr_calibration_caption(int step) {
         "How bright the picture is: set it so the game looks right to you.",
         "Set it so the ring is only just visible against the black.",
     };
+    // Before the game starts there is no picture: grey steps instead.
+    const char* const help = step == 1 && !g_in_game
+                                 ? "How bright the picture is: set the grey steps' white to a comfortable brightness."
+                                 : kHelp[step];
     char value[48];
     if (step == 0)
         std::snprintf(value, sizeof value, "%d nits", g_settings.hdr_peak);
@@ -1566,7 +1570,7 @@ void draw_hdr_calibration_caption(int step) {
     ImFont* font = g_fps_font != nullptr ? g_fps_font : ImGui::GetFont();
     const float big = 28.f * dp, small = 17.f * dp, icon = 28.f * dp, hint_gap = 22.f * dp;
     const ImVec2 a = font->CalcTextSizeA(big, FLT_MAX, 0.f, head.c_str());
-    const ImVec2 b = font->CalcTextSizeA(small, FLT_MAX, 0.f, kHelp[step]);
+    const ImVec2 b = font->CalcTextSizeA(small, FLT_MAX, 0.f, help);
     float hints_w = 0.f;
     for (const Hint& h : hints)
         hints_w += static_cast<float>(h.names.size()) * (icon + 2.f * dp) + 6.f * dp +
@@ -1583,7 +1587,7 @@ void draw_hdr_calibration_caption(int step) {
     float y = at.y + pad;
     draw->AddText(font, big, ImVec2{at.x + (width - a.x) / 2.f, y}, IM_COL32(0xf0, 0xe6, 0xc8, 0xff), head.c_str());
     y += a.y + gap;
-    draw->AddText(font, small, ImVec2{at.x + (width - b.x) / 2.f, y}, IM_COL32(0xd8, 0xd0, 0xb8, 0xff), kHelp[step]);
+    draw->AddText(font, small, ImVec2{at.x + (width - b.x) / 2.f, y}, IM_COL32(0xd8, 0xd0, 0xb8, 0xff), help);
     y += b.y + gap;
     float x = at.x + (width - c.x) / 2.f;
     for (const Hint& h : hints) {
@@ -1614,7 +1618,7 @@ void run_hdr_calibration(int first_step = 0) {
             g_calibration_test_until = 0;
             break;
         }
-        dol_aurora_set_hdr_pattern(kPatterns[step]);
+        dol_aurora_set_hdr_pattern(step == 1 && !g_in_game ? 4 : kPatterns[step]);
         g_input.poll(pressed);
         const int dir = pressed[kUp] ? 1 : pressed[kDown] ? -1 : 0;
         if (dir != 0) {

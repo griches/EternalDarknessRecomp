@@ -5549,10 +5549,10 @@ index 7af8fca..4c14e34 100644
    else
 diff --git a/graphics/aurora/lib/gfx/glow.cpp b/graphics/aurora/lib/gfx/glow.cpp
 new file mode 100644
-index 0000000..57e7217
+index 0000000..7085030
 --- /dev/null
 +++ b/graphics/aurora/lib/gfx/glow.cpp
-@@ -0,0 +1,708 @@
+@@ -0,0 +1,719 @@
 +#include "glow.hpp"
 +
 +#include "../webgpu/gpu_prof.hpp"
@@ -5729,6 +5729,17 @@ index 0000000..57e7217
 +      n = select(params.d.y, 10000.0, ring(in.uv));
 +    }
 +    return vec4f(encode_out(vec3f(n)), 1.0);
++  }
++  if (pattern == 4) {
++    // Brightness with no game picture yet (the launcher): eleven grey steps,
++    // black to SDR white, shown as the game's picture is.
++    let dims = vec2f(textureDimensions(efb_texture));
++    let p = (in.uv - 0.5) * vec2f(dims.x / max(dims.y, 1.0), 1.0);
++    var v = 0.0;
++    if (abs(p.y) < 0.09 && abs(p.x) < 0.55) {
++      v = min(floor((p.x + 0.55) / 0.1), 10.0) / 10.0;
++    }
++    return vec4f(encode_out(black_level(to_linear(vec3f(v))) * params.d.x), 1.0);
 +  }
 +  if (pattern == 3) {
 +    // Black: a ring a shade above black, through the black level.

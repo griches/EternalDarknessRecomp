@@ -56,6 +56,28 @@ static Vec3 rotate(Vec3 v, Vec3 k, float angle) {
 }
 /* a with its part along the unit axis k taken out. */
 static Vec3 flatten(Vec3 a, Vec3 k) { return sub(a, scale(k, dot(a, k))); }
+
+/* The world's up in the view the game draws with (x right, y up, -z ahead),
+ * for photo mode's level camera (camera_view_up). */
+static float g_world_up_in_view[3] = {0.0f, 1.0f, 0.0f};
+static void note_view_up(Vec3 eye, Vec3 target, Vec3 k) {
+    const Vec3 f = sub(target, eye);
+    if (length(f) <= 0.0f || length(k) <= 0.0f)
+        return;
+    const Vec3 ahead = normalize(f);
+    const Vec3 right = cross(ahead, k);
+    if (length(right) <= 1e-4f)
+        return;  /* straight up or down: keep the last */
+    const Vec3 r = normalize(right), u = cross(r, ahead);
+    g_world_up_in_view[0] = dot(k, r);
+    g_world_up_in_view[1] = dot(k, u);
+    g_world_up_in_view[2] = -dot(k, ahead);
+}
+void camera_view_up(float out[3]) {
+    out[0] = g_world_up_in_view[0];
+    out[1] = g_world_up_in_view[1];
+    out[2] = g_world_up_in_view[2];
+}
 static float clampf(float v, float lo, float hi) { return fmaxf(lo, fminf(hi, v)); }
 
 static Vec3 read_vec(CPUState* cpu, u32 address) {
@@ -1529,6 +1551,7 @@ void camera_look_at(CPUState* cpu) {
     // Only in play: a character to play, and no cutscene.
     int mode = g_play && have_player ? camera_mode() : CAMERA_ORIGINAL;
     const Vec3 k = normalize(up);
+    note_view_up(eye, target, k);
     if (length(sub(target, eye)) <= 0.0f || length(k) <= 0.0f)
         mode = CAMERA_ORIGINAL;
     if (mode != g_last_mode && step) {
@@ -1638,6 +1661,7 @@ void camera_look_at(CPUState* cpu) {
     }
     g_view_active = true;
     camera_held_begin(cpu);
+    note_view_up(new_eye, new_target, k);
     g_view_eye = new_eye;
     g_view_target = new_target;
     if (g_log && step && getenv("ED_CAM_LOG")[0] == '4')

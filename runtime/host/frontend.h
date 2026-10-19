@@ -39,6 +39,9 @@ void frontend_imgui_init(void);
 // changed on screen.
 void frontend_cycle_enhancement(int which);
 
+// Photo mode is on (holding Back): the game sees no input.
+bool frontend_photo_active(void);
+
 #ifdef __cplusplus
 }
 #include <string>

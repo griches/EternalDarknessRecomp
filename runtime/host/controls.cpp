@@ -608,6 +608,17 @@ bool replay_pad(DolPadState* state) {
 bool read_pad(DolPadState* state) {
     if (replay_pad(state))
         return true;
+    // Photo mode: the game runs a frame now and then (for a new resolution,
+    // say) and must not move; what is held then is held over afterwards.
+    if (frontend_photo_active()) {
+        SDL_Gamepad* pad = gamepad();
+        for (int n = 0; n < kNativeCount; n++)
+            g_held_over[n] = g_held_over[n] || native_value(pad, n) >= 64;
+        *state = DolPadState{};
+        camera_set_stick(0.f, 0.f, false, true);
+        camera_set_move(0.f, 0.f);
+        return true;
+    }
     static bool scripted = (attach_virtual_pad(), true);
     (void)scripted;
     drive_virtual_pad();

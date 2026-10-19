@@ -56,6 +56,9 @@ void camera_bone_matrix(struct CPUState* cpu, unsigned character, unsigned bone,
 
 // The third-person camera's own state (where it is round the player, how
 // high and far), for input recordings: a replay starts where it was.
+/* The world's up in the game camera's view space (x right, y up, -z ahead) at
+ * its latest view: photo mode keeps its free camera level with it. */
+void camera_view_up(float out[3]);
 enum { CAMERA_STATE_SIZE = 8 };
 void camera_get_state(float out[CAMERA_STATE_SIZE]);
 void camera_set_state(const float in[CAMERA_STATE_SIZE]);

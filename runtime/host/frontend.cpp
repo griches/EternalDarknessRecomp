@@ -19,6 +19,7 @@
 
 #include <RmlUi/Core.h>
 #include <RmlUi_Platform_SDL.h>
+#include <SDL3/SDL_filesystem.h>
 #include <SDL3/SDL_keyboard.h>
 #include <SDL3/SDL_mouse.h>
 #include <SDL3/SDL_gamepad.h>
@@ -33,6 +34,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <cfloat>
 #include <cstdio>
 #include <cstdlib>
@@ -1685,6 +1687,545 @@ extern "C" void frontend_cycle_enhancement(int which) {
     g_notice_at = SDL_GetTicks();
 }
 
+// --- Photo mode ---------------------------------------------------------------
+// Hold Back (P on the keyboard): the game pauses on its frame and a free camera
+// looks round it (aurora_photo_*): the left stick moves, the right stick
+// looks, LB/RB go down and up, LT/RT zoom, R3 puts the camera back. A HDR,
+// B glow, X HD textures, Y shadows, L3 ambient occlusion; the D-pad's up and
+// down the resolution, left and right the aspect. Start takes a photo (a PNG
+// in Pictures/Eternal Darkness), a tap of Back hides the legend, holding it
+// again leaves. Resolution, aspect, HD textures and shadows are drawn by the
+// game: it runs one frame for them, with no input, and is held again.
+extern "C" void audio_set_muted(bool muted);
+
+namespace photo {
+enum class State { Off, Waiting, On };
+State g_state = State::Off;
+// The free camera, level with the world: its heading (left positive) and
+// elevation from the game camera's, a roll (R3 held), its position and zoom.
+// g_up: the world's up in the game camera's view space (camera_view_up).
+float g_heading = 0.f, g_elevation = 0.f, g_roll = 0.f, g_pos[3]{0.f, 0.f, 0.f}, g_zoom = 1.f;
+float g_up[3]{0.f, 1.f, 0.f};
+bool g_legend = true;
+int g_resolution = 0;  // into kLines
+int g_aspect = 0;      // into kAspects
+std::string g_notice;
+Uint64 g_notice_at = 0;
+unsigned g_saved = 0;
+bool g_saving = false;
+std::string g_last_saved;
+// The graphics settings as they were: photo mode's changes are its own, put
+// back when it ends and never saved.
+struct Saved {
+    bool hdr, hd_textures, sharp_shadows;
+    int glow, ssao;
+};
+Saved g_before{};
+
+constexpr int kLines[] = {720, 1080, 1440, 2160};
+constexpr const char* kLineNames[] = {"720p", "1080p", "1440p", "4K"};
+struct Aspect {
+    const char* name;
+    float value;  // 0: the game's own
+};
+constexpr Aspect kAspects[] = {{"Game", 0.f},        {"4:3", 4.f / 3.f}, {"16:9", 16.f / 9.f},
+                               {"21:9", 21.f / 9.f}, {"1:1", 1.f},       {"4:5", 4.f / 5.f}};
+constexpr int kAspectCount = sizeof kAspects / sizeof kAspects[0];
+
+void notice(std::string text) {
+    g_notice = std::move(text);
+    g_notice_at = SDL_GetTicks();
+}
+
+// Pictures/Eternal Darkness (made if missing), else a folder beside the game.
+std::string folder() {
+    std::string dir;
+    if (const char* pictures = SDL_GetUserFolder(SDL_FOLDER_PICTURES); pictures != nullptr && pictures[0] != '\0') {
+        dir = std::string(pictures);
+        if (dir.back() != '/' && dir.back() != '\\')
+            dir += '/';
+        dir += "Eternal Darkness";
+    } else {
+        dir = "Eternal Darkness Photos";
+    }
+    std::error_code error;
+    std::filesystem::create_directories(dir, error);
+    return dir;
+}
+
+float g_elevation0 = 0.f;  // the game camera's own elevation
+
+void reset_view() {
+    camera_view_up(g_up);
+    const float n = std::sqrt(g_up[0] * g_up[0] + g_up[1] * g_up[1] + g_up[2] * g_up[2]);
+    if (n > 1e-4f)
+        for (float& c : g_up)
+            c /= n;
+    else
+        g_up[0] = 0.f, g_up[1] = 1.f, g_up[2] = 0.f;
+    // Ahead is -z: its elevation is asin(ahead . up).
+    g_elevation0 = std::asin(std::clamp(-g_up[2], -1.f, 1.f));
+    g_heading = g_roll = 0.f;
+    g_elevation = g_elevation0;
+    g_pos[0] = g_pos[1] = g_pos[2] = 0.f;
+    g_zoom = 1.f;
+}
+
+using V3 = std::array<float, 3>;
+V3 add3(V3 a, V3 b) { return {a[0] + b[0], a[1] + b[1], a[2] + b[2]}; }
+V3 mul3(V3 a, float k) { return {a[0] * k, a[1] * k, a[2] * k}; }
+float dot3(V3 a, V3 b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+V3 cross3(V3 a, V3 b) { return {a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]}; }
+V3 unit3(V3 a) {
+    const float n = std::sqrt(dot3(a, a));
+    return n > 1e-6f ? mul3(a, 1.f / n) : a;
+}
+
+// The level frame: the game camera's ahead and right flattened onto the
+// floor (h0, r0), and the world's up.
+struct Frame {
+    V3 up, h0, r0;
+};
+Frame level_frame() {
+    const V3 up{g_up[0], g_up[1], g_up[2]};
+    V3 h = add3(V3{0.f, 0.f, -1.f}, mul3(up, -dot3(V3{0.f, 0.f, -1.f}, up)));
+    if (dot3(h, h) < 1e-6f)  // looking straight down or up: the camera's up flattened
+        h = add3(V3{0.f, 1.f, 0.f}, mul3(up, -dot3(V3{0.f, 1.f, 0.f}, up)));
+    h = unit3(h);
+    return {up, h, unit3(cross3(h, up))};
+}
+
+int current_lines() {
+    static const int kRenderLines[] = {0, 720, 1080, 1440, 2160};
+    return kRenderLines[std::clamp(g_settings.render_scale, 0, 4)];
+}
+
+// A button's picture for the controller in hand (or the key's), as an ImGui
+// texture (0 when the file did not load).
+ImTextureID glyph(const std::string& set, const std::string& name) {
+    static std::map<std::string, ImTextureID> icons;
+    const std::string file = set + "/" + name + ".png";
+    auto it = icons.find(file);
+    if (it == icons.end()) {
+        std::vector<uint8_t> rgba;
+        uint32_t w = 0, h = 0;
+        ImTextureID id = 0;
+        if (load_png_rgba(res_dir() + "/ui/glyphs/" + file, &rgba, &w, &h))
+            id = aurora_imgui_add_texture(w, h, rgba.data());
+        it = icons.emplace(file, id).first;
+    }
+    return it->second;
+}
+
+struct Row {
+    std::vector<std::string> pad, keys;  // glyph files: the controller's, the keyboard's
+    std::string text;
+};
+
+// See-through grey (with HDR on, the brightest lamps show through a little).
+constexpr ImU32 kPanel = IM_COL32(0x22, 0x22, 0x24, 0xb8);
+
+// The legend in the bottom-left corner (two columns of button pictures and
+// what they do) and a notice over the top.
+void draw() {
+    if (ImGui::GetCurrentContext() == nullptr)
+        return;
+    const float dp = overlay_dp();
+    ImFont* font = g_fps_font != nullptr ? g_fps_font : ImGui::GetFont();
+    ImDrawList* list = ImGui::GetForegroundDrawList(ImGui::GetMainViewport());
+    const ImVec2 screen = ImGui::GetMainViewport()->Size;
+    const ImU32 ink = IM_COL32(0xf0, 0xe6, 0xc8, 0xff), dim = IM_COL32(0xc8, 0xbe, 0xa4, 0xff);
+    const Uint64 now = SDL_GetTicks();
+    if (!g_notice.empty() && now - g_notice_at < 2500) {
+        const float size = 22.f * dp;
+        const ImVec2 t = font->CalcTextSizeA(size, FLT_MAX, 0.f, g_notice.c_str());
+        const ImVec2 pad{14.f * dp, 8.f * dp};
+        const ImVec2 at{(screen.x - t.x) / 2.f - pad.x, 24.f * dp};
+        list->AddRectFilled(at, ImVec2{at.x + t.x + 2.f * pad.x, at.y + t.y + 2.f * pad.y}, kPanel, 6.f * dp);
+        list->AddText(font, size, ImVec2{at.x + pad.x, at.y + pad.y}, ink, g_notice.c_str());
+    }
+    if (!g_legend)
+        return;
+    using namespace enhancement;
+    const std::string set = controls::glyph_set();
+    const bool kb = set == "kb";
+    const auto on = [](bool b) { return std::string(b ? "On" : "Off"); };
+    const std::vector<Row> settings = {
+        {{"south"}, {"1"}, "HDR: " + (available(kHdr) ? on(g_settings.hdr) : std::string("Not on this display"))},
+        {{"east"}, {"2"}, "Glow: " + value(kGlow)},
+        {{"west"}, {"3"}, "HD textures: " + (available(kHdTextures) ? on(g_settings.hd_textures) : std::string("No pack"))},
+        {{"north"}, {"4"}, "Shadows: " + value(kShadows)},
+        {{"l3"}, {"5"}, "Ambient occlusion: " + value(kOcclusion)},
+        {{"dup", "ddown"}, {"page_up", "page_down"}, std::string("Resolution: ") + kLineNames[g_resolution]},
+        {{"dleft", "dright"}, {"home", "end"}, std::string("Ratio: ") + kAspects[g_aspect].name},
+    };
+    const std::vector<Row> camera = {
+        {{"stick_l"}, {"w", "a", "s", "d"}, "Move"},
+        {{"stick_r"}, {"arrows"}, "Look"},
+        {{"lb", "rb"}, {"q", "e"}, "Down / up"},
+        {{"lt", "rt"}, {"z", "c"}, "Zoom out / in"},
+        {{"r3"}, {"r"}, "Reset \u00b7 hold + look to tilt"},
+        {{"start"}, {"enter"}, "Take photo"},
+        {{"back"}, {"h"}, kb ? "Hide this" : "Hide this \u00b7 hold to leave"},
+    };
+    std::vector<Row> right = camera;
+    if (kb)
+        right.push_back({{}, {"p"}, "Leave photo mode"});
+
+    const float size = 18.f * dp, title = 22.f * dp, icon = 30.f * dp, gap = 4.f * dp, row_h = icon + gap;
+    const ImVec2 pad{16.f * dp, 12.f * dp};
+    const auto column_width = [&](const std::vector<Row>& rows) {
+        float w = 0.f;
+        for (const Row& r : rows) {
+            const size_t n = kb ? r.keys.size() : r.pad.size();
+            const float text = font->CalcTextSizeA(size, FLT_MAX, 0.f, r.text.c_str()).x;
+            w = std::max(w, static_cast<float>(n) * (icon + 2.f * dp) + 8.f * dp + text);
+        }
+        return w;
+    };
+    const float left_w = column_width(settings), right_w = column_width(right), col_gap = 28.f * dp;
+    const float head_h = font->CalcTextSizeA(title, FLT_MAX, 0.f, "Photo mode").y + 6.f * dp;
+    const float body_h = static_cast<float>(std::max(settings.size(), right.size())) * row_h;
+    const float width = left_w + col_gap + right_w + 2.f * pad.x, height = head_h + body_h + 2.f * pad.y;
+    const ImVec2 at{24.f * dp, screen.y - 24.f * dp - height};
+    list->AddRectFilled(at, ImVec2{at.x + width, at.y + height}, kPanel, 8.f * dp);
+    list->AddText(font, title, ImVec2{at.x + pad.x, at.y + pad.y}, ink, "Photo mode");
+    const auto column = [&](const std::vector<Row>& rows, float x) {
+        float y = at.y + pad.y + head_h;
+        for (const Row& r : rows) {
+            float cx = x;
+            for (const std::string& name : kb ? r.keys : r.pad) {
+                if (ImTextureID id = glyph(set, name); id != 0)
+                    list->AddImage(id, ImVec2{cx, y}, ImVec2{cx + icon, y + icon});
+                cx += icon + 2.f * dp;
+            }
+            const float th = font->CalcTextSizeA(size, FLT_MAX, 0.f, r.text.c_str()).y;
+            list->AddText(font, size, ImVec2{cx + 6.f * dp, y + (icon - th) / 2.f}, dim, r.text.c_str());
+            y += row_h;
+        }
+    };
+    column(settings, at.x + pad.x);
+    column(right, at.x + pad.x + left_w + col_gap);
+}
+
+void begin() {
+    if (g_state != State::Off)
+        return;
+    reset_view();
+    g_legend = true;
+    g_aspect = 0;
+    const int lines = current_lines();
+    g_resolution = 1;
+    for (int i = 0; i < 4; i++)
+        if (kLines[i] == lines)
+            g_resolution = i;
+    g_saved = aurora_photo_saved();
+    g_saving = false;
+    g_before = {g_settings.hdr, g_settings.hd_textures, g_settings.sharp_shadows, g_settings.glow, g_settings.ssao};
+    g_state = State::Waiting;
+    audio_set_muted(true);
+    aurora_photo_begin();
+    std::fprintf(stderr, "[photo] on\n");
+}
+
+void end() {
+    aurora_photo_end();
+    dol_aurora_set_photo_aspect(0.f);
+    dol_aurora_set_render_height(current_lines());
+    const bool changed = g_settings.hdr != g_before.hdr || g_settings.hd_textures != g_before.hd_textures ||
+                         g_settings.sharp_shadows != g_before.sharp_shadows || g_settings.glow != g_before.glow ||
+                         g_settings.ssao != g_before.ssao;
+    g_settings.hdr = g_before.hdr;
+    g_settings.hd_textures = g_before.hd_textures;
+    g_settings.sharp_shadows = g_before.sharp_shadows;
+    g_settings.glow = g_before.glow;
+    g_settings.ssao = g_before.ssao;
+    if (changed)
+        settings_apply_graphics();
+    audio_set_muted(false);
+    g_state = State::Off;
+    std::fprintf(stderr, "[photo] off\n");
+}
+
+// ED_PHOTO_TEST=<seconds>: photo mode by itself after that long (glow, move,
+// look, a photo, 21:9, a photo, leave), for tests with no input.
+struct Test {
+    bool on = false;
+    Uint64 enter_at = 0, began = 0;
+    int step = 0;
+};
+Test g_test;
+
+enum class Exit { Leave, Step, Quit };
+
+constexpr int kKeys[] = {SDL_SCANCODE_RETURN, SDL_SCANCODE_H,      SDL_SCANCODE_P,        SDL_SCANCODE_1,
+                         SDL_SCANCODE_2,      SDL_SCANCODE_3,      SDL_SCANCODE_4,        SDL_SCANCODE_5,
+                         SDL_SCANCODE_R,      SDL_SCANCODE_PAGEUP, SDL_SCANCODE_PAGEDOWN, SDL_SCANCODE_HOME,
+                         SDL_SCANCODE_END};
+
+// Paused at the game's frame: the camera, the settings, the legend.
+Exit run() {
+    SDL_Gamepad* pad = gamepad();
+    bool was[SDL_GAMEPAD_BUTTON_COUNT]{};
+    for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT; b++)
+        was[b] = pad != nullptr && SDL_GetGamepadButton(pad, static_cast<SDL_GamepadButton>(b));
+    static bool key_was[SDL_SCANCODE_COUNT];
+    for (int k : kKeys)
+        key_was[k] = key(k);
+    // Back held from before (the hold that opened it): wait for its release.
+    bool back_armed = !(pad != nullptr && SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_BACK));
+    Uint64 back_since = 0;
+    Uint64 last = SDL_GetTicksNS();
+    while (true) {
+        pad = gamepad();
+        const Uint64 now_ns = SDL_GetTicksNS();
+        const float dt = std::min(static_cast<float>(now_ns - last) * 1e-9f, 0.1f);
+        last = now_ns;
+        const auto button = [&](SDL_GamepadButton b) { return pad != nullptr && SDL_GetGamepadButton(pad, b); };
+        bool pressed[SDL_GAMEPAD_BUTTON_COUNT]{};
+        for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT; b++) {
+            const bool down = button(static_cast<SDL_GamepadButton>(b));
+            pressed[b] = down && !was[b];
+            was[b] = down;
+        }
+        bool key_pressed[SDL_SCANCODE_COUNT]{};
+        for (int k : kKeys) {
+            const bool down = key(k);
+            key_pressed[k] = down && !key_was[k];
+            key_was[k] = down;
+        }
+        const auto axis = [&](SDL_GamepadAxis a) {
+            if (pad == nullptr)
+                return 0.f;
+            const float v = SDL_GetGamepadAxis(pad, a) / 32767.f;
+            return std::fabs(v) < 0.15f ? 0.f : v;
+        };
+        float mx = axis(SDL_GAMEPAD_AXIS_LEFTX), mz = -axis(SDL_GAMEPAD_AXIS_LEFTY);
+        float lx = axis(SDL_GAMEPAD_AXIS_RIGHTX), ly = -axis(SDL_GAMEPAD_AXIS_RIGHTY);
+        float my = (button(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER) ? 1.f : 0.f) -
+                   (button(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER) ? 1.f : 0.f);
+        float zoom = std::max(axis(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER), 0.f) -
+                     std::max(axis(SDL_GAMEPAD_AXIS_LEFT_TRIGGER), 0.f);
+        // The keyboard: WASD move, arrows look, Q/E down/up, Z/C zoom.
+        mx += (key(SDL_SCANCODE_D) ? 1.f : 0.f) - (key(SDL_SCANCODE_A) ? 1.f : 0.f);
+        mz += (key(SDL_SCANCODE_W) ? 1.f : 0.f) - (key(SDL_SCANCODE_S) ? 1.f : 0.f);
+        my += (key(SDL_SCANCODE_E) ? 1.f : 0.f) - (key(SDL_SCANCODE_Q) ? 1.f : 0.f);
+        lx += (key(SDL_SCANCODE_RIGHT) ? 1.f : 0.f) - (key(SDL_SCANCODE_LEFT) ? 1.f : 0.f);
+        ly += (key(SDL_SCANCODE_UP) ? 1.f : 0.f) - (key(SDL_SCANCODE_DOWN) ? 1.f : 0.f);
+        zoom += (key(SDL_SCANCODE_C) ? 1.f : 0.f) - (key(SDL_SCANCODE_Z) ? 1.f : 0.f);
+
+        bool take = pressed[SDL_GAMEPAD_BUTTON_START] || key_pressed[SDL_SCANCODE_RETURN];
+        bool hdr = pressed[SDL_GAMEPAD_BUTTON_SOUTH] || key_pressed[SDL_SCANCODE_1];
+        bool glow = pressed[SDL_GAMEPAD_BUTTON_EAST] || key_pressed[SDL_SCANCODE_2];
+        bool textures = pressed[SDL_GAMEPAD_BUTTON_WEST] || key_pressed[SDL_SCANCODE_3];
+        bool shadows = pressed[SDL_GAMEPAD_BUTTON_NORTH] || key_pressed[SDL_SCANCODE_4];
+        bool occlusion = pressed[SDL_GAMEPAD_BUTTON_LEFT_STICK] || key_pressed[SDL_SCANCODE_5];
+        // R3 (or R): a tap resets the camera; held, the look turns into a tilt.
+        bool reset = false;
+        const bool tilt_held = button(SDL_GAMEPAD_BUTTON_RIGHT_STICK) || key(SDL_SCANCODE_R);
+        static bool tilt_was = false, tilted = false;
+        if (tilt_held && !tilt_was)
+            tilted = false;
+        if (!tilt_held && tilt_was && !tilted)
+            reset = true;
+        tilt_was = tilt_held;
+        int res = (pressed[SDL_GAMEPAD_BUTTON_DPAD_UP] || key_pressed[SDL_SCANCODE_PAGEUP] ? 1 : 0) -
+                  (pressed[SDL_GAMEPAD_BUTTON_DPAD_DOWN] || key_pressed[SDL_SCANCODE_PAGEDOWN] ? 1 : 0);
+        int ratio = (pressed[SDL_GAMEPAD_BUTTON_DPAD_RIGHT] || key_pressed[SDL_SCANCODE_END] ? 1 : 0) -
+                    (pressed[SDL_GAMEPAD_BUTTON_DPAD_LEFT] || key_pressed[SDL_SCANCODE_HOME] ? 1 : 0);
+        int ratio_to = -1;
+        bool hide = key_pressed[SDL_SCANCODE_H];
+        bool leave = key_pressed[SDL_SCANCODE_P];
+        // Back: a tap hides the legend, a hold leaves.
+        const bool back = button(SDL_GAMEPAD_BUTTON_BACK);
+        if (!back_armed) {
+            back_armed = !back;
+        } else if (back) {
+            if (back_since == 0)
+                back_since = SDL_GetTicks();
+            if (SDL_GetTicks() - back_since >= 500)
+                leave = true;
+        } else if (back_since != 0) {
+            hide = true;
+            back_since = 0;
+        }
+
+        // The test script.
+        if (g_test.on) {
+            const Uint64 t = SDL_GetTicks() - g_test.began;
+            const int step = g_test.step;
+            if (step == 0 && t > 1000) {
+                glow = true;  // for the photo only: put back at the end
+                g_test.step++;
+            } else if (step == 1 && t > 1500) {
+                mz = 1.f;
+                if (t > 2500)
+                    g_test.step++;
+            } else if (step == 2) {
+                lx = 1.f;
+                if (t > 3200)
+                    g_test.step++;
+            } else if (step == 3 && t > 3600) {
+                take = true;
+                g_test.step++;
+            } else if (step == 4 && t > 5000) {
+                ratio_to = 3;  // 21:9
+                g_test.step++;
+            } else if (step == 5 && t > 7000) {
+                take = true;
+                g_test.step++;
+            } else if (step == 6 && t > 8500) {
+                g_test.step++;
+            } else if (step == 7 && t > 9000) {
+                leave = true;
+                g_test.step++;
+            }
+        }
+
+        using namespace enhancement;
+        bool step = false;
+        // For the photo only: put back as it was when photo mode ends (end),
+        // never saved.
+        const auto toggle = [](int which) {
+            if (!available(which))
+                return;
+            change(which, +1);
+            notice(std::string(kNames[which]) + ": " + value(which));
+        };
+        if (hdr)
+            toggle(kHdr);
+        if (glow)
+            toggle(kGlow);
+        if (occlusion)
+            toggle(kOcclusion);
+        if (textures) {
+            toggle(kHdTextures);
+            step = true;
+        }
+        if (shadows) {
+            toggle(kShadows);
+            step = true;
+        }
+        if (reset) {
+            reset_view();
+            notice("Camera back to the game's");
+        }
+        if (hide)
+            g_legend = !g_legend;
+        if (res != 0) {
+            g_resolution = std::clamp(g_resolution + res, 0, 3);
+            dol_aurora_set_render_height(kLines[g_resolution]);
+            notice(std::string("Resolution: ") + kLineNames[g_resolution]);
+            step = true;
+        }
+        if (ratio != 0 || ratio_to >= 0) {
+            g_aspect = ratio_to >= 0 ? ratio_to : (g_aspect + ratio + kAspectCount) % kAspectCount;
+            dol_aurora_set_photo_aspect(kAspects[g_aspect].value);
+            notice(std::string("Ratio: ") + kAspects[g_aspect].name);
+            step = true;
+        }
+        if (take) {
+            char stamp[64];
+            const std::time_t now = std::time(nullptr);
+            std::strftime(stamp, sizeof stamp, "%Y-%m-%d %H.%M.%S", std::localtime(&now));
+            g_last_saved = folder() + "/Eternal Darkness " + stamp + ".png";
+            aurora_photo_save(g_last_saved.c_str());
+            g_saving = true;
+            notice("Taking photo...");
+        }
+        if (g_saving && aurora_photo_saved() != g_saved) {
+            g_saved = aurora_photo_saved();
+            g_saving = false;
+            notice("Saved to Pictures/Eternal Darkness");
+        }
+
+        // The camera, level with the world: look turns about the world's up
+        // and tips up and down (R3 held: tilts instead); the left stick moves
+        // along the floor, LB/RB straight up and down (game units: about 100
+        // a metre); zoom 0.3x to 4x.
+        if (tilt_held) {
+            if (lx != 0.f)
+                tilted = true;
+            g_roll -= lx * 1.2f * dt;
+        } else {
+            g_heading -= lx * 1.8f * dt;
+            g_elevation = std::clamp(g_elevation + ly * 1.4f * dt, -1.5f, 1.5f);
+        }
+        g_zoom = std::clamp(g_zoom * std::exp(zoom * 1.2f * dt), 0.3f, 4.f);
+        const Frame fr = level_frame();
+        const float ch = std::cos(g_heading), sh = std::sin(g_heading);
+        const V3 level_ahead = add3(mul3(fr.h0, ch), mul3(fr.r0, -sh));
+        const V3 level_right = add3(mul3(fr.r0, ch), mul3(fr.h0, sh));
+        const V3 ahead = add3(mul3(level_ahead, std::cos(g_elevation)), mul3(fr.up, std::sin(g_elevation)));
+        const V3 up0 = cross3(level_right, ahead);
+        const float cr = std::cos(g_roll), sr = std::sin(g_roll);
+        const V3 right = add3(mul3(level_right, cr), mul3(up0, sr));
+        const V3 up = add3(mul3(up0, cr), mul3(level_right, -sr));
+        const float speed = 180.f / g_zoom;
+        const V3 move = add3(add3(mul3(level_right, mx), mul3(level_ahead, mz)), mul3(fr.up, my));
+        for (int i = 0; i < 3; i++)
+            g_pos[i] += move[i] * speed * dt;
+        // Row-major, columns right, up, back.
+        const float rot[9]{right[0], up[0], -ahead[0], right[1], up[1], -ahead[1], right[2], up[2], -ahead[2]};
+        aurora_photo_set_view(rot, g_pos[0], g_pos[1], g_pos[2], g_zoom, dol_aurora_display_aspect(), true);
+
+        if (leave)
+            return Exit::Leave;
+        if (step) {
+            // Two frames: a new size is only drawn from the frame after.
+            aurora_photo_rehold(1);
+            return Exit::Step;
+        }
+        draw();
+        if (!dol_aurora_ui_frame())
+            return Exit::Quit;
+    }
+}
+
+// At each frame boundary: enter (once held), run, step or leave.
+void frame(bool start) {
+    static bool checked = false;
+    if (!checked) {
+        checked = true;
+        if (const char* t = std::getenv("ED_PHOTO_TEST"); t != nullptr && std::atoi(t) > 0) {
+            g_test.on = true;
+            g_test.enter_at = SDL_GetTicks() + static_cast<Uint64>(std::atoi(t)) * 1000u;
+        }
+    }
+    if (g_test.on && g_test.enter_at != 0 && SDL_GetTicks() >= g_test.enter_at) {
+        g_test.enter_at = 0;
+        start = true;
+    }
+    if (start && g_state == State::Off) {
+        begin();
+        return;  // the game draws the frame to hold
+    }
+    if (g_state != State::Waiting)
+        return;
+    // The held frame is finished on the render thread a moment after the
+    // game hands it over.
+    for (int i = 0; i < 50 && !aurora_photo_ready(); i++)
+        SDL_Delay(2);
+    if (!aurora_photo_ready())
+        return;
+    if (g_test.on && g_test.began == 0)
+        g_test.began = SDL_GetTicks();
+    g_state = State::On;
+    report_pause(true);
+    const Exit exit = run();
+    report_pause(false);
+    if (exit == Exit::Step) {
+        g_state = State::Waiting;
+        return;
+    }
+    end();
+    if (exit == Exit::Quit)
+        dol_aurora_request_quit();
+}
+}  // namespace photo
+
+extern "C" bool frontend_photo_active(void) { return photo::g_state != photo::State::Off; }
+
 extern "C" void frontend_frame(void) {
     static Uint64 calibration_test_at = 0;
     static int calibration_test_step = 0;
@@ -1710,8 +2251,37 @@ extern "C" void frontend_frame(void) {
     static bool menu_was_held = false;
     bool held[kButtonCount];
     read_buttons(held);
-    const bool menu_held = held[kMenu] || key(SDL_SCANCODE_ESCAPE);
-    const bool press = (menu_held && !menu_was_held) || g_key_pressed[kMenu];
+    // Back: a tap opens the menu (on its release), held half a second photo
+    // mode; Escape opens the menu at once, P photo mode.
+    static Uint64 back_since = 0;
+    static bool back_photo = false;
+    const bool back = held[kMenu];
+    bool photo_start = false, back_tap = false;
+    if (back && back_since == 0) {
+        back_since = SDL_GetTicks();
+        back_photo = false;
+    }
+    if (back && !back_photo && SDL_GetTicks() - back_since >= 500) {
+        back_photo = true;
+        photo_start = true;
+    }
+    if (!back && back_since != 0) {
+        back_tap = !back_photo;
+        back_since = 0;
+    }
+    static bool p_was = false;
+    const bool p = key(SDL_SCANCODE_P);
+    if (p && !p_was)
+        photo_start = true;
+    p_was = p;
+    photo::frame(photo_start && photo::g_state == photo::State::Off);
+    if (photo::g_state != photo::State::Off) {
+        menu_was_held = true;
+        std::fill(std::begin(g_key_pressed), std::end(g_key_pressed), false);
+        return;
+    }
+    const bool menu_held = key(SDL_SCANCODE_ESCAPE);
+    const bool press = (menu_held && !menu_was_held) || g_key_pressed[kMenu] || back_tap;
     menu_was_held = menu_held;
     std::fill(std::begin(g_key_pressed), std::end(g_key_pressed), false);
     static Uint64 test_open_at = 0, test_hold = 0, test_every = 0;

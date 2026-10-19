@@ -1,5 +1,5 @@
 diff --git a/backends/aurora/aurora_backend.cpp b/backends/aurora/aurora_backend.cpp
-index d94f811..84125d4 100644
+index d94f811..fc45a7d 100644
 --- a/backends/aurora/aurora_backend.cpp
 +++ b/backends/aurora/aurora_backend.cpp
 @@ -19,9 +19,25 @@
@@ -685,27 +685,39 @@ index d94f811..84125d4 100644
          return;
      }
      if (!g_shadow_frontend.write_fifo(fragment) ||
-@@ -842,8 +1318,1318 @@ void shadow_transform_observer(
+@@ -842,133 +1318,1448 @@ void shadow_transform_observer(
      }
  }
  #endif
 +
  } // namespace
  
-+extern "C" {
+ extern "C" {
+-
 +void aurora_backend_gx_write(u64 value, u8 size);
-+void aurora_backend_set_array_guest(u32 attr, u32 guest_address,
-+                                    const void* data, u32 size, u8 stride);
+ void aurora_backend_set_array_guest(u32 attr, u32 guest_address,
+                                     const void* data, u32 size, u8 stride);
+-void aurora_backend_load_texture_guest(u8 slot, u32 guest_address,
+-                                       const void* data, u32 width, u32 height,
+-                                       u32 format, u32 tlut, bool mipmap,
+-                                       u32 object_id, u32 data_version);
+-void aurora_backend_load_tlut_guest(u8 slot, u32 guest_address,
+-                                    const void* data, u32 format, u16 entries,
+-                                    u32 object_id, u32 data_version);
 +void aurora_backend_call_display_list(const void* data, u32 size);
-+void aurora_backend_set_copy_destination_guest(u32 guest_address,
-+                                               const void* data);
+ void aurora_backend_set_copy_destination_guest(u32 guest_address,
+                                                const void* data);
 +void aurora_backend_configure_vi(u32 tv_mode, u16 fb_width, u16 efb_height,
 +                                 u16 xfb_height, u16 vi_width, u16 vi_height);
 +void aurora_backend_set_next_xfb(u32 physical_address);
 +void aurora_backend_flush_xfb(void);
 +void aurora_backend_set_xfb_black(bool black);
 +}
-+
+ 
+-bool dol_aurora_initialize(int argc, char** argv,
+-                           const AuroraBackendConfig* backend_config) {
+-    if (g_initialized)
+-        return true;
 +#if GXRUNTIME_HAS_AURORA_RECOMP
 +// --- GX thread ------------------------------------------------------------------
 +// Three threads (dol_aurora_run_game): the game; a decode thread that runs
@@ -716,7 +728,19 @@ index d94f811..84125d4 100644
 +// GameCube's own GPU (which this game keeps a frame behind anyway).
 +// DOL_GX_THREAD=0 keeps one thread.
 +namespace gxq {
-+
+ 
+-    const AuroraBackendConfig defaults = {
+-        .app_name = "GXRuntime",
+-        .window_width = 1280,
+-        .window_height = 960,
+-        .vsync = true,
+-        .allow_texture_dumps = false,
+-        .info_logging = false,
+-        .graphics_logging = false,
+-        .force_untextured = false,
+-    };
+-    if (backend_config == nullptr)
+-        backend_config = &defaults;
 +enum class Op : std::uint8_t {
 +    GxBytes,          // a run of FIFO writes, big-endian as written
 +    CallDisplayList,  // a copy of the list's bytes
@@ -729,7 +753,26 @@ index d94f811..84125d4 100644
 +    Present,
 +    Call,             // run a function on the main thread (quick states)
 +};
-+
+ 
+-    AuroraConfig config{};
+-    config.appName =
+-        backend_config->app_name != nullptr ? backend_config->app_name
+-                                            : defaults.app_name;
+-    config.desiredBackend = BACKEND_AUTO;
+-    config.vsync = backend_config->vsync;
+-    config.windowWidth = backend_config->window_width != 0
+-                             ? backend_config->window_width
+-                             : defaults.window_width;
+-    config.windowHeight = backend_config->window_height != 0
+-                              ? backend_config->window_height
+-                              : defaults.window_height;
+-    config.allowTextureDumps = backend_config->allow_texture_dumps;
+-    config.logCallback = log_callback;
+-    config.logLevel = backend_config->info_logging ? LOG_INFO : LOG_ERROR;
+-    // The recomp runtime owns guest MEM1/ARAM. Aurora receives translated host
+-    // pointers for graphics resources and must not allocate duplicate memory.
+-    config.mem1Size = 0;
+-    config.mem2Size = 0;
 +struct Header {
 +    Op op;
 +    std::uint8_t pad[3];
@@ -750,14 +793,76 @@ index d94f811..84125d4 100644
 +    u32 tv_mode;
 +    u16 fb_width, efb_height, xfb_height, vi_width, vi_height;
 +};
-+
+ 
+-    const AuroraInfo info = aurora_initialize(argc, argv, &config);
+-    g_initialized = info.window != nullptr;
+-    if (!g_initialized)
+-        return false;
 +// Chunks are handed over when they pass this size (so the main thread starts
 +// on a frame early) and at every present; a backlog past the limit holds the
 +// game until the main thread catches up.
 +constexpr std::size_t kChunkBytes = 64u * 1024u;
 +constexpr std::size_t kMaxChunks = 256u;
 +constexpr std::size_t kNoRecord = ~std::size_t{0};
-+
+ 
+-    g_graphics_log = backend_config->graphics_logging;
+-    g_force_untextured = backend_config->force_untextured;
+-    g_frame_pacing_log = std::getenv("DOL_FRAME_PACING_LOG") != nullptr;
+-#if GXRUNTIME_HAS_AURORA_RECOMP
+-    g_shadow_light_log_enabled =
+-        std::getenv("DOL_AURORA_RECOMP_DRAW_LIGHT_LOG") != nullptr;
+-    g_shadow_light_log_lit_only =
+-        std::getenv("DOL_AURORA_RECOMP_DRAW_LIGHT_LIT_ONLY") != nullptr;
+-    g_shadow_transform_log_enabled =
+-        std::getenv("DOL_AURORA_RECOMP_DRAW_TRANSFORM_LOG") != nullptr ||
+-        g_shadow_light_log_enabled;
+-    g_shadow_transform_log_frame =
+-        ull_env("DOL_AURORA_RECOMP_DRAW_TRANSFORM_FRAME", 0ull);
+-    g_shadow_transform_log_min_frame =
+-        ull_env("DOL_AURORA_RECOMP_DRAW_TRANSFORM_MIN_FRAME", 0ull);
+-    g_shadow_transform_log_draw =
+-        long_env("DOL_AURORA_RECOMP_DRAW_TRANSFORM_DRAW", -1);
+-    const char* transform_sequence =
+-        std::getenv("DOL_AURORA_RECOMP_DRAW_TRANSFORM_SEQUENCE");
+-    g_shadow_transform_log_sequence_enabled =
+-        transform_sequence != nullptr && transform_sequence[0] != '\0';
+-    g_shadow_transform_log_sequence =
+-        ull_env("DOL_AURORA_RECOMP_DRAW_TRANSFORM_SEQUENCE", 0ull);
+-    g_shadow_transform_log_limit = static_cast<unsigned long>(
+-        ull_env("DOL_AURORA_RECOMP_DRAW_TRANSFORM_LIMIT", 1ull));
+-    if (g_shadow_transform_log_limit == 0ul)
+-        g_shadow_transform_log_limit = 1ul;
+-    g_shadow_transform_log_count = 0;
+-    g_shadow_transform_next_draw_index = 0;
+-    g_trace_armed = false;
+-    g_trace_path.clear();
+-    g_trace_first_frame = 1ull;
+-    g_trace_last_frame = ~0ull;
+-    g_trace_present_scope_frame = 0ull;
+-    g_trace_frame_begun = false;
+-    g_trace_frames_recorded = 0ull;
+-    g_trace_mem_dedup.clear();
+-    const char* trace_out = std::getenv("DOL_AURORA_RECOMP_TRACE_OUT");
+-    if (trace_out != nullptr && trace_out[0] != '\0') {
+-        g_trace_path = trace_out;
+-        g_trace_armed = true;
+-        const char* trace_window =
+-            std::getenv("DOL_AURORA_RECOMP_TRACE_FRAMES");
+-        if (trace_window != nullptr && trace_window[0] != '\0') {
+-            char* end = nullptr;
+-            const unsigned long long first =
+-                std::strtoull(trace_window, &end, 10);
+-            bool window_ok = end != trace_window && *end == ':';
+-            if (window_ok) {
+-                const char* second = end + 1;
+-                char* end2 = nullptr;
+-                const unsigned long long last =
+-                    std::strtoull(second, &end2, 10);
+-                window_ok = end2 != second && *end2 == '\0' && last >= first;
+-                if (window_ok) {
+-                    g_trace_first_frame = first == 0ull ? 1ull : first;
+-                    g_trace_last_frame = last;
+-                }
 +thread_local bool t_game_thread = false;
 +bool g_active = false;  // the game thread is running
 +
@@ -813,7 +918,13 @@ index d94f811..84125d4 100644
 +                if (e->Type == CpuSetInformation)
 +                    fn(e->CpuSet);
 +                off += e->Size;
-+            }
+             }
+-            if (!window_ok)
+-                std::fprintf(stderr,
+-                             "[trace] ignoring malformed "
+-                             "DOL_AURORA_RECOMP_TRACE_FRAMES=%s (want A:B); "
+-                             "recording all frames\n",
+-                             trace_window);
 +        };
 +        BYTE top = 0, bottom = 0xFF;
 +        each([&](const auto& cs) {
@@ -889,7 +1000,9 @@ index d94f811..84125d4 100644
 +        if (!g_free.empty()) {
 +            next = std::move(g_free.back());
 +            g_free.pop_back();
-+        }
+         }
+-        std::fprintf(stderr, "[trace] recording armed path=%s frames=%llu:%llu\n",
+-                     g_trace_path.c_str(), g_trace_first_frame,
 +    }
 +    g_cv_main.notify_one();
 +    g_open = std::move(next);
@@ -2001,46 +2114,180 @@ index d94f811..84125d4 100644
 +}
 +} // namespace frame_rate
 +
- extern "C" {
- 
- void aurora_backend_set_array_guest(u32 attr, u32 guest_address,
-@@ -882,6 +2668,7 @@ bool dol_aurora_initialize(int argc, char** argv,
-                                             : defaults.app_name;
-     config.desiredBackend = BACKEND_AUTO;
-     config.vsync = backend_config->vsync;
++extern "C" {
++
++void aurora_backend_set_array_guest(u32 attr, u32 guest_address,
++                                    const void* data, u32 size, u8 stride);
++void aurora_backend_load_texture_guest(u8 slot, u32 guest_address,
++                                       const void* data, u32 width, u32 height,
++                                       u32 format, u32 tlut, bool mipmap,
++                                       u32 object_id, u32 data_version);
++void aurora_backend_load_tlut_guest(u8 slot, u32 guest_address,
++                                    const void* data, u32 format, u16 entries,
++                                    u32 object_id, u32 data_version);
++void aurora_backend_set_copy_destination_guest(u32 guest_address,
++                                               const void* data);
++
++bool dol_aurora_initialize(int argc, char** argv,
++                           const AuroraBackendConfig* backend_config) {
++    if (g_initialized)
++        return true;
++
++    const AuroraBackendConfig defaults = {
++        .app_name = "GXRuntime",
++        .window_width = 1280,
++        .window_height = 960,
++        .vsync = true,
++        .allow_texture_dumps = false,
++        .info_logging = false,
++        .graphics_logging = false,
++        .force_untextured = false,
++    };
++    if (backend_config == nullptr)
++        backend_config = &defaults;
++
++    AuroraConfig config{};
++    config.appName =
++        backend_config->app_name != nullptr ? backend_config->app_name
++                                            : defaults.app_name;
++    config.desiredBackend = BACKEND_AUTO;
++    config.vsync = backend_config->vsync;
 +    frame_rate::g_vsync = backend_config->vsync;
-     config.windowWidth = backend_config->window_width != 0
-                              ? backend_config->window_width
-                              : defaults.window_width;
-@@ -890,6 +2677,10 @@ bool dol_aurora_initialize(int argc, char** argv,
-                               : defaults.window_height;
-     config.allowTextureDumps = backend_config->allow_texture_dumps;
-     config.logCallback = log_callback;
++    config.windowWidth = backend_config->window_width != 0
++                             ? backend_config->window_width
++                             : defaults.window_width;
++    config.windowHeight = backend_config->window_height != 0
++                              ? backend_config->window_height
++                              : defaults.window_height;
++    config.allowTextureDumps = backend_config->allow_texture_dumps;
++    config.logCallback = log_callback;
 +    static void (*s_imgui_init)(void) = nullptr;
 +    s_imgui_init = backend_config->imgui_init;
 +    if (s_imgui_init != nullptr)
 +        config.imGuiInitCallback = [](const AuroraWindowSize*) { s_imgui_init(); };
-     config.logLevel = backend_config->info_logging ? LOG_INFO : LOG_ERROR;
-     // The recomp runtime owns guest MEM1/ARAM. Aurora receives translated host
-     // pointers for graphics resources and must not allocate duplicate memory.
-@@ -937,7 +2728,7 @@ bool dol_aurora_initialize(int argc, char** argv,
-     g_trace_present_scope_frame = 0ull;
-     g_trace_frame_begun = false;
-     g_trace_frames_recorded = 0ull;
--    g_trace_mem_dedup.clear();
++    config.logLevel = backend_config->info_logging ? LOG_INFO : LOG_ERROR;
++    // The recomp runtime owns guest MEM1/ARAM. Aurora receives translated host
++    // pointers for graphics resources and must not allocate duplicate memory.
++    config.mem1Size = 0;
++    config.mem2Size = 0;
++
++    const AuroraInfo info = aurora_initialize(argc, argv, &config);
++    g_initialized = info.window != nullptr;
++    if (!g_initialized)
++        return false;
++
++    g_graphics_log = backend_config->graphics_logging;
++    g_force_untextured = backend_config->force_untextured;
++    g_frame_pacing_log = std::getenv("DOL_FRAME_PACING_LOG") != nullptr;
++#if GXRUNTIME_HAS_AURORA_RECOMP
++    g_shadow_light_log_enabled =
++        std::getenv("DOL_AURORA_RECOMP_DRAW_LIGHT_LOG") != nullptr;
++    g_shadow_light_log_lit_only =
++        std::getenv("DOL_AURORA_RECOMP_DRAW_LIGHT_LIT_ONLY") != nullptr;
++    g_shadow_transform_log_enabled =
++        std::getenv("DOL_AURORA_RECOMP_DRAW_TRANSFORM_LOG") != nullptr ||
++        g_shadow_light_log_enabled;
++    g_shadow_transform_log_frame =
++        ull_env("DOL_AURORA_RECOMP_DRAW_TRANSFORM_FRAME", 0ull);
++    g_shadow_transform_log_min_frame =
++        ull_env("DOL_AURORA_RECOMP_DRAW_TRANSFORM_MIN_FRAME", 0ull);
++    g_shadow_transform_log_draw =
++        long_env("DOL_AURORA_RECOMP_DRAW_TRANSFORM_DRAW", -1);
++    const char* transform_sequence =
++        std::getenv("DOL_AURORA_RECOMP_DRAW_TRANSFORM_SEQUENCE");
++    g_shadow_transform_log_sequence_enabled =
++        transform_sequence != nullptr && transform_sequence[0] != '\0';
++    g_shadow_transform_log_sequence =
++        ull_env("DOL_AURORA_RECOMP_DRAW_TRANSFORM_SEQUENCE", 0ull);
++    g_shadow_transform_log_limit = static_cast<unsigned long>(
++        ull_env("DOL_AURORA_RECOMP_DRAW_TRANSFORM_LIMIT", 1ull));
++    if (g_shadow_transform_log_limit == 0ul)
++        g_shadow_transform_log_limit = 1ul;
++    g_shadow_transform_log_count = 0;
++    g_shadow_transform_next_draw_index = 0;
++    g_trace_armed = false;
++    g_trace_path.clear();
++    g_trace_first_frame = 1ull;
++    g_trace_last_frame = ~0ull;
++    g_trace_present_scope_frame = 0ull;
++    g_trace_frame_begun = false;
++    g_trace_frames_recorded = 0ull;
 +    g_trace_mem_shadow.clear();
-     const char* trace_out = std::getenv("DOL_AURORA_RECOMP_TRACE_OUT");
-     if (trace_out != nullptr && trace_out[0] != '\0') {
-         g_trace_path = trace_out;
-@@ -1061,63 +2852,330 @@ bool dol_aurora_initialize(int argc, char** argv,
-     return true;
- }
++    const char* trace_out = std::getenv("DOL_AURORA_RECOMP_TRACE_OUT");
++    if (trace_out != nullptr && trace_out[0] != '\0') {
++        g_trace_path = trace_out;
++        g_trace_armed = true;
++        const char* trace_window =
++            std::getenv("DOL_AURORA_RECOMP_TRACE_FRAMES");
++        if (trace_window != nullptr && trace_window[0] != '\0') {
++            char* end = nullptr;
++            const unsigned long long first =
++                std::strtoull(trace_window, &end, 10);
++            bool window_ok = end != trace_window && *end == ':';
++            if (window_ok) {
++                const char* second = end + 1;
++                char* end2 = nullptr;
++                const unsigned long long last =
++                    std::strtoull(second, &end2, 10);
++                window_ok = end2 != second && *end2 == '\0' && last >= first;
++                if (window_ok) {
++                    g_trace_first_frame = first == 0ull ? 1ull : first;
++                    g_trace_last_frame = last;
++                }
++            }
++            if (!window_ok)
++                std::fprintf(stderr,
++                             "[trace] ignoring malformed "
++                             "DOL_AURORA_RECOMP_TRACE_FRAMES=%s (want A:B); "
++                             "recording all frames\n",
++                             trace_window);
++        }
++        std::fprintf(stderr, "[trace] recording armed path=%s frames=%llu:%llu\n",
++                     g_trace_path.c_str(), g_trace_first_frame,
+                      g_trace_last_frame);
+     }
+     // 63/Mfin default flip: gxcore is the renderer. Opt out only with
+@@ -1039,85 +2830,361 @@ bool dol_aurora_initialize(int argc, char** argv,
+     g_audio_low_log_push = 0;
+     g_audio_sample_rate = 32000;
  
--// C2: route nonzero gxcore GapCounters into the structured report. Mirrors
--// dolgx_replay_core.cpp print_gap_counters (full residual taxonomy, including
--// U1/U2 counters the replay table historically omitted). Counter value IS the
--// fire-count — gap_report_add adds that many occurrences in one call.
--static void flush_gxcore_gap_counters() {
+-    if (SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+-        SDL_AudioSpec spec{};
+-        spec.format = SDL_AUDIO_S16;
+-        spec.channels = 2;
+-        spec.freq = static_cast<int>(g_audio_sample_rate);
+-        g_audio_stream = SDL_OpenAudioDeviceStream(
+-            SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
+-        if (g_audio_stream == nullptr)
+-            std::fprintf(stderr, "[audio] SDL output unavailable: %s\n", SDL_GetError());
+-        else if (g_audio_queue_log)
+-            std::fprintf(stderr, "[audio-queue] prebuffer_ms=%d max_queue_ms=%d\n",
+-                         g_audio_prebuffer_ms, g_audio_max_queue_ms);
+-    } else {
+-        std::fprintf(stderr, "[audio] SDL audio initialization failed: %s\n", SDL_GetError());
+-    }
++    if (SDL_InitSubSystem(SDL_INIT_AUDIO)) {
++        SDL_AudioSpec spec{};
++        spec.format = SDL_AUDIO_S16;
++        spec.channels = 2;
++        spec.freq = static_cast<int>(g_audio_sample_rate);
++        g_audio_stream = SDL_OpenAudioDeviceStream(
++            SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
++        if (g_audio_stream == nullptr)
++            std::fprintf(stderr, "[audio] SDL output unavailable: %s\n", SDL_GetError());
++        else if (g_audio_queue_log)
++            std::fprintf(stderr, "[audio-queue] prebuffer_ms=%d max_queue_ms=%d\n",
++                         g_audio_prebuffer_ms, g_audio_max_queue_ms);
++    } else {
++        std::fprintf(stderr, "[audio] SDL audio initialization failed: %s\n", SDL_GetError());
++    }
++
++    poll_events();
++    g_frame_open = !g_should_quit && aurora_begin_frame();
++    install_platform_ops();
++    return true;
++}
++
 +// C2: route nonzero gxcore GapCounters into the structured report. Mirrors
 +// dolgx_replay_core.cpp print_gap_counters (full residual taxonomy, including
 +// U1/U2 counters the replay table historically omitted). Counter value IS the
@@ -2261,6 +2508,103 @@ index d94f811..84125d4 100644
 +}
 +
 +void dol_aurora_set_hdr_highlight(float gain) {
++#if GXRUNTIME_HAS_AURORA_RECOMP
++    aurora::gfx::glow::set_hdr_highlight(gain);
++#else
++    (void)gain;
++#endif
++}
++
++bool dol_aurora_hdr_available(void) {
++    return aurora::webgpu::hdr_available();
++}
++
++void dol_aurora_set_aspect_mode(int mode) {
++    g_aspect_mode = mode;
++}
++
++// Photo mode's aspect (width / height), over the display aspect mode while set.
++static std::atomic<float> g_photo_aspect{0.f};
++void dol_aurora_set_photo_aspect(float aspect) {
++    g_photo_aspect = aspect > 0.1f && aspect < 10.f ? aspect : 0.f;
++}
++float dol_aurora_display_aspect(void) {
++    return g_display_aspect;
++}
++
++void dol_aurora_set_render_height(int lines) {
++    aurora::window::set_frame_buffer_scale(0.f);
++    aurora::window::set_frame_buffer_height(lines > 0 ? lines : 0);
++}
++
++void dol_aurora_set_window_icon(const uint8_t* rgba, uint32_t width, uint32_t height) {
++    SDL_Window* window = aurora::window::get_sdl_window();
++    if (window == nullptr || rgba == nullptr || width == 0 || height == 0)
++        return;
++    SDL_Surface* surface = SDL_CreateSurfaceFrom(
++        static_cast<int>(width), static_cast<int>(height), SDL_PIXELFORMAT_RGBA32,
++        const_cast<uint8_t*>(rgba), static_cast<int>(width * 4));
++    if (surface == nullptr)
++        return;
++    SDL_SetWindowIcon(window, surface);
++    SDL_DestroySurface(surface);
++}
++
++void dol_aurora_set_fullscreen(bool fullscreen) {
++    aurora::window::set_fullscreen(fullscreen);
++}
++
++void dol_aurora_set_fast_forward(bool on) {
++    gxq::g_fast_forward.store(on, std::memory_order_relaxed);
++}
++
++void dol_aurora_set_frame_rate(int hz) {
++    frame_rate::g_setting = hz;
++}
+ 
+-    poll_events();
+-    g_frame_open = !g_should_quit && aurora_begin_frame();
+-    install_platform_ops();
+-    return true;
++int dol_aurora_screen_refresh(void) {
++    return static_cast<int>(std::lround(1e9 / frame_rate::screen_period()));
+ }
+ 
+-// C2: route nonzero gxcore GapCounters into the structured report. Mirrors
+-// dolgx_replay_core.cpp print_gap_counters (full residual taxonomy, including
+-// U1/U2 counters the replay table historically omitted). Counter value IS the
+-// fire-count — gap_report_add adds that many occurrences in one call.
+-static void flush_gxcore_gap_counters() {
++void dol_aurora_measure_screen(void) {
++    frame_rate::g_probe = true;
++}
++
++bool dol_aurora_frames_between(void) {
++    return frame_rate::g_active;
++}
++
++int dol_aurora_frame_rate_choices(int* out, int max) {
++    std::vector<int> rates{60};
++    for (const int hz : frame_rate::display_rates())
++        if (std::find(rates.begin(), rates.end(), hz) == rates.end())
++            rates.push_back(hz);
++    if (const int screen = dol_aurora_screen_refresh();
++        screen >= 75 && std::find(rates.begin(), rates.end(), screen) == rates.end())
++        rates.push_back(screen);
++    std::sort(rates.begin(), rates.end());
++    const int count = std::min(static_cast<int>(rates.size()), max);
++    for (int i = 0; i < count; ++i)
++        out[i] = rates[i];
++    return count;
++}
++
++void dol_aurora_set_audio_buffer_ms(int ms) {
++    g_audio_prebuffer_ms = std::clamp(ms, 20, 500);
++    if (g_audio_max_queue_ms < g_audio_prebuffer_ms + 100)
++        g_audio_max_queue_ms = g_audio_prebuffer_ms + 100;
++}
++
++void dol_aurora_set_guest_mem1(void* ram, uint32_t size) {
  #if GXRUNTIME_HAS_AURORA_RECOMP
 -    if (!g_gx_core_enabled)
 -        return;
@@ -2300,97 +2644,20 @@ index d94f811..84125d4 100644
 -    if (g_core_rejected != 0)
 -        gap_report_add("gxcore", "submit_rejected", "", 0,
 -                       "draw rejected by the gxcore consumer", g_core_rejected);
-+    aurora::gfx::glow::set_hdr_highlight(gain);
++    g_mem1 = static_cast<std::uint8_t*>(ram);
++    g_mem1_size = ram != nullptr ? size : 0u;
++    install_frontend_mem1();
  #else
 -    (void)0;
-+    (void)gain;
++    (void)ram;
++    (void)size;
  #endif
  }
  
 -void dol_aurora_flush_gap_report(void) {
 -    flush_gxcore_gap_counters();
-+bool dol_aurora_hdr_available(void) {
-+    return aurora::webgpu::hdr_available();
-+}
-+
-+void dol_aurora_set_aspect_mode(int mode) {
-+    g_aspect_mode = mode;
-+}
-+
-+void dol_aurora_set_render_height(int lines) {
-+    aurora::window::set_frame_buffer_scale(0.f);
-+    aurora::window::set_frame_buffer_height(lines > 0 ? lines : 0);
-+}
-+
-+void dol_aurora_set_window_icon(const uint8_t* rgba, uint32_t width, uint32_t height) {
-+    SDL_Window* window = aurora::window::get_sdl_window();
-+    if (window == nullptr || rgba == nullptr || width == 0 || height == 0)
-+        return;
-+    SDL_Surface* surface = SDL_CreateSurfaceFrom(
-+        static_cast<int>(width), static_cast<int>(height), SDL_PIXELFORMAT_RGBA32,
-+        const_cast<uint8_t*>(rgba), static_cast<int>(width * 4));
-+    if (surface == nullptr)
-+        return;
-+    SDL_SetWindowIcon(window, surface);
-+    SDL_DestroySurface(surface);
-+}
-+
-+void dol_aurora_set_fullscreen(bool fullscreen) {
-+    aurora::window::set_fullscreen(fullscreen);
-+}
-+
-+void dol_aurora_set_fast_forward(bool on) {
-+    gxq::g_fast_forward.store(on, std::memory_order_relaxed);
-+}
-+
-+void dol_aurora_set_frame_rate(int hz) {
-+    frame_rate::g_setting = hz;
-+}
-+
-+int dol_aurora_screen_refresh(void) {
-+    return static_cast<int>(std::lround(1e9 / frame_rate::screen_period()));
-+}
-+
-+void dol_aurora_measure_screen(void) {
-+    frame_rate::g_probe = true;
-+}
-+
-+bool dol_aurora_frames_between(void) {
-+    return frame_rate::g_active;
-+}
-+
-+int dol_aurora_frame_rate_choices(int* out, int max) {
-+    std::vector<int> rates{60};
-+    for (const int hz : frame_rate::display_rates())
-+        if (std::find(rates.begin(), rates.end(), hz) == rates.end())
-+            rates.push_back(hz);
-+    if (const int screen = dol_aurora_screen_refresh();
-+        screen >= 75 && std::find(rates.begin(), rates.end(), screen) == rates.end())
-+        rates.push_back(screen);
-+    std::sort(rates.begin(), rates.end());
-+    const int count = std::min(static_cast<int>(rates.size()), max);
-+    for (int i = 0; i < count; ++i)
-+        out[i] = rates[i];
-+    return count;
-+}
-+
-+void dol_aurora_set_audio_buffer_ms(int ms) {
-+    g_audio_prebuffer_ms = std::clamp(ms, 20, 500);
-+    if (g_audio_max_queue_ms < g_audio_prebuffer_ms + 100)
-+        g_audio_max_queue_ms = g_audio_prebuffer_ms + 100;
-+}
-+
-+void dol_aurora_set_guest_mem1(void* ram, uint32_t size) {
-+#if GXRUNTIME_HAS_AURORA_RECOMP
-+    g_mem1 = static_cast<std::uint8_t*>(ram);
-+    g_mem1_size = ram != nullptr ? size : 0u;
-+    install_frontend_mem1();
-+#else
-+    (void)ram;
-+    (void)size;
-+#endif
- }
- 
+-}
+-
  void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user) {
      g_efb_frame_fill = fn;
      g_efb_frame_fill_user = user;
@@ -2410,7 +2677,7 @@ index d94f811..84125d4 100644
          aurora::gfx::efb_readback::set_continuous(true);
          aurora_request_framebuffer_readback();
      }
-@@ -1169,8 +3227,11 @@ void aurora_backend_present(void) {
+@@ -1169,8 +3236,11 @@ void aurora_backend_present(void) {
      // gxcore accumulates the frame's draws as their spans complete; the final
      // pending draw is only planned at the frame boundary. Submit it into the
      // still-open Aurora frame before end_frame flushes the command list.
@@ -2423,7 +2690,7 @@ index d94f811..84125d4 100644
      // TEMP DIAG: per-frame gxcore gap-counter deltas so a live
      // goal celebration reveals which skip reason dominates (missing_vcd /
      // "projection never captured" vertex_decode_failures / cull_all_draws vs.
-@@ -1197,12 +3258,21 @@ void aurora_backend_present(void) {
+@@ -1197,12 +3267,21 @@ void aurora_backend_present(void) {
      }
  #endif
      if (g_frame_open) {
@@ -2447,7 +2714,7 @@ index d94f811..84125d4 100644
          const std::uint8_t* rgba = nullptr;
          std::uint32_t w = 0;
          std::uint32_t h = 0;
-@@ -1212,6 +3282,109 @@ void aurora_backend_present(void) {
+@@ -1212,6 +3291,121 @@ void aurora_backend_present(void) {
          }
      }
      ++g_present_count;
@@ -2462,7 +2729,19 @@ index d94f811..84125d4 100644
 +        static int pending = 0;
 +        static int streak = 0;
 +        const int vote = aurora::gfx::gxcore::take_frame_widescreen_vote();
-+        if (g_aspect_mode == 3) {
++        static float photo = 0.f;
++        if (const float want = g_photo_aspect.load(); want > 0.f || photo > 0.f) {
++            if (want != photo) {
++                photo = want;
++                mode = -2;  // the display aspect mode applies again when it ends
++                if (want > 0.f) {
++                    g_display_aspect = want;
++                    aurora_set_display_aspect(want, true);
++                }
++            }
++        }
++        if (photo > 0.f) {
++        } else if (g_aspect_mode == 3) {
 +            if (mode != 3) {
 +                mode = 3;
 +                aurora::window::set_frame_buffer_aspect_fit(false);
@@ -2557,7 +2836,7 @@ index d94f811..84125d4 100644
      if (g_frame_pacing_log &&
          (g_present_count <= 10 || (g_present_count % 60) == 0)) {
          const AuroraStats* stats = aurora_get_stats();
-@@ -1432,6 +3605,7 @@ void aurora_backend_present(void) {
+@@ -1432,6 +3626,7 @@ void aurora_backend_present(void) {
      const unsigned long long present_fifo = g_fifo_bytes;
      g_fifo_bytes = 0;
      poll_events();
@@ -2565,7 +2844,7 @@ index d94f811..84125d4 100644
      if (!g_should_quit) {
          g_frame_open = aurora_begin_frame();
  #if GXRUNTIME_HAS_AURORA_RECOMP
-@@ -1482,7 +3656,13 @@ void aurora_backend_gx_write(u64 value, u8 size) {
+@@ -1482,7 +3677,13 @@ void aurora_backend_gx_write(u64 value, u8 size) {
          return;
      g_fifo_bytes += size;
  #if GXRUNTIME_HAS_AURORA_RECOMP
@@ -2580,7 +2859,7 @@ index d94f811..84125d4 100644
      // Record AFTER the shadow write so MEM_UPDATEs its resolves emitted
      // precede this GX_WRITE in the trace (replay reads them first), and
      // BEFORE the live-Aurora forwarding below so the pristine value is
-@@ -1673,6 +3853,7 @@ void aurora_backend_set_guest_address_resolver(
+@@ -1673,6 +3874,7 @@ void aurora_backend_set_guest_address_resolver(
              &frontend_resolver, frontend_guest_address_resolver_bridge,
              nullptr);
          g_shadow_frontend.reset(&frontend_resolver);
@@ -2588,7 +2867,7 @@ index d94f811..84125d4 100644
          g_shadow_frontend.set_packet_drain_enabled(g_shadow_frontend_enabled);
          g_shadow_packet_sink.reset();
          // Resolve packet guest addresses to host bytes through the frontend's
-@@ -1737,6 +3918,7 @@ void aurora_backend_set_xfb_black(bool black) {
+@@ -1737,6 +3939,7 @@ void aurora_backend_set_xfb_black(bool black) {
  }
  
  bool aurora_backend_pad_init(void) {
@@ -2596,7 +2875,7 @@ index d94f811..84125d4 100644
      if (PADInit() == FALSE)
          return false;
  
-@@ -1780,6 +3962,7 @@ bool aurora_backend_pad_init(void) {
+@@ -1780,6 +3983,7 @@ bool aurora_backend_pad_init(void) {
  }
  
  u32 aurora_backend_pad_read(DolPadState state[4]) {
@@ -2604,7 +2883,7 @@ index d94f811..84125d4 100644
      PADStatus status[4]{};
      const u32 motor_mask = PADRead(status);
      for (u32 i = 0; i < 4; i++) {
-@@ -1796,22 +3979,41 @@ u32 aurora_backend_pad_read(DolPadState state[4]) {
+@@ -1796,22 +4000,41 @@ u32 aurora_backend_pad_read(DolPadState state[4]) {
              .error = status[i].err,
          };
      }
@@ -2646,7 +2925,7 @@ index d94f811..84125d4 100644
      PADSetSpec(spec);
  }
  
-@@ -1841,13 +4043,16 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1841,13 +4064,16 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
          return;
      const int bytes_per_second =
          static_cast<int>(g_audio_sample_rate) * 2 * static_cast<int>(sizeof(s16));
@@ -2665,7 +2944,7 @@ index d94f811..84125d4 100644
      while (queued > max_queued_bytes && waited_ms < 20u) {
          g_audio_throttle_count++;
          if (g_audio_queue_log &&
-@@ -1860,11 +4065,51 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1860,11 +4086,51 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
                           max_queued_bytes);
          SDL_Delay(1);
          waited_ms++;
@@ -2717,7 +2996,7 @@ index d94f811..84125d4 100644
      if (g_audio_queue_log &&
          (g_audio_push_count <= 16 || (g_audio_push_count % 4000) == 0 ||
           (low_queue && g_audio_push_count - g_audio_low_log_push >= 4000))) {
-@@ -1876,6 +4121,21 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1876,6 +4142,21 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
                       g_audio_push_count, queued, queued + bytes,
                       g_audio_playing ? 1u : 0u, g_audio_throttle_count);
      }
@@ -2739,7 +3018,7 @@ index d94f811..84125d4 100644
      if (!SDL_PutAudioStreamData(g_audio_stream, samples, bytes))
          std::fprintf(stderr, "[audio] failed to queue samples: %s\n", SDL_GetError());
      else if (!g_audio_playing && queued + bytes >= prebuffer_bytes) {
-@@ -1886,10 +4146,455 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1886,10 +4167,455 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
      }
  }
  
@@ -3195,7 +3474,7 @@ index d94f811..84125d4 100644
      const DolPlatformOps ops = {
          .should_quit = aurora_backend_should_quit,
          .present = aurora_backend_present,
-@@ -1918,6 +4623,7 @@ void install_platform_ops() {
+@@ -1918,6 +4644,7 @@ void install_platform_ops() {
          .audio_set_sample_rate = aurora_backend_audio_set_sample_rate,
          .audio_push = aurora_backend_audio_push,
      };
@@ -3234,10 +3513,10 @@ index b86b214..f6b70de 100644
  AuroraBackend aurora_get_backend();
  const AuroraBackend* aurora_get_available_backends(size_t* count);
 diff --git a/graphics/aurora/include/aurora/gfx.h b/graphics/aurora/include/aurora/gfx.h
-index a13ce39..eb4d9fc 100644
+index a13ce39..d823a22 100644
 --- a/graphics/aurora/include/aurora/gfx.h
 +++ b/graphics/aurora/include/aurora/gfx.h
-@@ -29,10 +29,43 @@ typedef struct {
+@@ -29,10 +29,62 @@ typedef struct {
  } AuroraStats;
  
  const AuroraStats* aurora_get_stats();
@@ -3278,11 +3557,30 @@ index a13ce39..eb4d9fc 100644
 +int64_t aurora_get_refresh_period_ns(void);
 +void aurora_get_interp_stats(AuroraInterpStats* out);
 +
++/*
++ * Photo mode (GXRuntime recomp patch). aurora_photo_begin: hold the next
++ * frame the game draws (aurora_photo_ready once it is held); every frame drawn
++ * while paused then shows it again from a free camera (aurora_photo_set_view:
++ * rot row-major 3x3, its columns the camera's right, up and back, and x, y, z
++ * its position, in the game camera's view space; zoom > 1 closer; projected
++ * for aspect, 0 for the game's; the HUD left out when hide_hud). aurora_photo_rehold: hold a frame again after
++ * skip more (after a change the frame must be drawn for; a new size lands a
++ * frame late). aurora_photo_save: write the
++ * next shown picture as a PNG at path (aurora_photo_saved counts the saves).
++ */
++void aurora_photo_begin(void);
++void aurora_photo_rehold(int skip);
++bool aurora_photo_ready(void);
++void aurora_photo_end(void);
++void aurora_photo_set_view(const float rot[9], float x, float y, float z, float zoom, float aspect, bool hide_hud);
++void aurora_photo_save(const char* path);
++unsigned aurora_photo_saved(void);
++
  /*
   * EFB readback (GXRuntime recomp patch): arm a one-shot copy of the next
   * submitted frame's present source; take returns tightly packed RGBA8 rows
 diff --git a/graphics/aurora/lib/aurora.cpp b/graphics/aurora/lib/aurora.cpp
-index b09ef4d..a5d9b06 100644
+index b09ef4d..7f6f594 100644
 --- a/graphics/aurora/lib/aurora.cpp
 +++ b/graphics/aurora/lib/aurora.cpp
 @@ -1,6 +1,17 @@
@@ -3663,7 +3961,7 @@ index b09ef4d..a5d9b06 100644
  void end_frame() noexcept {
    ZoneScoped;
  #ifdef AURORA_ENABLE_GX
-@@ -257,10 +598,38 @@ void end_frame() noexcept {
+@@ -257,10 +598,43 @@ void end_frame() noexcept {
  
    // E7 present-from-XFB: VI current → GPU Virtual-XFB, else YUYV-from-RAM
    // decode, else EFB-direct (Strikers when no RAM XFB / match fails).
@@ -3672,7 +3970,9 @@ index b09ef4d..a5d9b06 100644
 +  // had fallen back to the live EFB). Eternal Darkness hides a cutscene's
 +  // first frame with it (the old scene with the new letterbox borders). The
 +  // XFB in guest RAM still gets the display copy: VI black leaves it alone.
-+  const bool viBlack = vi::xfb_black();
++  // Photo mode's steps (the game drawing a frame or two for a new size): black,
++  // not the game's own camera for a moment.
++  const bool viBlack = vi::xfb_black() || gfx::photo_stepping();
 +  const std::uint32_t xfbAddr = vi::current_xfb();
 +  // Eternal Darkness (PAL, 528-line EFB): the Virtual-XFB texture from its
 +  // display copies comes out empty, so the window presents the EFB directly.
@@ -3682,9 +3982,12 @@ index b09ef4d..a5d9b06 100644
 +  // the VI would scan out), not the live EFB: in frames with texture copies
 +  // and further passes the live EFB at present time did not match the frame.
 +  static const bool present_live_efb = std::getenv("ED_PRESENT_LIVE_EFB") != nullptr;
++  // Photo mode: the held frame's own display copy, which its replays redraw
++  // (the VI may point at the frame before it).
    const gfx::TextureHandle* xfbTex =
 -      xfbAddr != 0u ? gfx::gxcore::lookup_xfb_texture(xfbAddr) : nullptr;
-+      xfbAddr != 0u && present_xfb ? gfx::gxcore::lookup_xfb_texture(xfbAddr)
++      gfx::photo_ready() ? gfx::gxcore::last_display_copy()
++      : xfbAddr != 0u && present_xfb ? gfx::gxcore::lookup_xfb_texture(xfbAddr)
 +      : !present_live_efb ? (xfbAddr != 0u ? gfx::gxcore::display_copy_for(xfbAddr)
 +                                           : gfx::gxcore::last_display_copy())
 +                          : nullptr;
@@ -3704,7 +4007,7 @@ index b09ef4d..a5d9b06 100644
    const uint32_t contentW =
        xfbTex && *xfbTex ? (*xfbTex)->size.width : efbSource.size.width;
    const uint32_t contentH =
-@@ -282,28 +651,37 @@ void end_frame() noexcept {
+@@ -282,28 +656,37 @@ void end_frame() noexcept {
    // Capture XFB handle by value for the worker lambda (shared_ptr).
    gfx::TextureHandle xfbHandle = (xfbTex && *xfbTex) ? *xfbTex : nullptr;
  
@@ -3757,7 +4060,7 @@ index b09ef4d..a5d9b06 100644
        wgpu::BindGroup presentBindGroup;
        if (rmlBindGroup && !rmlOverlay) {
          presentBindGroup = rmlBindGroup;
-@@ -318,7 +696,7 @@ void end_frame() noexcept {
+@@ -318,7 +701,7 @@ void end_frame() noexcept {
          };
          presentBindGroup = webgpu::create_copy_bind_group(xfbSrc);
        } else {
@@ -3766,7 +4069,7 @@ index b09ef4d..a5d9b06 100644
          presentBindGroup = webgpu::create_copy_bind_group(resampledSource);
        }
        {
-@@ -333,20 +711,30 @@ void end_frame() noexcept {
+@@ -333,20 +716,30 @@ void end_frame() noexcept {
              .label = xfbHandle ? "XFB present render pass" : "EFB copy render pass",
              .colorAttachmentCount = attachments.size(),
              .colorAttachments = attachments.data(),
@@ -3808,7 +4111,7 @@ index b09ef4d..a5d9b06 100644
          }
          pass.End();
        }
-@@ -362,67 +750,227 @@ void end_frame() noexcept {
+@@ -362,67 +755,227 @@ void end_frame() noexcept {
              .label = "ImGui render pass",
              .colorAttachmentCount = attachments.size(),
              .colorAttachments = attachments.data(),
@@ -4057,7 +4360,7 @@ index b09ef4d..a5d9b06 100644
      gfx::after_submit();
  
      TracyPlotConfig("aurora: lastVertSize", tracy::PlotFormatType::Memory, false, true, 0);
-@@ -440,7 +988,7 @@ void end_frame() noexcept {
+@@ -440,7 +993,7 @@ void end_frame() noexcept {
      TracyPlot("aurora: lastIndexSize", static_cast<int64_t>(gfx::g_stats.lastIndexSize));
      TracyPlot("aurora: lastStorageSize", static_cast<int64_t>(gfx::g_stats.lastStorageSize));
      TracyPlot("aurora: lastTextureUploadSize", static_cast<int64_t>(gfx::g_stats.lastTextureUploadSize));
@@ -4066,12 +4369,31 @@ index b09ef4d..a5d9b06 100644
  
  #endif
  }
-@@ -475,6 +1023,38 @@ void aurora_set_resampler(AuroraSampler sampler) {
+@@ -475,6 +1028,57 @@ void aurora_set_resampler(AuroraSampler sampler) {
    (void)sampler;
  #endif
  }
 +#ifdef AURORA_ENABLE_GX
 +void aurora_interp_set_wanted(bool wanted) { aurora::gfx::interp_set_wanted(wanted); }
++void aurora_photo_begin(void) { aurora::gfx::photo_begin(); }
++void aurora_photo_rehold(int skip) { aurora::gfx::photo_rehold(skip); }
++bool aurora_photo_ready(void) { return aurora::gfx::photo_ready(); }
++void aurora_photo_end(void) { aurora::gfx::photo_end(); }
++void aurora_photo_set_view(const float rot[9], float x, float y, float z, float zoom, float aspect, bool hide_hud) {
++  aurora::gfx::PhotoView v;
++  for (int i = 0; i < 3; ++i)
++    for (int j = 0; j < 3; ++j)
++      v.rot[i][j] = rot[i * 3 + j];
++  v.pos[0] = x;
++  v.pos[1] = y;
++  v.pos[2] = z;
++  v.zoom = zoom;
++  v.aspect = aspect;
++  v.hideHud = hide_hud;
++  aurora::gfx::photo_set_view(v);
++}
++void aurora_photo_save(const char* path) { aurora::gfx::photo_save(path); }
++unsigned aurora_photo_saved(void) { return aurora::gfx::photo_saved(); }
 +void aurora_interp_set_phases(const float* phases, uint32_t count) {
 +  aurora::g_interpPhases.assign(phases, phases + count);
 +}
@@ -4173,19 +4495,37 @@ index 421bd9e..0cbf52d 100644
 +}
  } // namespace aurora::webgpu::utils
 diff --git a/graphics/aurora/lib/gfx/common.cpp b/graphics/aurora/lib/gfx/common.cpp
-index a64dd2d..d602fdc 100644
+index a64dd2d..28be905 100644
 --- a/graphics/aurora/lib/gfx/common.cpp
 +++ b/graphics/aurora/lib/gfx/common.cpp
-@@ -10,6 +10,8 @@
+@@ -10,6 +10,10 @@
  #include "../gx/pipeline.hpp"
  #ifdef AURORA_ENABLE_GXCORE
  #include "gxcore_draw.hpp"
 +#include "glow.hpp"
 +#include "interp.hpp"
++#include "png_io.hpp"
++#include "xfb_present.hpp"
  #endif
  #ifdef AURORA_ENABLE_RMLUI
  #include "../rmlui/pipeline.hpp"
-@@ -207,6 +209,9 @@ struct RenderPass {
+@@ -22,9 +26,15 @@
+ #include "texture.hpp"
+ #include "../window.hpp"
+ 
++#include <algorithm>
+ #include <atomic>
+ #include <chrono>
++#include <cmath>
++#include <cstdio>
++#include <cstring>
+ #include <deque>
++#include <filesystem>
++#include <functional>
+ #include <mutex>
+ #include <optional>
+ #include <ranges>
+@@ -207,6 +217,9 @@ struct RenderPass {
    plane_capture::Key planeKey{};
    plane_capture::CopyMeta planeCopy{};
    bool sealed = false;
@@ -4195,7 +4535,7 @@ index a64dd2d..d602fdc 100644
    std::vector<tex_palette_conv::ConvRequest> paletteConvs;
  };
  
-@@ -253,6 +258,10 @@ static std::array<FramePacket, FrameSlotCount> g_framePackets;
+@@ -253,6 +266,10 @@ static std::array<FramePacket, FrameSlotCount> g_framePackets;
  static FramePacket* g_recordingFrame = nullptr;
  static size_t g_recordingFrameSlot = 0;
  static uint64_t g_nextFrameId = 1;
@@ -4206,7 +4546,7 @@ index a64dd2d..d602fdc 100644
  static render_worker::FrameSlotPool g_frameSlots{FrameSlotCount};
  static render_worker::FrameSlotPool g_stagingSlots{StagingBufferCount};
  static u32 g_currentRenderPass = UINT32_MAX;
-@@ -338,6 +347,8 @@ static void wait_for_gpu_progress(std::chrono::nanoseconds sleepDuration) {
+@@ -338,6 +355,8 @@ static void wait_for_gpu_progress(std::chrono::nanoseconds sleepDuration) {
    std::this_thread::sleep_for(sleepDuration);
  }
  
@@ -4215,7 +4555,7 @@ index a64dd2d..d602fdc 100644
  static void pace_frame_start() {
    ZoneScopedN("Frame start pacing");
    if (g_frameSlots.free_count() == FrameSlotCount) {
-@@ -475,8 +486,10 @@ static void seal_pass(FramePacket& frame, uint32_t passIndex) {
+@@ -475,8 +494,10 @@ static void seal_pass(FramePacket& frame, uint32_t passIndex) {
  }
  
  static void encode_op(wgpu::CommandEncoder& cmd, FramePacket& frame, const FrameOp& op);
@@ -4227,7 +4567,7 @@ index a64dd2d..d602fdc 100644
  static void expire_cached_bind_groups();
  static void push_command(CommandType type, const Command::Data& data);
  
-@@ -652,6 +665,26 @@ gx::DrawData* get_last_draw_command() {
+@@ -652,6 +673,26 @@ gx::DrawData* get_last_draw_command() {
    return &last.data.draw.gx;
  }
  
@@ -4254,7 +4594,7 @@ index a64dd2d..d602fdc 100644
  static void push_draw_command(ShaderDrawCommand data) {
    push_command(CommandType::Draw, Command::Data{.draw = data});
    ++g_drawCallCount;
-@@ -692,9 +725,10 @@ PipelineRef pipeline_ref(const clear::PipelineConfig& config) {
+@@ -692,9 +733,10 @@ PipelineRef pipeline_ref(const clear::PipelineConfig& config) {
  
  void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool clearAlpha, bool clearDepth,
                     Vec4<float> clearColorValue, float clearDepthValue, GXTexFmt resolveFormat,
@@ -4266,7 +4606,7 @@ index a64dd2d..d602fdc 100644
    // GPNF §7: if plane capture armed for this copy, tag the pass for pre-resolve
    // EFB color + depth snapshot at encode time.
    {
-@@ -781,6 +815,65 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
+@@ -781,6 +823,65 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
    push_command(CommandType::SetScissor, Command::Data{.setScissor = g_cachedScissor});
  }
  
@@ -4332,7 +4672,7 @@ index a64dd2d..d602fdc 100644
  void queue_palette_conv(tex_palette_conv::ConvRequest req) {
    auto& renderPass = current_render_passes()[g_currentRenderPass];
    ASSERT(!renderPass.sealed, "Attempted to append palette conversion to sealed render pass {}", g_currentRenderPass);
-@@ -1271,6 +1364,9 @@ bool begin_frame() {
+@@ -1271,6 +1372,9 @@ bool begin_frame() {
    push_command(CommandType::SetViewport, Command::Data{.setViewport = g_cachedViewport});
    push_command(CommandType::SetScissor, Command::Data{.setScissor = g_cachedScissor});
    begin_pipeline_frame();
@@ -4342,7 +4682,7 @@ index a64dd2d..d602fdc 100644
    render_worker::enqueue_begin_frame(frame.frameId, [frameSlot] {
      static constexpr wgpu::CommandEncoderDescriptor EncoderDescriptor{.label = "Redraw encoder"};
      g_framePackets[frameSlot].encoder = g_device.CreateCommandEncoder(&EncoderDescriptor);
-@@ -1309,7 +1405,60 @@ void finish() {
+@@ -1309,7 +1413,353 @@ void finish() {
    }
  }
  
@@ -4383,6 +4723,299 @@ index a64dd2d..d602fdc 100644
 +  return outputs;
 +}
 +
++// GXRuntime recomp patch: photo mode. The game is paused (the frontend holds
++// it at a frame boundary); its last frame's packet is kept, and every frame we
++// draw while paused replays it with uniforms rebuilt for a free camera
++// (interp::photo_build), then shows its display copy, which a photo reads
++// back. The packet's staging memory is reused at once, so the replay uploads
++// nothing: the GPU's own buffers still hold the frame, since nothing else
++// draws into them while the game is paused.
++namespace photo {
++struct Work {
++  bool hold = false;          // this frame becomes the held one
++  bool drop = false;          // let the held one go
++  interp::Uniforms uniforms;  // replay the held frame with these
++  std::string savePath;       // ... and save its picture there
++};
++
++std::mutex g_mutex;
++bool g_active = false, g_holdNext = false, g_drop = false;
++std::atomic<bool> g_stepping{false};  // the game draws frames for a change: shown black
++int g_holdSkip = 0;  // game frames to let pass before holding one (a resize lands a frame late)
++std::atomic<bool> g_ready{false};
++size_t g_uniformSize = 0;
++PhotoView g_view;
++std::string g_savePath;
++std::atomic<unsigned> g_saved{0};
++// Render worker only.
++FramePacket g_packet;
++bool g_held = false;
++// The bind groups cached when the frame was held (find_bind_group's fallback;
++// read under g_bindGroupCacheMutex).
++absl::flat_hash_map<BindGroupRef, wgpu::BindGroup> g_bindGroups;
++
++// The photo's projection: the game's (zoomed about the middle of the screen,
++// and widened or narrowed to the shown aspect) after the free camera's view
++// of the game's view space: R^T (p - t).
++void projection(const float in[4][4], float out[4][4], const void* user) {
++  const PhotoView& v = *static_cast<const PhotoView*>(user);
++  float p[4][4];
++  std::memcpy(p, in, sizeof p);
++  float xs = v.zoom, ys = v.zoom;
++  if (v.aspect > 0.f && in[0][0] != 0.f)
++    xs *= in[1][1] / (in[0][0] * v.aspect);
++  for (int j = 0; j < 4; ++j) {
++    p[0][j] *= xs;
++    p[1][j] *= ys;
++  }
++  const auto& r = v.rot;  // columns: the camera's right, up and back
++  float d[4][4]{};
++  for (int i = 0; i < 3; ++i) {
++    for (int j = 0; j < 3; ++j)
++      d[i][j] = r[j][i];
++    d[i][3] = -(r[0][i] * v.pos[0] + r[1][i] * v.pos[1] + r[2][i] * v.pos[2]);
++  }
++  d[3][3] = 1.f;
++  for (int i = 0; i < 4; ++i)
++    for (int j = 0; j < 4; ++j) {
++      float sum = 0.f;
++      for (int k = 0; k < 4; ++k)
++        sum += p[i][k] * d[k][j];
++      out[i][j] = sum;
++    }
++}
++
++// A lens flare's light, from the game's screen to the photo's: its direction
++// in the game camera's view (z = -1: the light is far, a window's sun) seen
++// through the photo's projection with no translation (w = 0); the screen's
++// turn and stretch about its middle that takes it there, worked in the shown
++// proportions so the sprites keep their shapes.
++bool flare(const float light[2], const float scene[4][4], float m[2][2], const void* user) {
++  const PhotoView& v = *static_cast<const PhotoView*>(user);
++  if (scene[0][0] == 0.f || scene[1][1] == 0.f)
++    return false;
++  const float d[4]{(light[0] + scene[0][2] - scene[0][3]) / scene[0][0],
++                   (light[1] + scene[1][2] - scene[1][3]) / scene[1][1], -1.f, 0.f};
++  float q[4][4];
++  projection(scene, q, user);
++  float c[4];
++  for (int i = 0; i < 4; ++i)
++    c[i] = q[i][0] * d[0] + q[i][1] * d[1] + q[i][2] * d[2] + q[i][3] * d[3];
++  if (c[3] <= 1e-4f)
++    return false;  // behind the camera
++  const float to[2]{c[0] / c[3], c[1] / c[3]};
++  if (std::fabs(to[0]) > 1.4f || std::fabs(to[1]) > 1.4f)
++    return false;  // well off the screen
++  const float a = v.aspect > 0.f ? v.aspect : 16.f / 9.f;
++  const float fx = light[0] * a, fy = light[1], tx = to[0] * a, ty = to[1];
++  const float from = std::sqrt(fx * fx + fy * fy);
++  if (from < 1e-3f) {
++    m[0][0] = m[1][1] = 1.f;
++    m[0][1] = m[1][0] = 0.f;
++    return true;
++  }
++  const float scale = std::sqrt(tx * tx + ty * ty) / from;
++  const float turn = std::atan2(ty, tx) - std::atan2(fy, fx);
++  const float r00 = scale * std::cos(turn), r01 = -scale * std::sin(turn), r10 = scale * std::sin(turn),
++              r11 = scale * std::cos(turn);
++  m[0][0] = r00;
++  m[0][1] = r01 / a;
++  m[1][0] = r10 * a;
++  m[1][1] = r11;
++  return true;
++}
++
++// Main thread, at the end of a frame: what the render worker does for it.
++Work frame_work(const FramePacket& frame) {
++  Work work;
++#ifdef AURORA_ENABLE_GXCORE
++  std::lock_guard lock{g_mutex};
++  if (g_drop) {
++    work.drop = true;
++    g_drop = false;
++  }
++  if (!g_active)
++    return work;
++  if (g_holdNext) {
++    if (g_holdSkip > 0) {
++      if (interp::photo_capture())
++        --g_holdSkip;
++      return work;
++    }
++    if (interp::photo_capture()) {
++      std::fprintf(stderr, "[photo] held a frame (%zu bytes of uniforms)\n", frame.uniforms.size());
++      work.hold = true;
++      g_holdNext = false;
++      g_uniformSize = frame.uniforms.size();
++    }
++    return work;
++  }
++  if (g_ready.load() && g_uniformSize != 0) {
++    work.uniforms = interp::photo_build(g_uniformSize, projection, &g_view, g_view.hideHud, flare);
++    work.savePath = std::move(g_savePath);
++    g_savePath.clear();
++  }
++#endif
++  return work;
++}
++
++void write_png(std::string path, std::vector<uint8_t> rgb, uint32_t w, uint32_t h) {
++  if (!png::save_png_rgb(std::filesystem::path(path), rgb.data(), w, h)) {
++    std::fprintf(stderr, "[photo] could not write %s\n", path.c_str());
++    return;
++  }
++  std::fprintf(stderr, "[photo] saved %s (%ux%u)\n", path.c_str(), w, h);
++  ++g_saved;
++}
++
++// Render worker, after the replay is encoded: copy the shown picture out for
++// a PNG (encoded into cmd; read once the submit is done).
++std::function<void()> save(const wgpu::CommandEncoder& cmd, std::string path) {
++#ifdef AURORA_ENABLE_GXCORE
++  const TextureHandle* shown = gxcore::last_display_copy();
++  if (shown == nullptr || !*shown)
++    return {};
++  const wgpu::Texture texture = (*shown)->texture;
++  const uint32_t w = texture.GetWidth(), h = texture.GetHeight();
++  const auto format = texture.GetFormat();
++  const bool half = format == wgpu::TextureFormat::RGBA16Float;
++  const bool bgra = format == wgpu::TextureFormat::BGRA8Unorm || format == wgpu::TextureFormat::BGRA8UnormSrgb;
++  const uint32_t bytesPerRow = (w * (half ? 8u : 4u) + 255u) & ~255u;
++  const uint64_t size = static_cast<uint64_t>(bytesPerRow) * h;
++  const wgpu::BufferDescriptor desc{.label = "Photo readback", .usage = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst, .size = size};
++  wgpu::Buffer buffer = g_device.CreateBuffer(&desc);
++  const wgpu::TexelCopyTextureInfo src{.texture = texture};
++  const wgpu::TexelCopyBufferInfo dst{.layout = {.offset = 0, .bytesPerRow = bytesPerRow, .rowsPerImage = h}, .buffer = buffer};
++  const wgpu::Extent3D extent{.width = w, .height = h, .depthOrArrayLayers = 1};
++  cmd.CopyTextureToBuffer(&src, &dst, &extent);
++  return [buffer, path = std::move(path), w, h, bytesPerRow, size, half, bgra]() mutable {
++    buffer.MapAsync(wgpu::MapMode::Read, 0, size, wgpu::CallbackMode::AllowSpontaneous,
++                    [buffer, path, w, h, bytesPerRow, size, half, bgra](wgpu::MapAsyncStatus status, wgpu::StringView) {
++                      if (status != wgpu::MapAsyncStatus::Success) {
++                        std::fprintf(stderr, "[photo] readback failed\n");
++                        return;
++                      }
++                      const auto* data = static_cast<const uint8_t*>(buffer.GetConstMappedRange(0, size));
++                      std::vector<uint8_t> rgb(static_cast<size_t>(w) * h * 3u);
++                      for (uint32_t y = 0; y < h; ++y) {
++                        const uint8_t* row = data + static_cast<size_t>(y) * bytesPerRow;
++                        for (uint32_t x = 0; x < w; ++x) {
++                          uint8_t* o = &rgb[(static_cast<size_t>(y) * w + x) * 3u];
++                          if (half) {
++                            for (int c = 0; c < 3; ++c) {
++                              const uint8_t* q = row + x * 8u + c * 2u;
++                              const uint16_t hv = static_cast<uint16_t>(q[0] | (q[1] << 8));
++                              const uint32_t e = (hv >> 10) & 0x1Fu, m = hv & 0x3FFu;
++                              float v = e == 0 ? std::ldexp(static_cast<float>(m), -24)
++                                        : e == 31 ? 1.f
++                                                  : std::ldexp(static_cast<float>(m | 0x400u), static_cast<int>(e) - 25);
++                              if (hv & 0x8000u)
++                                v = 0.f;
++                              o[c] = static_cast<uint8_t>(std::lround(std::clamp(v, 0.f, 1.f) * 255.f));
++                            }
++                          } else {
++                            const uint8_t* q = row + x * 4u;
++                            o[0] = bgra ? q[2] : q[0];
++                            o[1] = q[1];
++                            o[2] = bgra ? q[0] : q[2];
++                          }
++                        }
++                      }
++                      buffer.Unmap();
++                      std::thread(write_png, path, std::move(rgb), w, h).detach();
++                    });
++  };
++#else
++  return {};
++#endif
++}
++
++// Render worker, before the frame's own encoder: let go of, or replay (and
++// save), the held frame.
++void before_present(Work& work) {
++  if (work.drop) {
++    g_packet = {};
++    g_held = false;
++    std::lock_guard lock{g_bindGroupCacheMutex};
++    g_bindGroups.clear();
++  }
++  if (!work.uniforms || !g_held)
++    return;
++  static constexpr wgpu::CommandEncoderDescriptor Descriptor{.label = "Photo replay encoder"};
++  auto cmd = g_device.CreateCommandEncoder(&Descriptor);
++  g_queue.WriteBuffer(g_uniformBuffer, 0, work.uniforms->data(), work.uniforms->size());
++  encode_between(cmd, g_packet, false);
++  std::function<void()> read = work.savePath.empty() ? std::function<void()>{} : save(cmd, work.savePath);
++  const auto buffer = cmd.Finish();
++  g_queue.Submit(1, &buffer);
++  if (read)
++    read();
++}
++
++// Render worker, as the frame's packet is let go: keep it when held.
++void keep(Work& work, FramePacket& packet) {
++  if (!work.hold)
++    return;
++  g_packet = std::move(packet);
++  {
++    std::lock_guard lock{g_bindGroupCacheMutex};
++    g_bindGroups.clear();
++    for (const auto& [id, cached] : g_cachedBindGroups)
++      g_bindGroups.emplace(id, cached.bindGroup);
++  }
++  g_held = true;
++  g_ready = true;
++  g_stepping = false;
++}
++} // namespace photo
++
++void photo_begin() noexcept {
++#ifdef AURORA_ENABLE_GXCORE
++  std::lock_guard lock{photo::g_mutex};
++  photo::g_active = true;
++  photo::g_holdNext = true;
++  photo::g_holdSkip = 0;
++  photo::g_ready = false;
++  photo::g_view = PhotoView{};
++  interp::set_photo(true);
++#endif
++}
++void photo_rehold(int skip) noexcept {
++  std::lock_guard lock{photo::g_mutex};
++  if (!photo::g_active)
++    return;
++  photo::g_holdNext = true;
++  photo::g_holdSkip = skip;
++  photo::g_stepping = true;
++  photo::g_ready = false;
++}
++bool photo_ready() noexcept { return photo::g_ready.load(); }
++bool photo_stepping() noexcept { return photo::g_stepping.load(); }
++bool photo_active() noexcept {
++  std::lock_guard lock{photo::g_mutex};
++  return photo::g_active;
++}
++void photo_end() noexcept {
++#ifdef AURORA_ENABLE_GXCORE
++  std::lock_guard lock{photo::g_mutex};
++  photo::g_active = false;
++  photo::g_holdNext = false;
++  photo::g_ready = false;
++  photo::g_stepping = false;
++  photo::g_drop = true;
++  interp::set_photo(false);
++#endif
++}
++void photo_set_view(const PhotoView& view) noexcept {
++  std::lock_guard lock{photo::g_mutex};
++  photo::g_view = view;
++}
++void photo_save(const char* path) noexcept {
++  std::lock_guard lock{photo::g_mutex};
++  photo::g_savePath = path != nullptr ? path : "";
++}
++unsigned photo_saved() noexcept { return photo::g_saved.load(); }
++
 +void interp_set_wanted(bool on) noexcept {
 +#ifdef AURORA_ENABLE_GXCORE
 +  interp::set_wanted(on);
@@ -4404,14 +5037,22 @@ index a64dd2d..d602fdc 100644
    ZoneScoped;
    ASSERT(!g_inOffscreen, "end_frame called while offscreen rendering is active");
    ASSERT(g_currentRenderPass == UINT32_MAX, "end_frame called before finish finalized the current render pass");
-@@ -1352,10 +1501,33 @@ void end_frame(EndFrameCallback callback) {
+@@ -1320,6 +1770,7 @@ void end_frame(EndFrameCallback callback) {
+     TracyPlot("aurora: cpuFrameTimeMs", cpuFrameTimeMs);
+   }
+   auto& frame = current_frame_packet();
++  photo::Work photoWork = photo::frame_work(frame);
+   frame.stats.drawCallCount = g_drawCallCount;
+   frame.stats.mergedDrawCallCount = g_mergedDrawCallCount;
+   frame.stats.lastVertSize = frame.verts.size();
+@@ -1352,12 +1803,37 @@ void end_frame(EndFrameCallback callback) {
  #endif
  
    const size_t stagingSlot = frame.stagingBuffer;
 -  render_worker::enqueue_end_frame(frameId, [frameSlot, stagingSlot, callback = std::move(callback)]() mutable {
 +  g_lastEndedFrameId.store(frameId);
 +  render_worker::enqueue_end_frame(frameId, [frameSlot, stagingSlot, frameId, callback = std::move(callback),
-+                                             outputs = std::move(outputs)]() mutable {
++                                             outputs = std::move(outputs), photoWork = std::move(photoWork)]() mutable {
      auto& packet = g_framePackets[frameSlot];
      g_stagingBuffers[stagingSlot].Unmap();
      s_mappingStates[stagingSlot].store(BufferMapState::Unmapped, std::memory_order_release);
@@ -4436,10 +5077,14 @@ index a64dd2d..d602fdc 100644
 +      uploaded = true;
 +      callback(between, PresentInfo{.present = true, .real = false});
 +    }
++    photo::before_present(photoWork);
      auto encoder = std::move(packet.encoder);
      const auto stats = packet.stats;
++    photo::keep(photoWork, packet);
      packet = {};
-@@ -1367,7 +1539,12 @@ void end_frame(EndFrameCallback callback) {
+     g_stats.drawCallCount = stats.drawCallCount;
+     g_stats.mergedDrawCallCount = stats.mergedDrawCallCount;
+@@ -1367,7 +1843,12 @@ void end_frame(EndFrameCallback callback) {
      g_stats.lastStorageSize = stats.lastStorageSize;
      g_stats.lastTextureUploadSize = stats.lastTextureUploadSize;
      if (callback) {
@@ -4453,7 +5098,7 @@ index a64dd2d..d602fdc 100644
      }
      g_frameSlots.release(frameSlot);
      expire_cached_bind_groups();
-@@ -1561,7 +1738,46 @@ static void encode_op(wgpu::CommandEncoder& cmd, FramePacket& frame, const Frame
+@@ -1561,7 +2042,46 @@ static void encode_op(wgpu::CommandEncoder& cmd, FramePacket& frame, const Frame
    }
  }
  
@@ -4501,7 +5146,7 @@ index a64dd2d..d602fdc 100644
    ZoneScoped;
    if (!passInfo.sealed) {
      return;
-@@ -1570,7 +1786,7 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
+@@ -1570,7 +2090,7 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
    for (const auto& conv : passInfo.paletteConvs) {
      tex_palette_conv::run(cmd, conv);
    }
@@ -4510,7 +5155,7 @@ index a64dd2d..d602fdc 100644
      // Skip intermediate EFB render passes without observable output.
      return;
    }
-@@ -1622,15 +1838,26 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
+@@ -1622,15 +2142,26 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
    auto pass = cmd.BeginRenderPass(&renderPassDescriptor);
    render_pass(pass, frame, passInfo);
    pass.End();
@@ -4539,7 +5184,7 @@ index a64dd2d..d602fdc 100644
      depth_peek::encode_frame_snapshot(cmd, passInfo.copySourceDepthView, passInfo.targetSize, passInfo.msaaSamples);
    }
  
-@@ -1682,7 +1909,78 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
+@@ -1682,7 +2213,78 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
        };
        cmd.CopyTextureToTexture(&src, &dst, &size);
      }
@@ -4618,7 +5263,7 @@ index a64dd2d..d602fdc 100644
  }
  
  void after_submit() noexcept {
-@@ -1892,8 +2190,14 @@ Range push_indices(const uint8_t* data, size_t length, size_t alignment) {
+@@ -1892,8 +2494,14 @@ Range push_indices(const uint8_t* data, size_t length, size_t alignment) {
  
  Range push_uniform(const uint8_t* data, size_t length) {
    ZoneScoped;
@@ -4635,8 +5280,29 @@ index a64dd2d..d602fdc 100644
  }
  
  Range push_storage(const uint8_t* data, size_t length) {
+@@ -1935,7 +2543,19 @@ BindGroupRef bind_group_ref(const WGPUBindGroupDescriptor& descriptor) {
+ wgpu::BindGroup find_bind_group(BindGroupRef id) {
+   std::lock_guard lock{g_bindGroupCacheMutex};
+   const auto it = g_cachedBindGroups.find(id);
+-  CHECK(it != g_cachedBindGroups.end(), "get_bind_group: failed to locate {:x}", id);
++  if (it == g_cachedBindGroups.end()) UNLIKELY {
++    // GXRuntime recomp patch: photo mode's held frame keeps its own (the
++    // cache lets go of what no frame has used for a while); a miss otherwise
++    // read past the map's end in a release build, where CHECK is nothing.
++    if (const auto held = photo::g_bindGroups.find(id); held != photo::g_bindGroups.end())
++      return held->second;
++    static bool s_logged = false;
++    if (!s_logged) {
++      s_logged = true;
++      std::fprintf(stderr, "[gfx] bind group %llx not found\n", static_cast<unsigned long long>(id));
++    }
++    return {};
++  }
+   return it->second.bindGroup;
+ }
+ 
 diff --git a/graphics/aurora/lib/gfx/common.hpp b/graphics/aurora/lib/gfx/common.hpp
-index 37acf2b..7065a1c 100644
+index 37acf2b..e98503f 100644
 --- a/graphics/aurora/lib/gfx/common.hpp
 +++ b/graphics/aurora/lib/gfx/common.hpp
 @@ -1,5 +1,6 @@
@@ -4684,7 +5350,7 @@ index 37acf2b..7065a1c 100644
  
  enum class ShaderType : uint8_t {
    Clear = 0,
-@@ -252,8 +273,23 @@ void shutdown();
+@@ -252,8 +273,43 @@ void shutdown();
  
  bool begin_frame();
  void finish();
@@ -4695,6 +5361,26 @@ index 37acf2b..7065a1c 100644
 +// phases: this frame alone, as without interpolation.
 +std::vector<FrameOutput> plan_outputs(const float* phases, size_t count);
 +void interp_set_wanted(bool on) noexcept;
++
++// GXRuntime recomp patch: photo mode (aurora_photo_*, common.cpp photo::).
++struct PhotoView {
++  // The free camera's right, up and back (the columns) and its position, in
++  // the game camera's view space (game units).
++  float rot[3][3]{{1.f, 0.f, 0.f}, {0.f, 1.f, 0.f}, {0.f, 0.f, 1.f}};
++  float pos[3]{0.f, 0.f, 0.f};
++  float zoom = 1.f;                // > 1 closer
++  float aspect = 0.f;              // the shown aspect to project for (0: the game's)
++  bool hideHud = true;
++};
++void photo_begin() noexcept;
++void photo_rehold(int skip) noexcept;
++bool photo_ready() noexcept;
++bool photo_stepping() noexcept;
++bool photo_active() noexcept;
++void photo_end() noexcept;
++void photo_set_view(const PhotoView& view) noexcept;
++void photo_save(const char* path) noexcept;
++unsigned photo_saved() noexcept;
 +struct InterpStats {
 +  uint32_t draws, matched, loose, moved, jumped;
 +  int result; // 0 blended, 1 still, 2 cut, 3 no previous frame
@@ -4709,7 +5395,7 @@ index 37acf2b..7065a1c 100644
  void render_pass(const wgpu::RenderPassEncoder& pass, uint32_t idx);
  void after_submit() noexcept;
  void gpu_synchronize();
-@@ -276,9 +312,22 @@ struct EfbCopyFilterParams {
+@@ -276,9 +332,22 @@ struct EfbCopyFilterParams {
    std::uint32_t filter_row[3]{0, 64, 0};
  };
  
@@ -7569,10 +8255,10 @@ index 0a23a3f..83fac70 100644
  unsigned long long dst_alpha_fallback_count() noexcept;
 diff --git a/graphics/aurora/lib/gfx/interp.cpp b/graphics/aurora/lib/gfx/interp.cpp
 new file mode 100644
-index 0000000..c7937eb
+index 0000000..96160e0
 --- /dev/null
 +++ b/graphics/aurora/lib/gfx/interp.cpp
-@@ -0,0 +1,392 @@
+@@ -0,0 +1,584 @@
 +#include "interp.hpp"
 +
 +#include <gxruntime/gxcore/shader.hpp>
@@ -7581,6 +8267,7 @@ index 0000000..c7937eb
 +#include <xxhash.h>
 +
 +#include <algorithm>
++#include <array>
 +#include <cmath>
 +#include <cstring>
 +#include <utility>
@@ -7596,6 +8283,13 @@ index 0000000..c7937eb
 +  uint64_t loose; // the same without the vertices
 +  uint32_t vs;    // VertexShaderConstants offset in the frame's uniforms
 +  uint32_t xf;    // VertexSharedConstants offset
++  bool screenWide = false; // photo mode: an orthographic draw over (nearly) the whole screen
++  bool addsLight = false;  // photo mode: blended onto the screen with dst factor One (a lens flare)
++  // Photo mode, for its log (ED_PHOTO_LOG): an orthographic draw's blend
++  // (enable, src, dst), texture, vertex count and where it lands on screen.
++  uint8_t blend[3]{};
++  uint32_t tex = 0, verts = 0;
++  float box[4]{};
 +};
 +
 +struct Frame {
@@ -7616,6 +8310,8 @@ index 0000000..c7937eb
 +};
 +
 +bool g_wanted = false;
++bool g_photo = false;     // photo mode: frames kept to be held (set_photo)
++Frame g_photoFrame;       // the held frame's draws and uniforms
 +bool g_recording = false;
 +bool g_havePrev = false;
 +Frame g_frames[2];
@@ -7715,7 +8411,7 @@ index 0000000..c7937eb
 +  g_havePrev = g_recording;
 +  if (g_recording)
 +    g_cur ^= 1;
-+  g_recording = g_wanted;
++  g_recording = g_wanted || g_photo;
 +  Frame& f = g_frames[g_cur];
 +  f.uniforms.clear();
 +  f.draws.clear();
@@ -7743,8 +8439,14 @@ index 0000000..c7937eb
 +  if (!g_recording)
 +    return;
 +  auto& draws = g_frames[g_cur].draws;
++  // Photo mode: a draw that adds light (a lens flare, a glint) is the scene's,
++  // even in 2D: kept in a photo that leaves the HUD out.
++  const auto& k = plan.pipeline;
++  const bool addsLight = g_photo && k.blend_enable != 0 && k.blend_subtract == 0 && k.logic_op_enable == 0 &&
++                         static_cast<gxc::DstBlendFactor>(k.dst_factor) == gxc::DstBlendFactor::One;
 +  // Draws that share the previous draw's uniforms change nothing to blend.
-+  if (!draws.empty() && draws.back().vs == vsOffset && draws.back().xf == xfOffset)
++  // (Photo mode keeps every one: the HUD and a lens flare can share theirs.)
++  if (!g_photo && !draws.empty() && draws.back().vs == vsOffset && draws.back().xf == xfOffset)
 +    return;
 +  uint32_t id[14]{};
 +  std::memcpy(id, &plan.pipeline_hash, sizeof plan.pipeline_hash);
@@ -7764,7 +8466,45 @@ index 0000000..c7937eb
 +  for (size_t i = 0; i < n; ++i)
 +    std::memcpy(first[i], &plan.vertices[i * gxc::kVertexFloats], sizeof first[i]);
 +  const uint64_t key = XXH3_64bits_withSeed(first, n * sizeof first[0], loose);
-+  draws.push_back(Draw{key, loose, vsOffset, xfOffset});
++  // Photo mode: where an orthographic draw's first vertices land on screen.
++  // One over the whole screen (a fade, a blur, a copy of the frame drawn
++  // back) stays; smaller ones (text, the HUD) are left out of the photo,
++  // unless they add light (addsLight above).
++  bool screenWide = false;
++  const auto& vc = plan.constants;
++  if (g_photo && vc.projection[3][3] == 1.f && n > 0) {
++    float lo[2]{1e9f, 1e9f}, hi[2]{-1e9f, -1e9f};
++    for (size_t i = 0; i < n; ++i) {
++      const float(*m)[4] = vc.posnormalmatrix;
++      if (plan.pipeline.shader.has_pos_mtx_idx != 0 && plan.shared_constants != nullptr) {
++        uint32_t row = 0;
++        std::memcpy(&row, &first[i][3], sizeof row);
++        if (row <= 61u)
++          m = &plan.shared_constants->transformmatrices[row];
++      }
++      const float v[4]{first[i][0], first[i][1], first[i][2], 1.f};
++      float view[4]{0.f, 0.f, 0.f, 1.f};
++      for (int r = 0; r < 3; ++r)
++        view[r] = m[r][0] * v[0] + m[r][1] * v[1] + m[r][2] * v[2] + m[r][3];
++      for (int a = 0; a < 2; ++a) {
++        const float c = vc.projection[a][0] * view[0] + vc.projection[a][1] * view[1] +
++                        vc.projection[a][2] * view[2] + vc.projection[a][3];
++        lo[a] = std::min(lo[a], c);
++        hi[a] = std::max(hi[a], c);
++      }
++    }
++    screenWide = hi[0] - lo[0] >= 1.8f && hi[1] - lo[1] >= 1.8f;
++    Draw draw{key, loose, vsOffset, xfOffset, screenWide, addsLight};
++    draw.blend[0] = k.blend_enable;
++    draw.blend[1] = k.src_factor;
++    draw.blend[2] = k.dst_factor;
++    draw.tex = plan.has_texture ? plan.tex_address : 0u;
++    draw.verts = plan.vertex_count;
++    draw.box[0] = lo[0], draw.box[1] = lo[1], draw.box[2] = hi[0], draw.box[3] = hi[1];
++    draws.push_back(draw);
++    return;
++  }
++  draws.push_back(Draw{key, loose, vsOffset, xfOffset, screenWide, addsLight});
 +}
 +
 +Result build(const float* phases, size_t count, size_t uniformSize, std::vector<Uniforms>& out) {
@@ -7964,13 +8704,151 @@ index 0000000..c7937eb
 +}
 +
 +Stats last_stats() noexcept { return g_stats; }
++// ---- Photo mode ------------------------------------------------------------
++
++void set_photo(bool on) noexcept {
++  g_photo = on;
++  if (!on) {
++    g_photoFrame.uniforms.clear();
++    g_photoFrame.uniforms.shrink_to_fit();
++    g_photoFrame.draws.clear();
++    g_photoFrame.draws.shrink_to_fit();
++  }
++}
++
++bool photo_capture() noexcept {
++  if (!g_photo || !g_recording)
++    return false;
++  g_photoFrame = g_frames[g_cur];
++  static const bool log = std::getenv("ED_PHOTO_LOG") != nullptr;
++  if (log) {
++    int n = 0;
++    for (const Draw& d : g_photoFrame.draws) {
++      if (d.vs + sizeof(Vs) > g_photoFrame.uniforms.size())
++        continue;
++      const Vs& v = vs_at(g_photoFrame.uniforms, d.vs);
++      if (v.projection[3][3] != 1.f)
++        continue;
++      std::fprintf(stderr,
++                   "[photo] 2D draw %d: vs %u blend %u src %u dst %u tex %08x verts %u at %.2f,%.2f..%.2f,%.2f%s%s\n",
++                   n++, d.vs, d.blend[0], d.blend[1], d.blend[2], d.tex, d.verts, d.box[0], d.box[1], d.box[2],
++                   d.box[3], d.screenWide ? " (whole screen)" : "", d.addsLight ? " (adds light)" : "");
++    }
++  }
++  return !g_photoFrame.draws.empty();
++}
++
++Uniforms photo_build(size_t uniformSize, PhotoProjection fn, const void* user, bool hideHud, PhotoFlare flare) {
++  const Frame& f = g_photoFrame;
++  const size_t size = (uniformSize + 3u) & ~size_t{3u};
++  auto buf = pooled_buffer(size);
++  std::memset(buf->data(), 0, size);
++  std::memcpy(buf->data(), f.uniforms.data(), std::min(size, f.uniforms.size()));
++  // A uniform block several draws share (identical constants are stored
++  // once) is the HUD's only when every draw using it is.
++  absl::flat_hash_map<uint32_t, bool> hud;
++  absl::flat_hash_map<uint32_t, std::vector<std::pair<float, float>>> sprites;  // their middles on screen
++  for (const Draw& d : f.draws) {
++    if (d.vs + sizeof(Vs) > f.uniforms.size() || d.vs + sizeof(Vs) > size)
++      continue;
++    const Vs& src = vs_at(f.uniforms, d.vs);
++    const bool isHud = src.projection[3][3] == 1.f && !d.screenWide && !d.addsLight;
++    const auto [it, added] = hud.try_emplace(d.vs, isHud);
++    if (!added)
++      it->second = it->second && isHud;
++    if (isHud)
++      sprites[d.vs].emplace_back((d.box[0] + d.box[2]) * 0.5f, (d.box[1] + d.box[3]) * 0.5f);
++  }
++  // The scene's projection: the first perspective draw's.
++  const float(*scene)[4] = nullptr;
++  for (const Draw& d : f.draws) {
++    if (d.vs + sizeof(Vs) > f.uniforms.size())
++      continue;
++    const Vs& v = vs_at(f.uniforms, d.vs);
++    if (v.projection[3][2] == -1.f && v.projection[3][3] == 0.f) {
++      scene = v.projection;
++      break;
++    }
++  }
++  // A lens flare: three or more sprites in a line through the middle of the
++  // screen, at multiples of where the light is. The scene's: kept, and moved
++  // with the camera: one turn and stretch of the screen about its middle
++  // takes the light to where the photo's camera sees it, and every sprite on
++  // the line with it (the light: where most sprites sit on each other).
++  absl::flat_hash_map<uint32_t, std::array<float, 4>> flares;  // the 2x2 map, or hidden (all 0)
++  for (auto& [offset, middles] : sprites) {
++    if (middles.size() < 3)
++      continue;
++    std::pair<float, float> far{0.f, 0.f};
++    for (const auto& m : middles)
++      if (m.first * m.first + m.second * m.second > far.first * far.first + far.second * far.second)
++        far = m;
++    const float len = std::sqrt(far.first * far.first + far.second * far.second);
++    if (len < 0.2f)
++      continue;
++    bool line = true;
++    for (const auto& m : middles)
++      line = line && std::fabs(m.first * far.second - m.second * far.first) / len < 0.08f;
++    if (!line)
++      continue;
++    hud[offset] = false;
++    if (flare == nullptr || scene == nullptr)
++      continue;
++    std::pair<float, float> light = far;
++    int most = 0;
++    for (const auto& a : middles) {
++      int n = 0;
++      for (const auto& b : middles)
++        n += std::fabs(a.first - b.first) < 0.03f && std::fabs(a.second - b.second) < 0.03f ? 1 : 0;
++      if (n > most) {
++        most = n;
++        light = a;
++      }
++    }
++    const float at[2]{light.first, light.second};
++    float m[2][2];
++    flares[offset] = flare(at, scene, m, user) ? std::array<float, 4>{m[0][0], m[0][1], m[1][0], m[1][1]}
++                                               : std::array<float, 4>{0.f, 0.f, 0.f, 0.f};
++  }
++  for (const auto& [offset, isHud] : hud) {
++    const Vs& src = vs_at(f.uniforms, offset);
++    Vs& dst = *reinterpret_cast<Vs*>(buf->data() + offset);
++    if (src.projection[3][2] == -1.f && src.projection[3][3] == 0.f) {
++      float out[4][4];
++      fn(src.projection, out, user);
++      std::memcpy(dst.projection, out, sizeof out);
++    } else if (const auto fl = flares.find(offset); fl != flares.end()) {
++      const auto& m = fl->second;
++      float out[4][4];
++      std::memcpy(out, src.projection, sizeof out);
++      if (m[0] == 0.f && m[1] == 0.f && m[2] == 0.f && m[3] == 0.f) {
++        std::memset(out, 0, sizeof out);
++        out[0][3] = 2.f;
++        out[3][3] = 1.f;
++      } else {
++        for (int j = 0; j < 4; ++j) {
++          out[0][j] = m[0] * src.projection[0][j] + m[1] * src.projection[1][j];
++          out[1][j] = m[2] * src.projection[0][j] + m[3] * src.projection[1][j];
++        }
++      }
++      std::memcpy(dst.projection, out, sizeof out);
++    } else if (hideHud && isHud) {
++      // Off the screen: every vertex at x = 2.
++      float out[4][4]{};
++      out[0][3] = 2.f;
++      out[3][3] = 1.f;
++      std::memcpy(dst.projection, out, sizeof out);
++    }
++  }
++  return buf;
++}
 +} // namespace aurora::gfx::interp
 diff --git a/graphics/aurora/lib/gfx/interp.hpp b/graphics/aurora/lib/gfx/interp.hpp
 new file mode 100644
-index 0000000..4308023
+index 0000000..4006204
 --- /dev/null
 +++ b/graphics/aurora/lib/gfx/interp.hpp
-@@ -0,0 +1,53 @@
+@@ -0,0 +1,67 @@
 +#pragma once
 +
 +// GXRuntime recomp patch: frame interpolation. When the screen refreshes
@@ -8023,6 +8901,20 @@ index 0000000..4308023
 +  Result result = Result::NoReference;
 +};
 +Stats last_stats() noexcept;
++
++// Photo mode: frames are kept while on (as for frames in between); the frame
++// just ended is taken as the held one (photo_capture, false without draws);
++// its uniforms are rebuilt for a free camera: every perspective draw's
++// projection through fn (in: the game's, out: the photo's), the HUD (small
++// orthographic draws) moved off the screen when hideHud.
++using PhotoProjection = void (*)(const float in[4][4], float out[4][4], const void* user);
++// A lens flare's light at `light` on the game's screen (-1..1), seen through
++// the scene's projection: the 2x2 map of the screen that takes it to where
++// the photo sees it; false when it is out of sight (the flare left out).
++using PhotoFlare = bool (*)(const float light[2], const float scene[4][4], float m[2][2], const void* user);
++void set_photo(bool on) noexcept;
++bool photo_capture() noexcept;
++Uniforms photo_build(size_t uniformSize, PhotoProjection fn, const void* user, bool hideHud, PhotoFlare flare);
 +} // namespace aurora::gfx::interp
 diff --git a/graphics/aurora/lib/gfx/pipeline_cache.cpp b/graphics/aurora/lib/gfx/pipeline_cache.cpp
 index 822a560..16ff80d 100644
@@ -8292,6 +9184,63 @@ index f51a682..11a455a 100644
  
    std::string json = "[\n";
    bool first = true;
+diff --git a/graphics/aurora/lib/gfx/png_io.cpp b/graphics/aurora/lib/gfx/png_io.cpp
+index ea3ac62..121bec4 100644
+--- a/graphics/aurora/lib/gfx/png_io.cpp
++++ b/graphics/aurora/lib/gfx/png_io.cpp
+@@ -1,5 +1,6 @@
+ #include "png_io.hpp"
+ 
++#include <cstdio>
+ #include <fstream>
+ 
+ #include "dds_io.hpp"
+@@ -99,4 +100,32 @@ load_png_file(const std::filesystem::path& path) noexcept {
+     .data = std::move(imageData)
+   };
+ }
+-}
+\ No newline at end of file
++bool save_png_rgb(const std::filesystem::path& path, const uint8_t* rgb, uint32_t width, uint32_t height) noexcept {
++  FILE* file = nullptr;
++#ifdef _WIN32
++  file = _wfopen(path.c_str(), L"wb");
++#else
++  file = std::fopen(path.c_str(), "wb");
++#endif
++  if (file == nullptr)
++    return false;
++  png_structp png = png_create_write_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
++  png_infop info = png != nullptr ? png_create_info_struct(png) : nullptr;
++  if (png == nullptr || info == nullptr || setjmp(png_jmpbuf(png))) {
++    png_destroy_write_struct(&png, &info);
++    std::fclose(file);
++    return false;
++  }
++  png_init_io(png, file);
++  png_set_compression_level(png, 6);
++  png_set_IHDR(png, info, width, height, 8, PNG_COLOR_TYPE_RGB, PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT,
++               PNG_FILTER_TYPE_DEFAULT);
++  png_write_info(png, info);
++  for (uint32_t y = 0; y < height; ++y)
++    png_write_row(png, const_cast<png_bytep>(rgb + static_cast<size_t>(y) * width * 3u));
++  png_write_end(png, nullptr);
++  png_destroy_write_struct(&png, &info);
++  std::fclose(file);
++  return true;
++}
++}
+diff --git a/graphics/aurora/lib/gfx/png_io.hpp b/graphics/aurora/lib/gfx/png_io.hpp
+index a0f32a7..8ee9ad3 100644
+--- a/graphics/aurora/lib/gfx/png_io.hpp
++++ b/graphics/aurora/lib/gfx/png_io.hpp
+@@ -7,4 +7,6 @@
+ 
+ namespace aurora::gfx::png {
+ std::optional<ConvertedTexture> load_png_file(const std::filesystem::path& path) noexcept;
++// GXRuntime recomp patch (photo mode): rows of 8-bit RGB as a PNG file.
++bool save_png_rgb(const std::filesystem::path& path, const uint8_t* rgb, uint32_t width, uint32_t height) noexcept;
+ }
 diff --git a/graphics/aurora/lib/gfx/ssao.cpp b/graphics/aurora/lib/gfx/ssao.cpp
 new file mode 100644
 index 0000000..14cfeef
@@ -13260,7 +14209,7 @@ index 9c2f7bb..6dd6411 100644
 +
  #endif
 diff --git a/include/gxruntime/aurora_backend.h b/include/gxruntime/aurora_backend.h
-index 6ef4cf4..a6fe8a4 100644
+index 6ef4cf4..7a8eb45 100644
 --- a/include/gxruntime/aurora_backend.h
 +++ b/include/gxruntime/aurora_backend.h
 @@ -5,6 +5,7 @@
@@ -13304,7 +14253,7 @@ index 6ef4cf4..a6fe8a4 100644
  
  // C2: walk nonzero gxcore GapCounters into the process-global gap_report.
  // Call once before gap_report_write_json on the live Strikers path so
-@@ -40,6 +55,184 @@ void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user);
+@@ -40,6 +55,188 @@ void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user);
  // from shutdown (second call only bumps if counters grew).
  void dol_aurora_flush_gap_report(void);
  
@@ -13439,6 +14388,10 @@ index 6ef4cf4..a6fe8a4 100644
 +// Display aspect: 0 follows the game (4:3, or 16:9 when its 3D projects at
 +// 16:9), 1 = 4:3, 2 = 16:9, 3 = stretch to the window.
 +void dol_aurora_set_aspect_mode(int mode);
++// Photo mode: show this aspect (width / height) instead while > 0.
++void dol_aurora_set_photo_aspect(float aspect);
++// The aspect the picture is shown at now (width / height).
++float dol_aurora_display_aspect(void);
 +// Render resolution: 0 = the window's pixels, else exactly this many lines
 +// (720, 1080, ...), as wide as the display aspect, scaled to the window.
 +void dol_aurora_set_render_height(int lines);

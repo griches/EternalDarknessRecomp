@@ -1,5 +1,5 @@
 diff --git a/backends/aurora/aurora_backend.cpp b/backends/aurora/aurora_backend.cpp
-index d94f811..29576be 100644
+index d94f811..4bffea0 100644
 --- a/backends/aurora/aurora_backend.cpp
 +++ b/backends/aurora/aurora_backend.cpp
 @@ -19,9 +19,25 @@
@@ -28,7 +28,7 @@ index d94f811..29576be 100644
  
  #include <gx/fifo.hpp>
  #include <gx/gx.hpp>
-@@ -30,12 +46,24 @@
+@@ -30,25 +46,82 @@
  #include <cstdio>
  #include <cstdlib>
  #include <cstring>
@@ -53,7 +53,13 @@ index d94f811..29576be 100644
  
  #if GXRUNTIME_HAS_AURORA_RECOMP
  // gxcore substrate submission lives in the Aurora fork (lib/gfx/gxcore_draw.cpp),
-@@ -46,9 +74,51 @@ namespace aurora::gfx::gxcore {
+ // linked into this binary via aurora::gx. Forward-declare the three entry points
+ // the live cutover uses so the backend needn't reach the fork-internal header
+ // (that path is reserved for the dolgx_replay tool target).
++namespace aurora::gfx::glow {
++void set_strength(float strength) noexcept;
++}
+ namespace aurora::gfx::gxcore {
  bool submit_draw_plan(const gxruntime::gxcore::DrawPlan& plan);
  void copy_efb_to_texture(const gxruntime::gxcore::EfbCopyCommand& cmd);
  void reset_texture_cache();
@@ -105,7 +111,7 @@ index d94f811..29576be 100644
  // Forward for continuous EFB readback attach (fork-internal).
  namespace aurora::gfx::efb_readback {
  void set_continuous(bool enabled) noexcept;
-@@ -57,10 +127,24 @@ bool peek(const std::uint8_t** rgba, std::uint32_t* width,
+@@ -57,10 +130,24 @@ bool peek(const std::uint8_t** rgba, std::uint32_t* width,
            std::uint32_t* height) noexcept;
  } // namespace aurora::gfx::efb_readback
  
@@ -131,7 +137,7 @@ index d94f811..29576be 100644
  bool g_graphics_log = false;
  bool g_force_untextured = false;
  bool g_gx_core_enabled = true; // gxcore is the default renderer; DOL_GX_CORE=0 opts out
-@@ -79,9 +163,213 @@ SDL_AudioStream* g_audio_stream = nullptr;
+@@ -79,9 +166,213 @@ SDL_AudioStream* g_audio_stream = nullptr;
  bool g_audio_playing = false;
  int g_audio_prebuffer_ms = 40;
  int g_audio_max_queue_ms = 250;
@@ -345,7 +351,7 @@ index d94f811..29576be 100644
  struct PendingTextureMetadata {
      bool valid = false;
      const void* data = nullptr;
-@@ -112,6 +400,28 @@ std::array<PendingTlutMetadata, 20> g_pending_tluts{};
+@@ -112,6 +403,28 @@ std::array<PendingTlutMetadata, 20> g_pending_tluts{};
  // validating sink checked. The live Aurora path stays authoritative; this only
  // proves the consumer survives real FIFO traffic ahead of renderer cutover.
  gxruntime::aurora_recomp::RetailGxFrontend g_shadow_frontend;
@@ -374,7 +380,7 @@ index d94f811..29576be 100644
  gxruntime::aurora_recomp::ConsumingAuroraRenderSink g_shadow_packet_sink;
  bool g_shadow_frontend_enabled = false;
  bool g_shadow_frontend_failed = false;
-@@ -124,9 +434,17 @@ bool g_shadow_frontend_failed = false;
+@@ -124,9 +437,17 @@ bool g_shadow_frontend_failed = false;
  gxruntime::gxcore::GxCoreSink g_core_sink;
  unsigned long long g_core_submitted = 0;
  unsigned long long g_core_rejected = 0;
@@ -392,7 +398,7 @@ index d94f811..29576be 100644
      if (aurora::gfx::gxcore::submit_draw_plan(plan))
          ++g_core_submitted;
      else
-@@ -244,6 +562,7 @@ void log_callback(AuroraLogLevel level, const char* module, const char* message,
+@@ -244,6 +565,7 @@ void log_callback(AuroraLogLevel level, const char* module, const char* message,
  }
  
  void poll_events() {
@@ -400,7 +406,7 @@ index d94f811..29576be 100644
      const AuroraEvent* event = aurora_update();
      while (event != nullptr && event->type != AURORA_NONE) {
          if (event->type == AURORA_EXIT)
-@@ -379,13 +698,39 @@ unsigned long long g_trace_present_scope_frame = 0ull;
+@@ -379,13 +701,39 @@ unsigned long long g_trace_present_scope_frame = 0ull;
  bool g_trace_frame_begun = false;
  unsigned long long g_trace_frames_recorded = 0ull;
  gxruntime::aurora_recomp::trace::TraceWriter g_trace_writer;
@@ -447,7 +453,7 @@ index d94f811..29576be 100644
  
  unsigned long long trace_current_frame() {
      return g_trace_present_scope_frame != 0ull ? g_trace_present_scope_frame
-@@ -435,6 +780,17 @@ bool trace_should_record() {
+@@ -435,6 +783,17 @@ bool trace_should_record() {
          g_trace_writer.frame_begin(static_cast<u32>(frame));
          g_trace_frame_begun = true;
          ++g_trace_frames_recorded;
@@ -465,7 +471,7 @@ index d94f811..29576be 100644
      }
      return true;
  }
-@@ -442,18 +798,46 @@ bool trace_should_record() {
+@@ -442,18 +801,46 @@ bool trace_should_record() {
  void trace_record_mem_update(u32 address, u32 size, const void* data) {
      if (size == 0 || data == nullptr || !trace_should_record())
          return;
@@ -521,7 +527,7 @@ index d94f811..29576be 100644
  }
  
  void trace_close_and_log() {
-@@ -491,6 +875,10 @@ void trace_on_present() {
+@@ -491,6 +878,10 @@ void trace_on_present() {
          trace_close_and_log();
      g_trace_present_scope_frame = 0ull;
      g_trace_frame_begun = false;
@@ -532,7 +538,7 @@ index d94f811..29576be 100644
  }
  // ---------------------------------------------------------------------------
  
-@@ -514,11 +902,64 @@ void shadow_frontend_set_array(u32 attr, u32 guest_address, u8 stride) {
+@@ -514,11 +905,64 @@ void shadow_frontend_set_array(u32 attr, u32 guest_address, u8 stride) {
      }
  }
  
@@ -597,7 +603,7 @@ index d94f811..29576be 100644
      const void* data = nullptr;
      u32 available = 0;
      if (!g_guest_address_resolver(g_guest_address_resolver_user, address, size,
-@@ -587,6 +1028,45 @@ void shadow_frontend_call_display_list(const void* data, u32 size) {
+@@ -587,6 +1031,45 @@ void shadow_frontend_call_display_list(const void* data, u32 size) {
      }
  }
  
@@ -643,7 +649,7 @@ index d94f811..29576be 100644
  void shadow_frontend_write(u64 value, u8 size) {
      if (!g_shadow_frontend_enabled || g_shadow_frontend_failed)
          return;
-@@ -615,24 +1095,7 @@ void shadow_frontend_write(u64 value, u8 size) {
+@@ -615,24 +1098,7 @@ void shadow_frontend_write(u64 value, u8 size) {
      }
      const std::span<const std::uint8_t> fragment(bytes, size);
      if (g_gx_core_enabled) {
@@ -669,16 +675,13 @@ index d94f811..29576be 100644
          return;
      }
      if (!g_shadow_frontend.write_fifo(fragment) ||
-@@ -841,8 +1304,1318 @@ void shadow_transform_observer(
-                      f[13], f[14], f[15]);
+@@ -842,8 +1308,1318 @@ void shadow_transform_observer(
      }
  }
--#endif
--} // namespace
-+#endif
+ #endif
 +
-+} // namespace
-+
+ } // namespace
+ 
 +extern "C" {
 +void aurora_backend_gx_write(u64 value, u8 size);
 +void aurora_backend_set_array_guest(u32 attr, u32 guest_address,
@@ -1987,10 +1990,11 @@ index d94f811..29576be 100644
 +    }
 +}
 +} // namespace frame_rate
- 
++
  extern "C" {
  
-@@ -882,6 +2655,7 @@ bool dol_aurora_initialize(int argc, char** argv,
+ void aurora_backend_set_array_guest(u32 attr, u32 guest_address,
+@@ -882,6 +2658,7 @@ bool dol_aurora_initialize(int argc, char** argv,
                                              : defaults.app_name;
      config.desiredBackend = BACKEND_AUTO;
      config.vsync = backend_config->vsync;
@@ -1998,7 +2002,7 @@ index d94f811..29576be 100644
      config.windowWidth = backend_config->window_width != 0
                               ? backend_config->window_width
                               : defaults.window_width;
-@@ -890,6 +2664,10 @@ bool dol_aurora_initialize(int argc, char** argv,
+@@ -890,6 +2667,10 @@ bool dol_aurora_initialize(int argc, char** argv,
                                : defaults.window_height;
      config.allowTextureDumps = backend_config->allow_texture_dumps;
      config.logCallback = log_callback;
@@ -2009,7 +2013,7 @@ index d94f811..29576be 100644
      config.logLevel = backend_config->info_logging ? LOG_INFO : LOG_ERROR;
      // The recomp runtime owns guest MEM1/ARAM. Aurora receives translated host
      // pointers for graphics resources and must not allocate duplicate memory.
-@@ -937,7 +2715,7 @@ bool dol_aurora_initialize(int argc, char** argv,
+@@ -937,7 +2718,7 @@ bool dol_aurora_initialize(int argc, char** argv,
      g_trace_present_scope_frame = 0ull;
      g_trace_frame_begun = false;
      g_trace_frames_recorded = 0ull;
@@ -2018,7 +2022,7 @@ index d94f811..29576be 100644
      const char* trace_out = std::getenv("DOL_AURORA_RECOMP_TRACE_OUT");
      if (trace_out != nullptr && trace_out[0] != '\0') {
          g_trace_path = trace_out;
-@@ -1069,7 +2847,11 @@ static void flush_gxcore_gap_counters() {
+@@ -1069,7 +2850,11 @@ static void flush_gxcore_gap_counters() {
  #if GXRUNTIME_HAS_AURORA_RECOMP
      if (!g_gx_core_enabled)
          return;
@@ -2031,7 +2035,7 @@ index d94f811..29576be 100644
      struct {
          const char* name;
          unsigned long long value;
-@@ -1114,10 +2896,225 @@ void dol_aurora_flush_gap_report(void) {
+@@ -1114,10 +2899,233 @@ void dol_aurora_flush_gap_report(void) {
      flush_gxcore_gap_counters();
  }
  
@@ -2161,6 +2165,14 @@ index d94f811..29576be 100644
 +#endif
 +}
 +
++void dol_aurora_set_glow(float strength) {
++#if GXRUNTIME_HAS_AURORA_RECOMP
++    aurora::gfx::glow::set_strength(strength);
++#else
++    (void)strength;
++#endif
++}
++
 +void dol_aurora_set_aspect_mode(int mode) {
 +    g_aspect_mode = mode;
 +}
@@ -2258,7 +2270,7 @@ index d94f811..29576be 100644
          aurora::gfx::efb_readback::set_continuous(true);
          aurora_request_framebuffer_readback();
      }
-@@ -1169,8 +3166,11 @@ void aurora_backend_present(void) {
+@@ -1169,8 +3177,11 @@ void aurora_backend_present(void) {
      // gxcore accumulates the frame's draws as their spans complete; the final
      // pending draw is only planned at the frame boundary. Submit it into the
      // still-open Aurora frame before end_frame flushes the command list.
@@ -2271,7 +2283,7 @@ index d94f811..29576be 100644
      // TEMP DIAG: per-frame gxcore gap-counter deltas so a live
      // goal celebration reveals which skip reason dominates (missing_vcd /
      // "projection never captured" vertex_decode_failures / cull_all_draws vs.
-@@ -1197,12 +3197,21 @@ void aurora_backend_present(void) {
+@@ -1197,12 +3208,21 @@ void aurora_backend_present(void) {
      }
  #endif
      if (g_frame_open) {
@@ -2295,7 +2307,7 @@ index d94f811..29576be 100644
          const std::uint8_t* rgba = nullptr;
          std::uint32_t w = 0;
          std::uint32_t h = 0;
-@@ -1212,6 +3221,109 @@ void aurora_backend_present(void) {
+@@ -1212,6 +3232,109 @@ void aurora_backend_present(void) {
          }
      }
      ++g_present_count;
@@ -2405,7 +2417,7 @@ index d94f811..29576be 100644
      if (g_frame_pacing_log &&
          (g_present_count <= 10 || (g_present_count % 60) == 0)) {
          const AuroraStats* stats = aurora_get_stats();
-@@ -1432,6 +3544,7 @@ void aurora_backend_present(void) {
+@@ -1432,6 +3555,7 @@ void aurora_backend_present(void) {
      const unsigned long long present_fifo = g_fifo_bytes;
      g_fifo_bytes = 0;
      poll_events();
@@ -2413,7 +2425,7 @@ index d94f811..29576be 100644
      if (!g_should_quit) {
          g_frame_open = aurora_begin_frame();
  #if GXRUNTIME_HAS_AURORA_RECOMP
-@@ -1482,7 +3595,13 @@ void aurora_backend_gx_write(u64 value, u8 size) {
+@@ -1482,7 +3606,13 @@ void aurora_backend_gx_write(u64 value, u8 size) {
          return;
      g_fifo_bytes += size;
  #if GXRUNTIME_HAS_AURORA_RECOMP
@@ -2428,7 +2440,7 @@ index d94f811..29576be 100644
      // Record AFTER the shadow write so MEM_UPDATEs its resolves emitted
      // precede this GX_WRITE in the trace (replay reads them first), and
      // BEFORE the live-Aurora forwarding below so the pristine value is
-@@ -1673,6 +3792,7 @@ void aurora_backend_set_guest_address_resolver(
+@@ -1673,6 +3803,7 @@ void aurora_backend_set_guest_address_resolver(
              &frontend_resolver, frontend_guest_address_resolver_bridge,
              nullptr);
          g_shadow_frontend.reset(&frontend_resolver);
@@ -2436,7 +2448,7 @@ index d94f811..29576be 100644
          g_shadow_frontend.set_packet_drain_enabled(g_shadow_frontend_enabled);
          g_shadow_packet_sink.reset();
          // Resolve packet guest addresses to host bytes through the frontend's
-@@ -1737,6 +3857,7 @@ void aurora_backend_set_xfb_black(bool black) {
+@@ -1737,6 +3868,7 @@ void aurora_backend_set_xfb_black(bool black) {
  }
  
  bool aurora_backend_pad_init(void) {
@@ -2444,7 +2456,7 @@ index d94f811..29576be 100644
      if (PADInit() == FALSE)
          return false;
  
-@@ -1780,6 +3901,7 @@ bool aurora_backend_pad_init(void) {
+@@ -1780,6 +3912,7 @@ bool aurora_backend_pad_init(void) {
  }
  
  u32 aurora_backend_pad_read(DolPadState state[4]) {
@@ -2452,7 +2464,7 @@ index d94f811..29576be 100644
      PADStatus status[4]{};
      const u32 motor_mask = PADRead(status);
      for (u32 i = 0; i < 4; i++) {
-@@ -1796,22 +3918,41 @@ u32 aurora_backend_pad_read(DolPadState state[4]) {
+@@ -1796,22 +3929,41 @@ u32 aurora_backend_pad_read(DolPadState state[4]) {
              .error = status[i].err,
          };
      }
@@ -2494,7 +2506,7 @@ index d94f811..29576be 100644
      PADSetSpec(spec);
  }
  
-@@ -1841,13 +3982,16 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1841,13 +3993,16 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
          return;
      const int bytes_per_second =
          static_cast<int>(g_audio_sample_rate) * 2 * static_cast<int>(sizeof(s16));
@@ -2513,7 +2525,7 @@ index d94f811..29576be 100644
      while (queued > max_queued_bytes && waited_ms < 20u) {
          g_audio_throttle_count++;
          if (g_audio_queue_log &&
-@@ -1860,11 +4004,51 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1860,11 +4015,51 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
                           max_queued_bytes);
          SDL_Delay(1);
          waited_ms++;
@@ -2565,7 +2577,7 @@ index d94f811..29576be 100644
      if (g_audio_queue_log &&
          (g_audio_push_count <= 16 || (g_audio_push_count % 4000) == 0 ||
           (low_queue && g_audio_push_count - g_audio_low_log_push >= 4000))) {
-@@ -1876,6 +4060,21 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1876,6 +4071,21 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
                       g_audio_push_count, queued, queued + bytes,
                       g_audio_playing ? 1u : 0u, g_audio_throttle_count);
      }
@@ -2587,7 +2599,7 @@ index d94f811..29576be 100644
      if (!SDL_PutAudioStreamData(g_audio_stream, samples, bytes))
          std::fprintf(stderr, "[audio] failed to queue samples: %s\n", SDL_GetError());
      else if (!g_audio_playing && queued + bytes >= prebuffer_bytes) {
-@@ -1886,10 +4085,455 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1886,10 +4096,455 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
      }
  }
  
@@ -3043,7 +3055,7 @@ index d94f811..29576be 100644
      const DolPlatformOps ops = {
          .should_quit = aurora_backend_should_quit,
          .present = aurora_backend_present,
-@@ -1918,6 +4562,7 @@ void install_platform_ops() {
+@@ -1918,6 +4573,7 @@ void install_platform_ops() {
          .audio_set_sample_rate = aurora_backend_audio_set_sample_rate,
          .audio_push = aurora_backend_audio_push,
      };
@@ -3052,14 +3064,15 @@ index d94f811..29576be 100644
  }
  } // namespace
 diff --git a/graphics/aurora/cmake/aurora_gx.cmake b/graphics/aurora/cmake/aurora_gx.cmake
-index 349237d..f747ec5 100644
+index 349237d..2c9c374 100644
 --- a/graphics/aurora/cmake/aurora_gx.cmake
 +++ b/graphics/aurora/cmake/aurora_gx.cmake
-@@ -67,6 +67,8 @@ if (TARGET GXRuntime::gxcore)
+@@ -67,6 +67,9 @@ if (TARGET GXRuntime::gxcore)
      target_sources(aurora_gx PRIVATE
          lib/gfx/gxcore_draw.cpp
          lib/gfx/gxcore_draw.hpp
 +        lib/gfx/interp.cpp
++        lib/gfx/glow.cpp
 +        lib/gfx/interp.hpp
      )
      # gxcore + gxruntime (E7 YUYV encode symbols used by display-copy RAM path).
@@ -3128,7 +3141,7 @@ index a13ce39..eb4d9fc 100644
   * EFB readback (GXRuntime recomp patch): arm a one-shot copy of the next
   * submitted frame's present source; take returns tightly packed RGBA8 rows
 diff --git a/graphics/aurora/lib/aurora.cpp b/graphics/aurora/lib/aurora.cpp
-index b09ef4d..dece612 100644
+index b09ef4d..1dd24f1 100644
 --- a/graphics/aurora/lib/aurora.cpp
 +++ b/graphics/aurora/lib/aurora.cpp
 @@ -1,5 +1,15 @@
@@ -3155,13 +3168,14 @@ index b09ef4d..dece612 100644
  #include <magic_enum.hpp>
  
  #include "system_info.hpp"
-@@ -41,6 +52,232 @@ using webgpu::g_device;
+@@ -41,6 +52,238 @@ using webgpu::g_device;
  using webgpu::g_queue;
  using webgpu::g_surface;
  
 +// GXRuntime recomp patch (testing): AURORA_FRAME_DUMP=<folder> writes every
 +// shown frame, shrunk to about AURORA_FRAME_DUMP_WIDTH (320) pixels wide, as <folder>/frame-<n>.ppm,
-+// from frame AURORA_FRAME_DUMP_FIRST (0) for AURORA_FRAME_DUMP_COUNT (600),
++// from frame AURORA_FRAME_DUMP_FIRST (0) for AURORA_FRAME_DUMP_COUNT (600), every
++// AURORA_FRAME_DUMP_STEP (1) frames,
 +// to catch a one-frame glitch on a machine without screen capture. Frames
 +// whose copy finds every readback buffer busy are skipped (and logged).
 +namespace frame_dump {
@@ -3201,7 +3215,12 @@ index b09ef4d..dece612 100644
 +    const char* e = std::getenv("AURORA_FRAME_DUMP_COUNT");
 +    return e != nullptr ? static_cast<uint32_t>(std::atoi(e)) : 600u;
 +  }();
-+  if (dir() == nullptr || frame < first || frame >= first + count) {
++  // AURORA_FRAME_DUMP_STEP (1): every Nth frame of the range.
++  static const uint32_t step = [] {
++    const char* e = std::getenv("AURORA_FRAME_DUMP_STEP");
++    return e != nullptr && std::atoi(e) > 0 ? static_cast<uint32_t>(std::atoi(e)) : 1u;
++  }();
++  if (dir() == nullptr || frame < first || frame >= first + count || (frame - first) % step != 0) {
 +    return nullptr;
 +  }
 +  Slot* slot = nullptr;
@@ -3388,7 +3407,7 @@ index b09ef4d..dece612 100644
  uint32_t clamp_scissor_coord(double value, uint32_t maximum) noexcept {
    if (!std::isfinite(value)) {
      return 0;
-@@ -106,7 +343,14 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
+@@ -106,7 +349,14 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
    } else {
      g_config.userPath = strdup(g_config.userPath);
    }
@@ -3404,7 +3423,7 @@ index b09ef4d..dece612 100644
      g_config.cachePath = SDL_GetPrefPath(nullptr, g_config.appName);
    } else {
      g_config.cachePath = strdup(g_config.cachePath);
-@@ -248,6 +492,33 @@ bool begin_frame() noexcept {
+@@ -248,6 +498,33 @@ bool begin_frame() noexcept {
    return true;
  }
  
@@ -3438,7 +3457,7 @@ index b09ef4d..dece612 100644
  void end_frame() noexcept {
    ZoneScoped;
  #ifdef AURORA_ENABLE_GX
-@@ -257,10 +528,38 @@ void end_frame() noexcept {
+@@ -257,10 +534,38 @@ void end_frame() noexcept {
  
    // E7 present-from-XFB: VI current → GPU Virtual-XFB, else YUYV-from-RAM
    // decode, else EFB-direct (Strikers when no RAM XFB / match fails).
@@ -3479,7 +3498,7 @@ index b09ef4d..dece612 100644
    const uint32_t contentW =
        xfbTex && *xfbTex ? (*xfbTex)->size.width : efbSource.size.width;
    const uint32_t contentH =
-@@ -282,28 +581,37 @@ void end_frame() noexcept {
+@@ -282,28 +587,37 @@ void end_frame() noexcept {
    // Capture XFB handle by value for the worker lambda (shared_ptr).
    gfx::TextureHandle xfbHandle = (xfbTex && *xfbTex) ? *xfbTex : nullptr;
  
@@ -3532,7 +3551,7 @@ index b09ef4d..dece612 100644
        wgpu::BindGroup presentBindGroup;
        if (rmlBindGroup && !rmlOverlay) {
          presentBindGroup = rmlBindGroup;
-@@ -318,7 +626,7 @@ void end_frame() noexcept {
+@@ -318,7 +632,7 @@ void end_frame() noexcept {
          };
          presentBindGroup = webgpu::create_copy_bind_group(xfbSrc);
        } else {
@@ -3541,7 +3560,7 @@ index b09ef4d..dece612 100644
          presentBindGroup = webgpu::create_copy_bind_group(resampledSource);
        }
        {
-@@ -333,16 +641,20 @@ void end_frame() noexcept {
+@@ -333,16 +647,20 @@ void end_frame() noexcept {
              .label = xfbHandle ? "XFB present render pass" : "EFB copy render pass",
              .colorAttachmentCount = attachments.size(),
              .colorAttachments = attachments.data(),
@@ -3569,7 +3588,7 @@ index b09ef4d..dece612 100644
          if (rmlBindGroup && rmlOverlay) {
            pass.SetPipeline(webgpu::g_CopyPremultipliedAlphaPipeline);
            pass.SetBindGroup(0, rmlBindGroup, 0, nullptr);
-@@ -362,67 +674,185 @@ void end_frame() noexcept {
+@@ -362,67 +680,185 @@ void end_frame() noexcept {
              .label = "ImGui render pass",
              .colorAttachmentCount = attachments.size(),
              .colorAttachments = attachments.data(),
@@ -3774,7 +3793,7 @@ index b09ef4d..dece612 100644
      gfx::after_submit();
  
      TracyPlotConfig("aurora: lastVertSize", tracy::PlotFormatType::Memory, false, true, 0);
-@@ -440,7 +870,7 @@ void end_frame() noexcept {
+@@ -440,7 +876,7 @@ void end_frame() noexcept {
      TracyPlot("aurora: lastIndexSize", static_cast<int64_t>(gfx::g_stats.lastIndexSize));
      TracyPlot("aurora: lastStorageSize", static_cast<int64_t>(gfx::g_stats.lastStorageSize));
      TracyPlot("aurora: lastTextureUploadSize", static_cast<int64_t>(gfx::g_stats.lastTextureUploadSize));
@@ -3783,7 +3802,7 @@ index b09ef4d..dece612 100644
  
  #endif
  }
-@@ -475,6 +905,38 @@ void aurora_set_resampler(AuroraSampler sampler) {
+@@ -475,6 +911,38 @@ void aurora_set_resampler(AuroraSampler sampler) {
    (void)sampler;
  #endif
  }
@@ -3823,18 +3842,28 @@ index b09ef4d..dece612 100644
 +  }
 +}
 diff --git a/graphics/aurora/lib/gfx/common.cpp b/graphics/aurora/lib/gfx/common.cpp
-index a64dd2d..e4be24a 100644
+index a64dd2d..fa3a4df 100644
 --- a/graphics/aurora/lib/gfx/common.cpp
 +++ b/graphics/aurora/lib/gfx/common.cpp
-@@ -10,6 +10,7 @@
+@@ -10,6 +10,8 @@
  #include "../gx/pipeline.hpp"
  #ifdef AURORA_ENABLE_GXCORE
  #include "gxcore_draw.hpp"
++#include "glow.hpp"
 +#include "interp.hpp"
  #endif
  #ifdef AURORA_ENABLE_RMLUI
  #include "../rmlui/pipeline.hpp"
-@@ -253,6 +254,10 @@ static std::array<FramePacket, FrameSlotCount> g_framePackets;
+@@ -207,6 +209,8 @@ struct RenderPass {
+   plane_capture::Key planeKey{};
+   plane_capture::CopyMeta planeCopy{};
+   bool sealed = false;
++  bool composeGlow = false; // add the glow to resolveTarget (glow.hpp)
++  bool glowScene = false;   // keep the EFB as the glow's scene (glow.hpp)
+   std::vector<tex_palette_conv::ConvRequest> paletteConvs;
+ };
+ 
+@@ -253,6 +257,10 @@ static std::array<FramePacket, FrameSlotCount> g_framePackets;
  static FramePacket* g_recordingFrame = nullptr;
  static size_t g_recordingFrameSlot = 0;
  static uint64_t g_nextFrameId = 1;
@@ -3845,7 +3874,7 @@ index a64dd2d..e4be24a 100644
  static render_worker::FrameSlotPool g_frameSlots{FrameSlotCount};
  static render_worker::FrameSlotPool g_stagingSlots{StagingBufferCount};
  static u32 g_currentRenderPass = UINT32_MAX;
-@@ -338,6 +343,8 @@ static void wait_for_gpu_progress(std::chrono::nanoseconds sleepDuration) {
+@@ -338,6 +346,8 @@ static void wait_for_gpu_progress(std::chrono::nanoseconds sleepDuration) {
    std::this_thread::sleep_for(sleepDuration);
  }
  
@@ -3854,7 +3883,7 @@ index a64dd2d..e4be24a 100644
  static void pace_frame_start() {
    ZoneScopedN("Frame start pacing");
    if (g_frameSlots.free_count() == FrameSlotCount) {
-@@ -475,7 +482,8 @@ static void seal_pass(FramePacket& frame, uint32_t passIndex) {
+@@ -475,8 +485,10 @@ static void seal_pass(FramePacket& frame, uint32_t passIndex) {
  }
  
  static void encode_op(wgpu::CommandEncoder& cmd, FramePacket& frame, const FrameOp& op);
@@ -3862,9 +3891,11 @@ index a64dd2d..e4be24a 100644
 +static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo, uint32_t passIndex,
 +                   bool replay = false);
  static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, const RenderPass& passInfo);
++static void render_glow_pass(wgpu::CommandEncoder& cmd, const RenderPass& passInfo);
  static void expire_cached_bind_groups();
  static void push_command(CommandType type, const Command::Data& data);
-@@ -652,6 +660,26 @@ gx::DrawData* get_last_draw_command() {
+ 
+@@ -652,6 +664,26 @@ gx::DrawData* get_last_draw_command() {
    return &last.data.draw.gx;
  }
  
@@ -3891,7 +3922,64 @@ index a64dd2d..e4be24a 100644
  static void push_draw_command(ShaderDrawCommand data) {
    push_command(CommandType::Draw, Command::Data{.draw = data});
    ++g_drawCallCount;
-@@ -1271,6 +1299,9 @@ bool begin_frame() {
+@@ -692,9 +724,10 @@ PipelineRef pipeline_ref(const clear::PipelineConfig& config) {
+ 
+ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool clearAlpha, bool clearDepth,
+                    Vec4<float> clearColorValue, float clearDepthValue, GXTexFmt resolveFormat,
+-                   const EfbCopyFilterParams* filter) {
++                   const EfbCopyFilterParams* filter, bool composeGlow) {
+   // Resolve current render pass
+   auto& prevPass = current_render_passes()[g_currentRenderPass];
++  prevPass.composeGlow = composeGlow;
+   // GPNF §7: if plane capture armed for this copy, tag the pass for pre-resolve
+   // EFB color + depth snapshot at encode time.
+   {
+@@ -781,6 +814,44 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
+   push_command(CommandType::SetScissor, Command::Data{.setScissor = g_cachedScissor});
+ }
+ 
++void glow_scene_here() {
++  if (g_currentRenderPass == UINT32_MAX || g_inOffscreen)
++    return;
++  auto& pass = current_render_passes()[g_currentRenderPass];
++  if (pass.colorView.Get() == webgpu::g_frameBuffer.view.Get())
++    pass.glowScene = true;
++}
++
++void glow_scene_break() {
++  if (g_currentRenderPass == UINT32_MAX || g_inOffscreen)
++    return;
++  auto& prevPass = current_render_passes()[g_currentRenderPass];
++  if (prevPass.colorView.Get() != webgpu::g_frameBuffer.view.Get())
++    return;
++  prevPass.glowScene = true;
++  enqueue_pass(current_frame_packet(), g_recordingFrameSlot, g_currentRenderPass);
++  RenderPass newPass{
++      .label = pass_label("EFB"),
++      .colorView = prevPass.colorView,
++      .resolveView = prevPass.resolveView,
++      .depthStencilView = prevPass.depthStencilView,
++      .copySourceTexture = prevPass.copySourceTexture,
++      .copySourceView = prevPass.copySourceView,
++      .copySourceDepthView = prevPass.copySourceDepthView,
++      .targetSize = prevPass.targetSize,
++      .msaaSamples = prevPass.msaaSamples,
++      .clearColor = false,
++      .clearDepth = false,
++      .hasDepth = prevPass.hasDepth,
++      .hasStencil = prevPass.hasStencil,
++  };
++  newPass.commands.reserve(512);
++  current_render_passes().emplace_back(std::move(newPass));
++  ++g_currentRenderPass;
++  push_command(CommandType::SetViewport, Command::Data{.setViewport = g_cachedViewport});
++  push_command(CommandType::SetScissor, Command::Data{.setScissor = g_cachedScissor});
++}
++
+ void queue_palette_conv(tex_palette_conv::ConvRequest req) {
+   auto& renderPass = current_render_passes()[g_currentRenderPass];
+   ASSERT(!renderPass.sealed, "Attempted to append palette conversion to sealed render pass {}", g_currentRenderPass);
+@@ -1271,6 +1342,9 @@ bool begin_frame() {
    push_command(CommandType::SetViewport, Command::Data{.setViewport = g_cachedViewport});
    push_command(CommandType::SetScissor, Command::Data{.setScissor = g_cachedScissor});
    begin_pipeline_frame();
@@ -3901,7 +3989,7 @@ index a64dd2d..e4be24a 100644
    render_worker::enqueue_begin_frame(frame.frameId, [frameSlot] {
      static constexpr wgpu::CommandEncoderDescriptor EncoderDescriptor{.label = "Redraw encoder"};
      g_framePackets[frameSlot].encoder = g_device.CreateCommandEncoder(&EncoderDescriptor);
-@@ -1309,7 +1340,60 @@ void finish() {
+@@ -1309,7 +1383,60 @@ void finish() {
    }
  }
  
@@ -3963,7 +4051,7 @@ index a64dd2d..e4be24a 100644
    ZoneScoped;
    ASSERT(!g_inOffscreen, "end_frame called while offscreen rendering is active");
    ASSERT(g_currentRenderPass == UINT32_MAX, "end_frame called before finish finalized the current render pass");
-@@ -1352,10 +1436,33 @@ void end_frame(EndFrameCallback callback) {
+@@ -1352,10 +1479,33 @@ void end_frame(EndFrameCallback callback) {
  #endif
  
    const size_t stagingSlot = frame.stagingBuffer;
@@ -3998,7 +4086,7 @@ index a64dd2d..e4be24a 100644
      auto encoder = std::move(packet.encoder);
      const auto stats = packet.stats;
      packet = {};
-@@ -1367,7 +1474,12 @@ void end_frame(EndFrameCallback callback) {
+@@ -1367,7 +1517,12 @@ void end_frame(EndFrameCallback callback) {
      g_stats.lastStorageSize = stats.lastStorageSize;
      g_stats.lastTextureUploadSize = stats.lastTextureUploadSize;
      if (callback) {
@@ -4012,7 +4100,7 @@ index a64dd2d..e4be24a 100644
      }
      g_frameSlots.release(frameSlot);
      expire_cached_bind_groups();
-@@ -1561,7 +1673,46 @@ static void encode_op(wgpu::CommandEncoder& cmd, FramePacket& frame, const Frame
+@@ -1561,7 +1716,46 @@ static void encode_op(wgpu::CommandEncoder& cmd, FramePacket& frame, const Frame
    }
  }
  
@@ -4060,7 +4148,25 @@ index a64dd2d..e4be24a 100644
    ZoneScoped;
    if (!passInfo.sealed) {
      return;
-@@ -1625,12 +1776,14 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
+@@ -1570,7 +1764,7 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
+   for (const auto& conv : passInfo.paletteConvs) {
+     tex_palette_conv::run(cmd, conv);
+   }
+-  if (!passInfo.observable && !passInfo.resolveTarget && !passInfo.offscreen) {
++  if (!passInfo.observable && !passInfo.resolveTarget && !passInfo.offscreen && !passInfo.glowScene) {
+     // Skip intermediate EFB render passes without observable output.
+     return;
+   }
+@@ -1622,15 +1816,23 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
+   auto pass = cmd.BeginRenderPass(&renderPassDescriptor);
+   render_pass(pass, frame, passInfo);
+   pass.End();
++  if (passInfo.colorView.Get() == webgpu::g_frameBuffer.view.Get())
++    render_glow_pass(cmd, passInfo);
++#ifdef AURORA_ENABLE_GXCORE
++  if (passInfo.glowScene && passInfo.copySourceView)
++    glow::take_scene(cmd, passInfo.copySourceView, passInfo.targetSize, passInfo.msaaSamples);
++#endif
  
    // Pre-resolve / pre-present EFB color plane (GPNF §7). Encode before the
    // resolve copy so the snapshot matches the pre-copy EFB.
@@ -4077,7 +4183,88 @@ index a64dd2d..e4be24a 100644
      depth_peek::encode_frame_snapshot(cmd, passInfo.copySourceDepthView, passInfo.targetSize, passInfo.msaaSamples);
    }
  
-@@ -1892,8 +2045,14 @@ Range push_indices(const uint8_t* data, size_t length, size_t alignment) {
+@@ -1682,9 +1884,80 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
+       };
+       cmd.CopyTextureToTexture(&src, &dst, &size);
+     }
++#ifdef AURORA_ENABLE_GXCORE
++    if (passInfo.composeGlow)
++      glow::compose(cmd, passInfo.resolveTarget->attachmentTextureView, passInfo.resolveTarget->format);
++#endif
+   }
+ }
+ 
++// GXRuntime recomp patch: an EFB pass's draws that add light, again into the
++// glow buffer (glow.hpp), tested against the pass's depth without writing it.
++static void render_glow_pass(wgpu::CommandEncoder& cmd, const RenderPass& passInfo) {
++#ifdef AURORA_ENABLE_GXCORE
++  if (glow::strength() <= 0.f || !passInfo.depthStencilView)
++    return;
++  bool any = false;
++  for (const auto& c : passInfo.commands)
++    if (c.type == CommandType::Draw && c.data.draw.type == ShaderType::GXCore && c.data.draw.gxcore.glowPipeline != 0) {
++      any = true;
++      break;
++    }
++  if (!any)
++    return;
++  const auto target = glow::begin_pass(passInfo.targetSize, passInfo.msaaSamples);
++  const wgpu::RenderPassColorAttachment attachment{
++      .view = target.view,
++      .resolveTarget = target.resolveView,
++      .loadOp = target.clear ? wgpu::LoadOp::Clear : wgpu::LoadOp::Load,
++      .storeOp = wgpu::StoreOp::Store,
++      .clearValue = {0.0, 0.0, 0.0, 0.0},
++  };
++  const wgpu::RenderPassDepthStencilAttachment depth{
++      .view = passInfo.depthStencilView,
++      .depthReadOnly = true,
++      .stencilReadOnly = passInfo.hasStencil,
++  };
++  const wgpu::RenderPassDescriptor desc{
++      .label = "Glow pass",
++      .colorAttachmentCount = 1,
++      .colorAttachments = &attachment,
++      .depthStencilAttachment = &depth,
++  };
++  auto pass = cmd.BeginRenderPass(&desc);
++  g_currentPipeline = UINTPTR_MAX;
++  pass.SetBindGroup(0, g_staticBindGroup);
++  pass.SetBindGroup(2, gx::g_emptyTextureBindGroup);
++  for (const auto& c : passInfo.commands) {
++    switch (c.type) {
++    case CommandType::SetViewport: {
++      const auto& vp = c.data.setViewport;
++      const float minDepth = gx::UseReversedZ ? 1.f - vp.zfar : vp.znear;
++      const float maxDepth = gx::UseReversedZ ? 1.f - vp.znear : vp.zfar;
++      pass.SetViewport(vp.left, vp.top, vp.width, vp.height, minDepth, maxDepth);
++    } break;
++    case CommandType::SetScissor: {
++      const auto& sc = c.data.setScissor;
++      const auto& size = passInfo.targetSize;
++      const auto x = std::clamp(static_cast<uint32_t>(sc.x), 0u, size.width);
++      const auto y = std::clamp(static_cast<uint32_t>(sc.y), 0u, size.height);
++      const auto w = std::clamp(static_cast<uint32_t>(sc.width), 0u, size.width - x);
++      const auto h = std::clamp(static_cast<uint32_t>(sc.height), 0u, size.height - y);
++      pass.SetScissorRect(x, y, w, h);
++    } break;
++    case CommandType::Draw:
++      if (c.data.draw.type == ShaderType::GXCore && c.data.draw.gxcore.glowPipeline != 0)
++        gxcore::render_glow(c.data.draw.gxcore, pass);
++      break;
++    default:
++      break;
++    }
++  }
++  pass.End();
++  g_currentPipeline = UINTPTR_MAX;
++#endif
++}
++
+ void after_submit() noexcept {
+   depth_peek::after_submit();
+   efb_readback::after_submit();
+@@ -1892,8 +2165,14 @@ Range push_indices(const uint8_t* data, size_t length, size_t alignment) {
  
  Range push_uniform(const uint8_t* data, size_t length) {
    ZoneScoped;
@@ -4095,7 +4282,7 @@ index a64dd2d..e4be24a 100644
  
  Range push_storage(const uint8_t* data, size_t length) {
 diff --git a/graphics/aurora/lib/gfx/common.hpp b/graphics/aurora/lib/gfx/common.hpp
-index 37acf2b..6e41efa 100644
+index 37acf2b..f3985b9 100644
 --- a/graphics/aurora/lib/gfx/common.hpp
 +++ b/graphics/aurora/lib/gfx/common.hpp
 @@ -7,8 +7,10 @@
@@ -4161,6 +4348,24 @@ index 37acf2b..6e41efa 100644
  void render_pass(const wgpu::RenderPassEncoder& pass, uint32_t idx);
  void after_submit() noexcept;
  void gpu_synchronize();
+@@ -276,9 +311,16 @@ struct EfbCopyFilterParams {
+   std::uint32_t filter_row[3]{0, 64, 0};
+ };
+ 
++// GXRuntime recomp patch: composeGlow adds the frame's glow (glow.hpp) to the
++// copy, for the snapshot of the frame that is shown.
+ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool clearAlpha, bool clearDepth,
+                    Vec4<float> clearColorValue, float clearDepthValue, GXTexFmt resolveFormat = GX_TF_RGBA8,
+-                   const EfbCopyFilterParams* filter = nullptr);
++                   const EfbCopyFilterParams* filter = nullptr, bool composeGlow = false);
++// GXRuntime recomp patch: the EFB now holds the frame's 3D scene (the HUD
++// comes next): end the pass there and keep the scene for the glow.
++void glow_scene_break();
++// The same at the end of the current pass (a frame with no HUD).
++void glow_scene_here();
+ 
+ struct ColorPassDescriptor {
+   const char* label = nullptr;
 diff --git a/graphics/aurora/lib/gfx/efb_readback.cpp b/graphics/aurora/lib/gfx/efb_readback.cpp
 index 7af8fca..4c14e34 100644
 --- a/graphics/aurora/lib/gfx/efb_readback.cpp
@@ -4198,20 +4403,441 @@ index 7af8fca..4c14e34 100644
    if (!cont)
      g_requested.store(false, std::memory_order_release);
    else
+diff --git a/graphics/aurora/lib/gfx/glow.cpp b/graphics/aurora/lib/gfx/glow.cpp
+new file mode 100644
+index 0000000..64246c9
+--- /dev/null
++++ b/graphics/aurora/lib/gfx/glow.cpp
+@@ -0,0 +1,370 @@
++#include "glow.hpp"
++
++#include "../webgpu/gpu_prof.hpp"
++
++#include <atomic>
++#include <cstdlib>
++#include <vector>
++
++namespace aurora::gfx::glow {
++namespace {
++using webgpu::g_device;
++using webgpu::g_queue;
++
++constexpr auto kFormat = wgpu::TextureFormat::RGBA16Float;
++constexpr uint32_t kMaxLevels = 7;
++
++// Full-screen triangle; down = 13 taps (Jimenez, "Next Generation Post
++// Processing in Call of Duty: Advanced Warfare"), up = 3x3 tent added to the
++// level above, compose = the tent of the top level times the strength.
++constexpr const char* kShader = R"(
++struct VOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
++@vertex fn vs(@builtin(vertex_index) i: u32) -> VOut {
++  let p = vec2f(f32((i << 1u) & 2u), f32(i & 2u));
++  var o: VOut;
++  o.pos = vec4f(p.x * 2.0 - 1.0, 1.0 - p.y * 2.0, 0.0, 1.0);
++  o.uv = p;
++  return o;
++}
++@group(0) @binding(0) var src: texture_2d<f32>;
++@group(0) @binding(1) var samp: sampler;
++struct Params { a: vec4f, b: vec4f };
++@group(0) @binding(2) var<uniform> params: Params;
++fn tap(uv: vec2f, t: vec2f, x: f32, y: f32) -> vec3f {
++  return textureSampleLevel(src, samp, uv + t * vec2f(x, y), 0.0).rgb;
++}
++fn tent(uv: vec2f) -> vec3f {
++  let t = 1.0 / vec2f(textureDimensions(src));
++  return (tap(uv, t, -1.0, -1.0) + tap(uv, t, 1.0, -1.0) + tap(uv, t, -1.0, 1.0) + tap(uv, t, 1.0, 1.0)
++        + 2.0 * (tap(uv, t, 0.0, -1.0) + tap(uv, t, -1.0, 0.0) + tap(uv, t, 1.0, 0.0) + tap(uv, t, 0.0, 1.0))
++        + 4.0 * tap(uv, t, 0.0, 0.0)) / 16.0;
++}
++@fragment fn down(in: VOut) -> @location(0) vec4f {
++  let t = 1.0 / vec2f(textureDimensions(src));
++  let uv = in.uv;
++  let outer = tap(uv, t, -2.0, -2.0) + tap(uv, t, 2.0, -2.0) + tap(uv, t, -2.0, 2.0) + tap(uv, t, 2.0, 2.0);
++  let cross = tap(uv, t, 0.0, -2.0) + tap(uv, t, -2.0, 0.0) + tap(uv, t, 2.0, 0.0) + tap(uv, t, 0.0, 2.0);
++  let inner = tap(uv, t, -1.0, -1.0) + tap(uv, t, 1.0, -1.0) + tap(uv, t, -1.0, 1.0) + tap(uv, t, 1.0, 1.0);
++  let c = tap(uv, t, 0.0, 0.0) * 0.125 + outer * 0.03125 + cross * 0.0625 + inner * 0.125;
++  return vec4f(max(c, vec3f(0.0)), 1.0);
++}
++// a = (strength, threshold, knee, scene weight), b = (saturation boost,
++// spread: each wider level's share, cap, 0).
++@fragment fn up(in: VOut) -> @location(0) vec4f {
++  return vec4f(tent(in.uv) * params.b.y, 1.0);
++}
++@fragment fn show(in: VOut) -> @location(0) vec4f {
++  return vec4f(textureSampleLevel(src, samp, in.uv, 0.0).rgb, 1.0);
++}
++@fragment fn compose(in: VOut) -> @location(0) vec4f {
++  return vec4f(tent(in.uv) * params.a.x, 0.0);
++}
++// The scene's lights: what scores over the threshold, with a soft knee, times
++// the scene weight. The score is the brightest channel raised by saturation:
++// Eternal Darkness is dark, and what glows in it (a portal, flames, magick,
++// runes) is vivid colour rather than bright; lit stone and skin are not.
++fn bright_of(c: vec3f) -> vec3f {
++  let hi = max(c.r, max(c.g, c.b));
++  let lo = min(c.r, min(c.g, c.b));
++  let sat = (hi - lo) / max(hi, 1e-4);
++  let score = hi * (1.0 + params.b.x * sat * sat);
++  let t = params.a.y;
++  let k = params.a.z;
++  var soft = clamp(score - t + k, 0.0, 2.0 * k);
++  soft = soft * soft / (4.0 * k + 1e-4);
++  // Over the threshold by at most the cap (b.z): a sunlit floor feeds the
++  // glow about as much as a portal does, not four times as much.
++  let w = min(max(soft, score - t), params.b.z) / max(score, 1e-4);
++  return c * w * params.a.w;
++}
++// Straight from the full-size frame into the half-size first level: four
++// taps between texels, each the average of 2x2, judged separately.
++@fragment fn bright(in: VOut) -> @location(0) vec4f {
++  let t = 1.0 / vec2f(textureDimensions(src));
++  let c = bright_of(tap(in.uv, t, -1.0, -1.0)) + bright_of(tap(in.uv, t, 1.0, -1.0))
++        + bright_of(tap(in.uv, t, -1.0, 1.0)) + bright_of(tap(in.uv, t, 1.0, 1.0));
++  return vec4f(c * 0.25, 1.0);
++}
++)";
++
++float env_float(const char* name, float fallback) {
++  const char* e = std::getenv(name);
++  return e != nullptr ? static_cast<float>(std::atof(e)) : fallback;
++}
++// AURORA_GLOW=<strength> (testing): overrides the game's setting.
++std::atomic<float> g_strength{env_float("AURORA_GLOW", 0.f)};
++// AURORA_GLOW_THRESHOLD / _KNEE / _SCENE (testing): the scene's highlights.
++const float g_threshold = env_float("AURORA_GLOW_THRESHOLD", 0.35f);
++const float g_knee = env_float("AURORA_GLOW_KNEE", 0.15f);
++const float g_scene = env_float("AURORA_GLOW_SCENE", 1.0f);
++const float g_saturation = env_float("AURORA_GLOW_SATURATION", 1.5f);
++const float g_spread = env_float("AURORA_GLOW_SPREAD", 0.85f);
++const float g_cap = env_float("AURORA_GLOW_CAP", 0.3f);
++// AURORA_GLOW_SHOW=1 (testing): the frame shows the glow buffer (what glows)
++// instead of the game.
++const bool g_show = std::getenv("AURORA_GLOW_SHOW") != nullptr;
++const bool g_strengthFromEnv = std::getenv("AURORA_GLOW") != nullptr;
++
++struct Level {
++  wgpu::Texture texture;
++  wgpu::TextureView view;
++  wgpu::BindGroup source; // this level as the source of the next pass
++};
++
++wgpu::TextureView g_sceneView; // the EFB the scene's highlights come from
++wgpu::BindGroup g_sceneSource;
++bool g_sceneTaken = false;     // level 0 holds this frame's scene highlights
++wgpu::Texture g_ms;
++wgpu::TextureView g_msView;
++Level g_base; // the glow buffer (resolved)
++std::vector<Level> g_levels;
++wgpu::Extent3D g_size{};
++uint32_t g_samples = 0;
++bool g_drawn = false;      // glow drawn since the last compose
++bool g_needClear = true;   // next glow pass starts from black
++
++wgpu::ShaderModule g_module;
++wgpu::BindGroupLayout g_layout;
++wgpu::PipelineLayout g_pipelineLayout;
++wgpu::Sampler g_sampler;
++wgpu::Buffer g_uniform;
++float g_uniformValue = -1.f;
++wgpu::RenderPipeline g_down, g_downAdd, g_up, g_bright;
++std::vector<std::pair<wgpu::TextureFormat, wgpu::RenderPipeline>> g_compose;
++
++// add: dst + src. screen (the compose onto the frame): dst + src * (1 - dst),
++// which lifts the dark round a light and never pushes a bright wall past white.
++wgpu::RenderPipeline make_pipeline(const char* entry, wgpu::TextureFormat format, bool add, bool rgbOnly,
++                                   bool screen = false) {
++  const wgpu::BlendState blend{
++      .color = {.operation = wgpu::BlendOperation::Add,
++                .srcFactor = screen ? wgpu::BlendFactor::OneMinusDst : wgpu::BlendFactor::One,
++                .dstFactor = wgpu::BlendFactor::One},
++      .alpha = {.operation = wgpu::BlendOperation::Add,
++                .srcFactor = wgpu::BlendFactor::Zero,
++                .dstFactor = wgpu::BlendFactor::One},
++  };
++  const wgpu::ColorTargetState target{
++      .format = format,
++      .blend = add ? &blend : nullptr,
++      .writeMask = rgbOnly ? wgpu::ColorWriteMask::Red | wgpu::ColorWriteMask::Green | wgpu::ColorWriteMask::Blue
++                           : wgpu::ColorWriteMask::All,
++  };
++  const wgpu::FragmentState fragment{
++      .module = g_module,
++      .entryPoint = entry,
++      .targetCount = 1,
++      .targets = &target,
++  };
++  const wgpu::RenderPipelineDescriptor desc{
++      .label = "Glow",
++      .layout = g_pipelineLayout,
++      .vertex = {.module = g_module, .entryPoint = "vs"},
++      .primitive = {.topology = wgpu::PrimitiveTopology::TriangleList},
++      .fragment = &fragment,
++  };
++  return g_device.CreateRenderPipeline(&desc);
++}
++
++void init_shared() {
++  if (g_module)
++    return;
++  wgpu::ShaderSourceWGSL source{};
++  source.code = kShader;
++  const wgpu::ShaderModuleDescriptor moduleDesc{.nextInChain = &source, .label = "Glow"};
++  g_module = g_device.CreateShaderModule(&moduleDesc);
++  const std::array entries{
++      wgpu::BindGroupLayoutEntry{
++          .binding = 0,
++          .visibility = wgpu::ShaderStage::Fragment,
++          .texture = {.sampleType = wgpu::TextureSampleType::Float, .viewDimension = wgpu::TextureViewDimension::e2D},
++      },
++      wgpu::BindGroupLayoutEntry{
++          .binding = 1,
++          .visibility = wgpu::ShaderStage::Fragment,
++          .sampler = {.type = wgpu::SamplerBindingType::Filtering},
++      },
++      wgpu::BindGroupLayoutEntry{
++          .binding = 2,
++          .visibility = wgpu::ShaderStage::Fragment,
++          .buffer = {.type = wgpu::BufferBindingType::Uniform, .minBindingSize = 32},
++      },
++  };
++  const wgpu::BindGroupLayoutDescriptor layoutDesc{
++      .label = "Glow", .entryCount = entries.size(), .entries = entries.data()};
++  g_layout = g_device.CreateBindGroupLayout(&layoutDesc);
++  const wgpu::PipelineLayoutDescriptor pipelineLayoutDesc{
++      .label = "Glow", .bindGroupLayoutCount = 1, .bindGroupLayouts = &g_layout};
++  g_pipelineLayout = g_device.CreatePipelineLayout(&pipelineLayoutDesc);
++  const wgpu::SamplerDescriptor samplerDesc{
++      .label = "Glow",
++      .addressModeU = wgpu::AddressMode::ClampToEdge,
++      .addressModeV = wgpu::AddressMode::ClampToEdge,
++      .magFilter = wgpu::FilterMode::Linear,
++      .minFilter = wgpu::FilterMode::Linear,
++  };
++  g_sampler = g_device.CreateSampler(&samplerDesc);
++  const wgpu::BufferDescriptor bufferDesc{
++      .label = "Glow", .usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst, .size = 32};
++  g_uniform = g_device.CreateBuffer(&bufferDesc);
++  g_down = make_pipeline("down", kFormat, false, false);
++  g_up = make_pipeline("up", kFormat, true, false);
++  g_downAdd = make_pipeline("down", kFormat, true, false);
++  g_bright = make_pipeline("bright", kFormat, false, false);
++}
++
++wgpu::BindGroup source_group(const wgpu::TextureView& view, const char* label) {
++  const std::array entries{
++      wgpu::BindGroupEntry{.binding = 0, .textureView = view},
++      wgpu::BindGroupEntry{.binding = 1, .sampler = g_sampler},
++      wgpu::BindGroupEntry{.binding = 2, .buffer = g_uniform, .size = 32},
++  };
++  const wgpu::BindGroupDescriptor groupDesc{
++      .label = label, .layout = g_layout, .entryCount = entries.size(), .entries = entries.data()};
++  return g_device.CreateBindGroup(&groupDesc);
++}
++
++Level make_level(uint32_t width, uint32_t height, const char* label) {
++  const wgpu::TextureDescriptor desc{
++      .label = label,
++      .usage = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding,
++      .size = {width, height, 1},
++      .format = kFormat,
++  };
++  Level level;
++  level.texture = g_device.CreateTexture(&desc);
++  level.view = level.texture.CreateView();
++  level.source = source_group(level.view, label);
++  return level;
++}
++
++void make_targets(const wgpu::Extent3D& size, uint32_t samples) {
++  init_shared();
++  g_size = size;
++  g_samples = samples;
++  g_base = make_level(size.width, size.height, "Glow buffer");
++  g_ms = {};
++  g_msView = {};
++  if (samples > 1) {
++    const wgpu::TextureDescriptor desc{
++        .label = "Glow buffer (MSAA)",
++        .usage = wgpu::TextureUsage::RenderAttachment,
++        .size = {size.width, size.height, 1},
++        .format = kFormat,
++        .sampleCount = samples,
++    };
++    g_ms = g_device.CreateTexture(&desc);
++    g_msView = g_ms.CreateView();
++  }
++  g_levels.clear();
++  uint32_t w = size.width, h = size.height;
++  while (g_levels.size() < kMaxLevels && w >= 16 && h >= 16) {
++    w = (w + 1) / 2;
++    h = (h + 1) / 2;
++    g_levels.push_back(make_level(w, h, "Glow level"));
++  }
++  g_sceneTaken = false;
++  g_needClear = true;
++  g_drawn = false;
++}
++
++void ensure_targets(const wgpu::Extent3D& size, uint32_t samples) {
++  if (!g_base.texture || g_size.width != size.width || g_size.height != size.height || g_samples != samples)
++    make_targets(size, samples);
++}
++
++void draw(const wgpu::CommandEncoder& cmd, const wgpu::RenderPipeline& pipeline, const wgpu::BindGroup& source,
++          const wgpu::TextureView& target, bool load, const char* label) {
++  const wgpu::RenderPassColorAttachment attachment{
++      .view = target,
++      .loadOp = load ? wgpu::LoadOp::Load : wgpu::LoadOp::Clear,
++      .storeOp = wgpu::StoreOp::Store,
++      .clearValue = {0.0, 0.0, 0.0, 0.0},
++  };
++  const wgpu::RenderPassDescriptor desc{
++      .label = label,
++      .colorAttachmentCount = 1,
++      .colorAttachments = &attachment,
++  };
++  auto pass = cmd.BeginRenderPass(&desc);
++  pass.SetPipeline(pipeline);
++  pass.SetBindGroup(0, source);
++  pass.Draw(3);
++  pass.End();
++}
++void write_params() {
++  const float s = g_strength.load(std::memory_order_relaxed);
++  if (s == g_uniformValue)
++    return;
++  const float value[8]{s, g_threshold, g_knee, g_scene, g_saturation, g_spread, g_cap, 0.f};
++  g_queue.WriteBuffer(g_uniform, 0, value, sizeof value);
++  g_uniformValue = s;
++}
++} // namespace
++
++float strength() noexcept { return g_strength.load(std::memory_order_relaxed); }
++
++void set_strength(float strength) noexcept {
++  if (!g_strengthFromEnv)
++    g_strength.store(strength, std::memory_order_relaxed);
++}
++
++Target begin_pass(const wgpu::Extent3D& size, uint32_t msaaSamples) {
++  ensure_targets(size, msaaSamples);
++  Target target{
++      .view = g_samples > 1 ? g_msView : g_base.view,
++      .resolveView = g_samples > 1 ? g_base.view : nullptr,
++      .clear = g_needClear,
++  };
++  g_needClear = false;
++  g_drawn = true;
++  return target;
++}
++
++void take_scene(const wgpu::CommandEncoder& cmd, const wgpu::TextureView& efb, const wgpu::Extent3D& size,
++                uint32_t msaaSamples) {
++  if (strength() <= 0.f || g_scene <= 0.f)
++    return;
++  ensure_targets(size, msaaSamples);
++  if (g_levels.empty())
++    return;
++  if (g_sceneView.Get() != efb.Get()) {
++    g_sceneView = efb;
++    g_sceneSource = source_group(efb, "Glow scene");
++  }
++  write_params();
++  // A later keep (3D drawn after a flat draw) replaces an earlier one.
++  draw(cmd, g_bright, g_sceneSource, g_levels[0].view, false, "Glow scene");
++  g_sceneTaken = true;
++}
++
++void compose(const wgpu::CommandEncoder& cmd, const wgpu::TextureView& dst, wgpu::TextureFormat format) {
++  if ((!g_drawn && !g_sceneTaken) || g_levels.empty())
++    return;
++  const bool drawn = g_drawn, scene = g_sceneTaken;
++  g_drawn = false;
++  g_sceneTaken = false;
++  g_needClear = true;
++  if (strength() <= 0.f)
++    return;
++  write_params();
++  wgpu::RenderPipeline compose;
++  for (const auto& [f, p] : g_compose)
++    if (f == format)
++      compose = p;
++  if (!compose) {
++    compose = g_show ? make_pipeline("show", format, false, false) : make_pipeline("compose", format, true, true, /*screen=*/true);
++    g_compose.emplace_back(format, compose);
++  }
++  const webgpu::gpu_prof::Zone zone{cmd, "Glow"};
++  // The additive draws' glow joins the scene's in level 0.
++  if (drawn)
++    draw(cmd, scene ? g_downAdd : g_down, g_base.source, g_levels[0].view, scene, "Glow down");
++  for (size_t i = 1; i < g_levels.size(); ++i)
++    draw(cmd, g_down, g_levels[i - 1].source, g_levels[i].view, false, "Glow down");
++  for (size_t i = g_levels.size() - 1; i-- > 0;)
++    draw(cmd, g_up, g_levels[i + 1].source, g_levels[i].view, true, "Glow up");
++  draw(cmd, compose, g_levels[0].source, dst, true, "Glow compose");
++}
++
++} // namespace aurora::gfx::glow
+diff --git a/graphics/aurora/lib/gfx/glow.hpp b/graphics/aurora/lib/gfx/glow.hpp
+new file mode 100644
+index 0000000..67256c2
+--- /dev/null
++++ b/graphics/aurora/lib/gfx/glow.hpp
+@@ -0,0 +1,36 @@
++#pragma once
++
++// GXRuntime recomp patch: glow (bloom). A draw that adds light to the screen
++// (additive blending: candles, magick, rune glow) is drawn a second time into
++// a float glow buffer after its EFB pass; at the display copy the buffer is
++// blurred down a chain of half-size targets and added to the shown frame,
++// then cleared for the next frame. Everything is encoded on the render
++// worker. The strength is 0 (off) until aurora_set_glow sets it.
++
++#include "../webgpu/gpu.hpp"
++
++namespace aurora::gfx::glow {
++
++float strength() noexcept;
++void set_strength(float strength) noexcept;
++
++// The glow buffer to draw into after an EFB pass (size and samples of the
++// EFB), made or remade as needed. Clear on the first pass after a display.
++struct Target {
++  wgpu::TextureView view;
++  wgpu::TextureView resolveView; // null without MSAA
++  bool clear = false;
++};
++Target begin_pass(const wgpu::Extent3D& size, uint32_t msaaSamples);
++
++// Keep the frame's 3D scene (the EFB before the HUD is drawn over it): its
++// highlights are added to the glow at the next compose.
++void take_scene(const wgpu::CommandEncoder& cmd, const wgpu::TextureView& efb, const wgpu::Extent3D& size,
++                uint32_t msaaSamples);
++
++// Blur this frame's glow and add it to dst (a render texture of the frame:
++// rect of the EFB's size), then clear the glow for the next frame. Nothing
++// when no glow was drawn since the last display.
++void compose(const wgpu::CommandEncoder& cmd, const wgpu::TextureView& dst, wgpu::TextureFormat format);
++
++} // namespace aurora::gfx::glow
 diff --git a/graphics/aurora/lib/gfx/gxcore_draw.cpp b/graphics/aurora/lib/gfx/gxcore_draw.cpp
-index 71136b9..a7818f9 100644
+index 71136b9..cfd9ac8 100644
 --- a/graphics/aurora/lib/gfx/gxcore_draw.cpp
 +++ b/graphics/aurora/lib/gfx/gxcore_draw.cpp
-@@ -1,4 +1,8 @@
+@@ -1,4 +1,11 @@
 +#include <chrono>
 +#include <condition_variable>
  #include "gxcore_draw.hpp"
++#include "glow.hpp"
++
++#include <map>
 +#include "interp.hpp"
 +#include "pipeline_cache.hpp"
  #include "xfb_present.hpp"
  #include "efb_readback.hpp"
  #include "plane_capture.hpp"
-@@ -17,9 +21,15 @@
+@@ -17,9 +24,15 @@
  #include "../dolphin/vi/vi_internal.hpp"
  
  #include <absl/container/flat_hash_map.h>
@@ -4227,7 +4853,7 @@ index 71136b9..a7818f9 100644
  #include <vector>
  
  namespace aurora::gfx::gxcore {
-@@ -40,6 +50,22 @@ namespace {
+@@ -40,6 +53,22 @@ namespace {
  // LOD bias has no WebGPU sampler field — residual stays shader-side if needed.
  // maxAnisotropy>1 is clamped to device capability (textureAnisotropy); WebGPU
  // linear min/mag/mip when aniso is already applied in decode_sampler.
@@ -4250,7 +4876,7 @@ index 71136b9..a7818f9 100644
  wgpu::SamplerDescriptor sampler_from_plan(const gxc::PlanSampler& s) {
    auto address = [](std::uint8_t a) -> wgpu::AddressMode {
      switch (a) {
-@@ -158,6 +184,64 @@ wgpu::BlendFactor to_blend_factor_dst(gxc::DstBlendFactor factor, bool dual_src)
+@@ -158,6 +187,64 @@ wgpu::BlendFactor to_blend_factor_dst(gxc::DstBlendFactor factor, bool dual_src)
    }
  }
  
@@ -4315,7 +4941,7 @@ index 71136b9..a7818f9 100644
  // Texture bind group layout for a used-texmap set (63/Mfin multi-texmap): texmap
  // t occupies binding 2t (texture) + 2t+1 (sampler), matching the WGSL. Cached per
  // mask; used_mask=1 (texmap 0 only) reproduces the pre-Mfin single-texmap layout.
-@@ -228,11 +312,76 @@ struct TextureKey {
+@@ -228,11 +315,76 @@ struct TextureKey {
  };
  
  absl::flat_hash_map<TextureKey, TextureHandle> g_textureCache;
@@ -4392,7 +5018,7 @@ index 71136b9..a7818f9 100644
  TextureCacheStats g_textureCacheStats;
  
  // EFB copy-to-texture destinations (63/S16): dest guest address -> resolved EFB
-@@ -242,6 +391,26 @@ TextureCacheStats g_textureCacheStats;
+@@ -242,6 +394,26 @@ TextureCacheStats g_textureCacheStats;
  // (a re-copy to the same address updates in place, matching the live path).
  // E7: format-0xF display copies also land here (Virtual XFB GPU texture).
  absl::flat_hash_map<uint32_t, TextureHandle> g_efbCopyTextures;
@@ -4419,7 +5045,7 @@ index 71136b9..a7818f9 100644
  
  // E7 present-from-RAM: YUYV decoded from guest MEM1 when no GPU copy exists
  // (software/external XFB writers). Keyed by physical address; re-upload when
-@@ -261,6 +430,19 @@ static uint32_t g_last_xfb_dest_stride = 0;
+@@ -261,6 +433,19 @@ static uint32_t g_last_xfb_dest_stride = 0;
  // E7: last display-copy XFB height after BP 0x4E y_scale (0 = use VI height).
  static uint32_t g_last_xfb_height = 0;
  
@@ -4439,7 +5065,7 @@ index 71136b9..a7818f9 100644
  static unsigned long long g_xfb_display_copy_count = 0;
  static unsigned long long g_xfb_ram_present_count = 0;
  
-@@ -277,17 +459,118 @@ unsigned long long xfb_display_copy_count() noexcept {
+@@ -277,17 +462,118 @@ unsigned long long xfb_display_copy_count() noexcept {
    return g_xfb_display_copy_count;
  }
  
@@ -4560,7 +5186,7 @@ index 71136b9..a7818f9 100644
      return &it->second;
  
    const auto dims = aurora::vi::configured_xfb_size();
-@@ -345,6 +628,11 @@ const TextureHandle* lookup_xfb_texture(std::uint32_t physical_address) noexcept
+@@ -345,6 +631,11 @@ const TextureHandle* lookup_xfb_texture(std::uint32_t physical_address) noexcept
    return &slot.handle;
  }
  
@@ -4572,7 +5198,7 @@ index 71136b9..a7818f9 100644
  wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
    const gxc::PipelineKey& key = config.key;
    const std::string wgsl = gxc::generate_wgsl(key.shader);
-@@ -364,11 +652,19 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -364,11 +655,19 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
    const bool textured = key.shader.textured != 0;
    // Multi-texmap: the texture group's layout matches the set of texmaps the WGSL
    // declares (derived identically from the shader key), so pipeline and bind
@@ -4595,7 +5221,7 @@ index 71136b9..a7818f9 100644
        tev ? g_uniformBindGroupLayout : texture_bind_group_layout(tex_mask),
        texture_bind_group_layout(tex_mask),
    };
-@@ -427,7 +723,13 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -427,7 +726,13 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
    // vertex FORMAT carries that attribute. A lit/emboss draw whose format omits
    // it reads the cached fallback from the uniform instead (I_CACHED_NORMAL), so
    // the shader does not declare the input and the layout must not provide it.
@@ -4610,7 +5236,7 @@ index 71136b9..a7818f9 100644
        key.shader.has_vertex_normal != 0) {
      attributes.push_back(wgpu::VertexAttribute{
          .format = wgpu::VertexFormat::Float32x3,
-@@ -442,14 +744,14 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -442,14 +747,14 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
          .shaderLocation = 13,
      });
    }
@@ -4627,7 +5253,33 @@ index 71136b9..a7818f9 100644
      attributes.push_back(wgpu::VertexAttribute{
          .format = wgpu::VertexFormat::Float32x3,
          .offset = gxc::kVertexTangentOffset,
-@@ -536,6 +838,10 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -466,7 +771,7 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+   const bool depthCompare = key.depth_test != 0;
+   const wgpu::DepthStencilState depthStencil{
+       .format = g_graphicsConfig.depthFormat,
+-      .depthWriteEnabled = depthCompare && key.depth_update != 0,
++      .depthWriteEnabled = depthCompare && key.depth_update != 0 && config.glow == 0,
+       .depthCompare =
+           depthCompare ? to_compare(static_cast<gxc::CompareMode>(
+                              key.depth_func))
+@@ -513,8 +818,15 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+   // is clear (const-α write with src1-driven color blend).
+   const bool blending =
+       key.blend_enable != 0 || key.blend_subtract != 0 || dual_src;
++  // Glow: the same light added into the float glow buffer, colour only.
++  if (config.glow != 0) {
++    blendState.alpha = {.operation = wgpu::BlendOperation::Add,
++                        .srcFactor = wgpu::BlendFactor::Zero,
++                        .dstFactor = wgpu::BlendFactor::One};
++    writeMask = wgpu::ColorWriteMask::Red | wgpu::ColorWriteMask::Green | wgpu::ColorWriteMask::Blue;
++  }
+   const wgpu::ColorTargetState colorTarget{
+-      .format = g_graphicsConfig.surfaceConfiguration.format,
++      .format = config.glow != 0 ? wgpu::TextureFormat::RGBA16Float : g_graphicsConfig.surfaceConfiguration.format,
+       .blend = blending ? &blendState : nullptr,
+       .writeMask = writeMask,
+   };
+@@ -536,6 +848,10 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
    default:
      break; // None here; All was skipped at plan time
    }
@@ -4638,10 +5290,24 @@ index 71136b9..a7818f9 100644
  
    const wgpu::RenderPipelineDescriptor descriptor{
        .label = "GXCore Pipeline",
-@@ -566,10 +872,22 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -564,12 +880,34 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+   return g_device.CreateRenderPipeline(&descriptor);
+ }
  
- void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
-   if (!bind_pipeline(data.pipeline, pass)) {
+-void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
+-  if (!bind_pipeline(data.pipeline, pass)) {
++static void render_with(PipelineRef pipeline, const DrawData& data, const wgpu::RenderPassEncoder& pass);
++
++void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) { render_with(data.pipeline, data, pass); }
++
++// A glow draw whose pipeline is still compiling just adds no glow this frame.
++void render_glow(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
++  if (data.glowPipeline != 0 && bind_pipeline(data.glowPipeline, pass))
++    render_with(data.glowPipeline, data, pass);
++}
++
++static void render_with(PipelineRef pipelineRef, const DrawData& data, const wgpu::RenderPassEncoder& pass) {
++  if (!bind_pipeline(pipelineRef, pass)) {
 +    // ED_PIPELINE_SKIP_LOG: draws skipped while their pipeline compiles.
 +    static uint32_t frame = UINT32_MAX, skipped = 0;
 +    static const bool log = std::getenv("ED_PIPELINE_SKIP_LOG") != nullptr;
@@ -4663,7 +5329,7 @@ index 71136b9..a7818f9 100644
    if (data.tev) {
      // group 2 = PS uniform (same dynamic-uniform bind group, its own offset);
      // group 3 = texture.
-@@ -591,14 +909,31 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
+@@ -591,18 +929,41 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
  
  void reset_texture_cache() {
    g_textureCache.clear();
@@ -4695,7 +5361,17 @@ index 71136b9..a7818f9 100644
  }
  
  const TextureCacheStats& texture_cache_stats() { return g_textureCacheStats; }
-@@ -612,6 +947,8 @@ const TextureCacheStats& texture_cache_stats() { return g_textureCacheStats; }
+ 
++// Glow (glow.hpp): this frame drew 3D, and its scene is kept.
++static bool g_glowSaw3d = false;
++static bool g_glowSceneKept = false;
++static uint32_t g_glowSwitches = 0;     // 3D to flat, this frame
++static uint32_t g_glowLastSwitches = 0; // and the frame before
++
+ // Resolve the current EFB region into a texture the guest-identity path can bind
+ // later, keyed by the copy's destination address (63/S16). Mirrors aurora
+ // lib/dolphin/gx/GXFrameBuffer.cpp copy_tex on the same substrate: map the EFB
+@@ -612,6 +973,8 @@ const TextureCacheStats& texture_cache_stats() { return g_textureCacheStats; }
  // color/Z afterwards. The bound draw's geometry is already in the pass (the
  // sink flushed the pending draw before firing this).
  void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
@@ -4704,7 +5380,7 @@ index 71136b9..a7818f9 100644
    // Mirror the copy-clear color/Z (BP 0x4F-0x51 at this copy) into the gx
    // state GXSetCopyClear would have written: begin_frame's pass-0 EFB clear
    // reads g_gxState.clearColor/clearDepth, and in gxcore mode the live gx
-@@ -635,11 +972,25 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -635,11 +998,25 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
    const auto fmt = is_xfb ? GX_TF_RGBA8 : static_cast<GXTexFmt>(cmd.format);
    // Dual dims: EFB source rect stays cmd.height; XFB dest height from
    // byte_size/stride (or cmd.xfb_height if gxcore latched it).
@@ -4731,7 +5407,7 @@ index 71136b9..a7818f9 100644
    });
    // U8: half_scale halves destination dims (TextureEncoder box 2:1).
    const uint32_t scaleShift = cmd.half_scale ? 1u : 0u;
-@@ -660,8 +1011,9 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -660,8 +1037,9 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
        dstHeight = xfb_h;
    }
  
@@ -4743,7 +5419,7 @@ index 71136b9..a7818f9 100644
        it->second->size.width != dstWidth || it->second->size.height != dstHeight) {
      TextureHandle handle;
      if (!is_xfb && gfx::tex_copy_conv::needs_conversion(fmt)) {
-@@ -670,7 +1022,7 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -670,7 +1048,7 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
        handle = gfx::new_render_texture(dstWidth, dstHeight, GX_TF_RGBA8,
                                         is_xfb ? "GXCore XFB" : "GXCore Copy");
      }
@@ -4752,7 +5428,7 @@ index 71136b9..a7818f9 100644
    }
    if (!it->second) {
      return;
-@@ -709,11 +1061,32 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -709,11 +1087,39 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
    // XFB YUYV into guest RAM from this readback on every display copy, so it
    // must stay armed in product runs too (cost: one EFB readback per display
    // copy, ~1-2/frame).
@@ -4776,17 +5452,24 @@ index 71136b9..a7818f9 100644
 +      snapshot = gfx::new_render_texture(efb.size.width, efb.size.height, GX_TF_RGBA8,
 +                                         "GXCore Display Copy");
 +    g_lastDisplayCopy = snapshot;
++    // A 3D frame with no HUD: its scene is the EFB as it is now.
++    if (g_glowSaw3d && !g_glowSceneKept && glow::strength() > 0.f)
++      gfx::glow_scene_here();
++    g_glowSaw3d = false;
++    g_glowSceneKept = false;
++    g_glowLastSwitches = g_glowSwitches;
++    g_glowSwitches = 0;
 +    if (g_lastDisplayCopy)
 +      gfx::resolve_pass(g_lastDisplayCopy,
 +                        gfx::ClipRect{0, 0, static_cast<int32_t>(efb.size.width),
 +                                      static_cast<int32_t>(efb.size.height)},
 +                        false, false, false, Vec4<float>{0.f, 0.f, 0.f, 0.f},
-+                        clearDepthValue, GX_TF_RGBA8, nullptr);
++                        clearDepthValue, GX_TF_RGBA8, nullptr, /*composeGlow=*/true);
 +  }
    gfx::resolve_pass(it->second, srcRect, do_clear && cmd.color_update,
                      do_clear && cmd.alpha_update,
                      do_clear && cmd.depth_update,
-@@ -723,73 +1096,388 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -723,73 +1129,427 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
                                  static_cast<float>(cmd.clear_a) / 255.f},
                      clearDepthValue, fmt, &filter);
  
@@ -5048,6 +5731,45 @@ index 71136b9..a7818f9 100644
    }
 +  {
 +    const auto& P = plan.constants.projection;
++    // GXRuntime recomp patch: the glow keeps the frame's 3D scene where the
++    // HUD starts, at the last switch from 3D to flat (orthographic) draws
++    // (Eternal Darkness draws one flat quad mid-scene, then its portals and
++    // glowing walkways). Keeping it splits the EFB pass, which costs a store
++    // and reload of the whole EFB on a tiled GPU, so only the switch that was
++    // last in the frame before does; 3D drawn after it makes it stale, and
++    // the display copy keeps the scene instead.
++    // AURORA_GLOW_LOG: each 60th frame's runs of 3D (P) and flat (O) draws.
++    static const bool s_runLog = std::getenv("AURORA_GLOW_LOG") != nullptr;
++    if (s_runLog) {
++      static uint32_t s_frame = UINT32_MAX;
++      static std::string s_runs;
++      static char s_last = 0;
++      static uint32_t s_n = 0;
++      if (s_frame != current_frame()) {
++        if (s_frame % 60u == 0u && s_last != 0)
++          std::fprintf(stderr, "[glow] frame=%u runs%s %c%u\n", s_frame, s_runs.c_str(), s_last, s_n);
++        s_runs.clear();
++        s_last = 0;
++        s_n = 0;
++        s_frame = current_frame();
++      }
++      const char kind = P[3][2] == -1.f ? 'P' : 'O';
++      if (kind != s_last && s_last != 0) {
++        s_runs += fmt::format(" {}{}", s_last, s_n);
++        s_n = 0;
++      }
++      s_last = kind;
++      ++s_n;
++    }
++    if (P[3][2] == -1.f) {
++      g_glowSaw3d = true;
++      g_glowSceneKept = false;
++    } else if (g_glowSaw3d && !g_glowSceneKept && !gfx::is_offscreen()) {
++      ++g_glowSwitches;
++      g_glowSceneKept = g_glowSwitches == g_glowLastSwitches && glow::strength() > 0.f;
++      if (g_glowSceneKept)
++        gfx::glow_scene_break();
++    }
 +    if (P[3][2] == -1.f && P[0][0] != 0.f) {
 +      const float aspect = std::fabs(P[1][1] / P[0][0]);
 +      if (aspect > 1.2f && aspect < 1.45f)
@@ -5232,7 +5954,7 @@ index 71136b9..a7818f9 100644
      const float sx = plan.viewport[0];
      const float sy = plan.viewport[1];
      const float sz = plan.viewport[2];
-@@ -799,8 +1487,8 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -799,8 +1559,8 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      const float width = sx * 2.0f;
      const float height = -sy * 2.0f;
      gx::set_logical_viewport({
@@ -5243,7 +5965,7 @@ index 71136b9..a7818f9 100644
          .width = width,
          .height = height,
          .znear = (oz - sz) / 1.6777215e7f,
-@@ -827,7 +1515,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -827,7 +1587,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
        [&](uint32_t address, uint32_t tsize, uint32_t format, uint32_t width,
            uint32_t height, const void* data, uint32_t available, bool has_tlut,
            uint32_t tlut_address, uint32_t tlut_format, uint32_t tlut_entries,
@@ -5252,7 +5974,7 @@ index 71136b9..a7818f9 100644
      auto efbIt = g_efbCopyTextures.find(address);
      if (efbIt != g_efbCopyTextures.end() && efbIt->second) {
        ++g_textureCacheStats.hits;
-@@ -839,23 +1527,262 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -839,23 +1599,262 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      const uint32_t size = std::min(tsize, available);
      // Hash the actual source texels (+ TLUT for CI) so a content change under an
      // unchanged guest identity is a distinct cache entry — see TextureKey.
@@ -5522,7 +6244,7 @@ index 71136b9..a7818f9 100644
      // gxcore owns the decode for every format: produce tightly-packed RGBA8 and
      // upload it as a pre-decoded PC texture (no substrate re-conversion).
      std::vector<uint8_t> decoded;
-@@ -868,8 +1795,48 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -868,8 +1867,48 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      } else {
        decoded = gxc::decode_texture(format, width, height, bytes, size);
      }
@@ -5572,7 +6294,7 @@ index 71136b9..a7818f9 100644
        handle = new_static_texture_2d(
            width, height, 1, GX_TF_RGBA8_PC,
            ArrayRef<uint8_t>{decoded.data(), decoded.size()}, false,
-@@ -892,7 +1859,98 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -892,7 +1931,98 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    };
  
    BindGroupRef textureBindGroup = 0;
@@ -5671,7 +6393,7 @@ index 71136b9..a7818f9 100644
      if (plan.texmap_mask == 0u) {
        // Single-texmap fast path: primary texture + plan.sampler at binding 0/1.
        if (plan.has_texture) {
-@@ -903,7 +1961,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -903,7 +2033,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
              plan.tlut_data, plan.tlut_available);
          if (bound) {
            const auto sampler =
@@ -5680,7 +6402,7 @@ index 71136b9..a7818f9 100644
            const std::array entries{
                WGPUBindGroupEntry{.binding = 0,
                                   .textureView =
-@@ -919,6 +1977,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -919,6 +2049,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            textureBindGroup = bind_group_ref(descriptor);
          }
        }
@@ -5688,7 +6410,7 @@ index 71136b9..a7818f9 100644
      } else {
        // Multi-texmap: bind each used texmap at 2t (texture) / 2t+1 (sampler),
        // matching the WGSL declarations. Per-texmap PlanSampler from
-@@ -932,12 +1991,15 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -932,12 +2063,15 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
          if ((plan.texmap_mask & (1u << t)) == 0u)
            continue;
          const gxc::PlanTexture& pt = plan.textures[t];
@@ -5705,7 +6427,7 @@ index 71136b9..a7818f9 100644
          if (!bound) {
            complete = false;
            break;
-@@ -945,14 +2007,16 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -945,14 +2079,16 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
          held.push_back(bound);
          const gxc::PlanSampler& ps =
              pt.sampler.valid ? pt.sampler : plan.samplers[t];
@@ -5724,7 +6446,7 @@ index 71136b9..a7818f9 100644
        const WGPUBindGroupDescriptor descriptor{
            .label = {"GXCore Texture Bind Group", WGPU_STRLEN},
            .layout = texture_bind_group_layout(plan.texmap_mask).Get(),
-@@ -960,6 +2024,242 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -960,6 +2096,280 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            .entries = entries.data(),
        };
        textureBindGroup = bind_group_ref(descriptor);
@@ -5839,13 +6561,49 @@ index 71136b9..a7818f9 100644
 +           : s_lastPipelineHash == 0u &&
 +                 std::memcmp(&s_lastPipelineConfig, &pipelineConfig,
 +                             sizeof pipelineConfig) == 0);
++  // GXRuntime recomp patch: a draw that adds colour to the screen (blend
++  // dst factor One: flames, magick, glowing runes) gets a glow pipeline too.
++  static PipelineRef s_lastGlowPipeline = 0;
 +  if (!samePipeline) {
 +    s_lastPipeline = pipeline_ref(pipelineConfig);
 +    s_lastPipelineConfig = pipelineConfig;
 +    s_lastPipelineHash = pipelineHash;
 +    s_havePipeline = true;
++    const auto& k = plan.pipeline;
++    s_lastGlowPipeline = 0;
++    if (glow::strength() > 0.f && k.blend_enable != 0 && k.blend_subtract == 0 && k.logic_op_enable == 0 &&
++        k.color_update != 0 && k.shader.use_dst_alpha == 0 &&
++        static_cast<gxc::DstBlendFactor>(k.dst_factor) == gxc::DstBlendFactor::One) {
++      PipelineConfig glowConfig = pipelineConfig;
++      glowConfig.glow = 1;
++      s_lastGlowPipeline = pipeline_ref(glowConfig);
++    }
 +  }
 +  const PipelineRef pipeline = s_lastPipeline;
++  const PipelineRef glowPipeline = s_lastGlowPipeline;
++  // AURORA_GLOW_LOG: each 60th frame's draws by blend (src,dst factors), and
++  // how many added glow.
++  static const bool s_glowLog = std::getenv("AURORA_GLOW_LOG") != nullptr;
++  if (s_glowLog) {
++    static uint32_t s_frame = UINT32_MAX;
++    static std::map<uint32_t, uint32_t> s_blends;
++    static uint32_t s_glow = 0;
++    if (s_frame != current_frame()) {
++      if (s_frame % 60u == 0u) {
++        std::string line;
++        for (const auto& [b, n] : s_blends)
++          line += fmt::format(" {}:{}/{}={}", (b >> 16) & 1, (b >> 8) & 0xff, b & 0xff, n);
++        std::fprintf(stderr, "[glow] frame=%u glow=%u blends(en:src/dst)%s\n", s_frame, s_glow, line.c_str());
++      }
++      s_blends.clear();
++      s_glow = 0;
++      s_frame = current_frame();
++    }
++    const auto& k = plan.pipeline;
++    ++s_blends[(k.blend_enable != 0 ? 1u << 16 : 0u) | (uint32_t{k.src_factor} << 8) | k.dst_factor];
++    if (glowPipeline != 0)
++      ++s_glow;
++  }
 +
 +  // GXRuntime recomp patch: a draw identical to the previous one in all but
 +  // its vertices (same pipeline, constants, textures, viewport and scissor,
@@ -5947,6 +6705,7 @@ index 71136b9..a7818f9 100644
 +            .indexCount = static_cast<uint32_t>(plan.indices.size()),
 +            .textureBindGroup = textureBindGroup,
 +            .tev = tev,
++            .glowPipeline = glowPipeline,
 +        });
 +        return true;
 +      }
@@ -5962,12 +6721,13 @@ index 71136b9..a7818f9 100644
 +          .indexCount = static_cast<uint32_t>(plan.indices.size()),
 +          .textureBindGroup = textureBindGroup,
 +          .tev = tev,
++          .glowPipeline = glowPipeline,
 +      });
 +      return true;
      }
    }
  
-@@ -969,27 +2269,13 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -969,31 +2379,18 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    const auto idxRange = push_indices(
        reinterpret_cast<const uint8_t*>(plan.indices.data()),
        plan.indices.size() * sizeof(uint16_t), 4);
@@ -5997,7 +6757,12 @@ index 71136b9..a7818f9 100644
          .pixelUniformRange = pixelUniformRange,
          .indexCount = static_cast<uint32_t>(plan.indices.size()),
          .textureBindGroup = textureBindGroup,
-@@ -1006,6 +2292,8 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+         .tev = tev,
++        .glowPipeline = glowPipeline,
+     });
+   };
+ 
+@@ -1006,6 +2403,8 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      }
    } else {
      issue_draw();
@@ -6007,7 +6772,7 @@ index 71136b9..a7818f9 100644
    return true;
  }
 diff --git a/graphics/aurora/lib/gfx/gxcore_draw.hpp b/graphics/aurora/lib/gfx/gxcore_draw.hpp
-index 0a23a3f..55dfab6 100644
+index 0a23a3f..83fac70 100644
 --- a/graphics/aurora/lib/gfx/gxcore_draw.hpp
 +++ b/graphics/aurora/lib/gfx/gxcore_draw.hpp
 @@ -1,5 +1,8 @@
@@ -6019,7 +6784,7 @@ index 0a23a3f..55dfab6 100644
  // gxcore substrate integration (63/S12): the 4th per-type draw module beside
  // clear/gx/rmlui. Pipelines and WGSL come from the headless
  // gxruntime::gxcore lib; this file owns only the wgpu plumbing (pipeline
-@@ -17,7 +20,8 @@ struct DrawData {
+@@ -17,11 +20,15 @@ struct DrawData {
    PipelineRef pipeline;
    Range vertRange;
    Range idxRange;
@@ -6029,7 +6794,14 @@ index 0a23a3f..55dfab6 100644
    Range pixelUniformRange;  // PixelShaderConstants (group 2), TEV path only
    uint32_t indexCount;
    BindGroupRef textureBindGroup; // 0 when untextured
-@@ -39,7 +43,11 @@ struct DrawData {
+   bool tev = false; // TEV path: PS uniform at group 2, texture at group 3
++  // GXRuntime recomp patch: a draw that adds light (glow.hpp) is drawn again
++  // with this pipeline into the glow buffer after its EFB pass; 0 otherwise.
++  PipelineRef glowPipeline = 0;
+ };
+ 
+ // Bump when generate_wgsl output or the DrawData/vertex layout changes: the
+@@ -39,17 +46,28 @@ struct DrawData {
  // length, still 3×8).
  // v8: U8 dual-source blend factors (Src1Alpha) when use_dst_alpha + device
  // DualSourceBlending; single-source fallback residual counter otherwise.
@@ -6038,11 +6810,15 @@ index 0a23a3f..55dfab6 100644
 +// binding 0) and the XF block's VertexSharedConstants (group 1 binding 1).
 +// v10: regular texgens read the normal / tangent / binormal source rows
 +// (environment maps), adding those vertex inputs under an unchanged key.
-+constexpr uint32_t GXCorePipelineConfigVersion = 10;
++// v11 (GXRuntime recomp patch): glow, the same draw into the float glow buffer.
++constexpr uint32_t GXCorePipelineConfigVersion = 11;
  
  struct PipelineConfig {
    uint32_t version = GXCorePipelineConfigVersion;
-@@ -49,6 +57,9 @@ struct PipelineConfig {
+   gxruntime::gxcore::PipelineKey key;
+   uint32_t msaaSamples = 1;
++  uint32_t glow = 0; // 1: drawn into the glow buffer (glow.hpp), not the EFB
+ };
  static_assert(std::has_unique_object_representations_v<PipelineConfig>);
  
  wgpu::RenderPipeline create_pipeline(const PipelineConfig& config);
@@ -6050,9 +6826,12 @@ index 0a23a3f..55dfab6 100644
 +// dither key while Force 24-bit Color is on): not built, dropped from the cache.
 +bool pipeline_config_current(const PipelineConfig& config);
  void render(const DrawData& data, const wgpu::RenderPassEncoder& pass);
++// The draw again into the glow buffer (only when data.glowPipeline is set).
++void render_glow(const DrawData& data, const wgpu::RenderPassEncoder& pass);
  
  // Perform one EFB copy-to-texture (63/S16): resolve the current EFB region into
-@@ -83,6 +94,64 @@ struct TextureCacheStats {
+ // a texture keyed by the copy destination address, so a later draw binding that
+@@ -83,6 +101,64 @@ struct TextureCacheStats {
  };
  const TextureCacheStats& texture_cache_stats();
  
@@ -7066,7 +7845,7 @@ index acfa041..053f821 100644
    if (!cache_init()) {
      return;
 diff --git a/graphics/aurora/lib/webgpu/gpu_prof.cpp b/graphics/aurora/lib/webgpu/gpu_prof.cpp
-index c8c9549..6c5eab0 100644
+index c8c9549..632b2b9 100644
 --- a/graphics/aurora/lib/webgpu/gpu_prof.cpp
 +++ b/graphics/aurora/lib/webgpu/gpu_prof.cpp
 @@ -5,9 +5,13 @@
@@ -7113,7 +7892,7 @@ index c8c9549..6c5eab0 100644
 +    return;
 +  std::sort(g_aggTotals.begin(), g_aggTotals.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
 +  std::string line;
-+  for (size_t i = 0; i < g_aggTotals.size() && i < 10; ++i)
++  for (size_t i = 0; i < g_aggTotals.size() && i < 16; ++i)
 +    line += fmt::format(" {}={:.2f}", g_aggTotals[i].first, g_aggTotals[i].second / g_aggFrames);
 +  std::fprintf(stderr, "[gpu-pass] ms/frame:%s\n", line.c_str());
 +  g_aggTotals.clear();
@@ -11327,7 +12106,7 @@ index 9c2f7bb..6dd6411 100644
 +
  #endif
 diff --git a/include/gxruntime/aurora_backend.h b/include/gxruntime/aurora_backend.h
-index 6ef4cf4..fc502f0 100644
+index 6ef4cf4..4d3bc64 100644
 --- a/include/gxruntime/aurora_backend.h
 +++ b/include/gxruntime/aurora_backend.h
 @@ -5,6 +5,7 @@
@@ -11371,7 +12150,7 @@ index 6ef4cf4..fc502f0 100644
  
  // C2: walk nonzero gxcore GapCounters into the process-global gap_report.
  // Call once before gap_report_write_json on the live Strikers path so
-@@ -40,6 +55,170 @@ void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user);
+@@ -40,6 +55,172 @@ void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user);
  // from shutdown (second call only bumps if counters grew).
  void dol_aurora_flush_gap_report(void);
  
@@ -11514,6 +12293,8 @@ index 6ef4cf4..fc502f0 100644
 +void dol_aurora_set_window_icon(const uint8_t* rgba, uint32_t width, uint32_t height);
 +// Widescreen HUD: move a squeezed 4:3 HUD's corner elements to the edges.
 +void dol_aurora_set_widescreen_hud(bool edges);
++// Glow round what adds light (lamps, flames, magick): 0 = off, about 1-2 on.
++void dol_aurora_set_glow(float strength);
 +// Audio queued ahead of the output before playback starts (latency vs. gaps).
 +void dol_aurora_set_audio_buffer_ms(int ms);
 +// Frame rate (frames in between, blended from the last two game frames, on a

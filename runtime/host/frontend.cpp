@@ -724,6 +724,13 @@ void build_options() {
     shadows.change = [](int) { g_settings.sharp_shadows = !g_settings.sharp_shadows; };
     g_rows.push_back(shadows);
 
+    static const char* const kGlow[] = {"Off", "Soft", "Strong"};
+    Row glow{"Glow", kGlow[g_settings.glow]};
+    glow.page = 1;
+    glow.note = "Lamps, flames, magick and glowing runes give off a soft haze of light.";
+    glow.change = [](int dir) { cycle(g_settings.glow, 3, dir); };
+    g_rows.push_back(glow);
+
     if (g_options_return == Screen::Launcher && !g_disc_on_main) {
         Row disc = disc_row();
         disc.page = 1;

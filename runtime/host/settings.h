@@ -16,6 +16,7 @@ typedef struct {
     int game_font;        // the game's text: 0 sharp, 1 tome (default), 2 as on the disc
     bool hd_textures;     // use the texture pack in textures/ when there is one
     bool sharp_shadows;   // upscale the rooms' light maps as they load (lightmaps.cpp)
+    int glow;             // light glows round lamps, flames, magick: 0 off, 1 soft, 2 strong
     bool fullscreen;
     bool fps_counter;     // frames per second in the window title
     int music_volume;     // disc-streamed music, 0-100

@@ -59,7 +59,7 @@ Two downloads, both DDS:
 | Download | What it is | Size |
 | --- | --- | --- |
 | **[Eternal Darkness HD Texture Pack](https://drive.google.com/file/d/1KGEr7dF2onTdzUFNp7Lia3p0D0I2-TaZ/view)** by Zombie | The game's textures redrawn at four times the detail | 2.9&nbsp;GB&nbsp;`.7z` |
-| **[PAL supplement](https://drive.google.com/file/d/1BuoE0uL4K3xn5KfH8KYYtC6fk-6QiiiA/view)** by Eternal Darkness Recomp | What the pack misses on the European disc: the Jump to Game, Options and Language screens and the title menu's words, and highlights without hard edges | 10.7&nbsp;MB&nbsp;`.zip` |
+| **[PAL supplement](https://drive.google.com/file/d/1BuoE0uL4K3xn5KfH8KYYtC6fk-6QiiiA/view)** by Eternal Darkness Recomp | What the pack misses on the European disc: the Jump to Game, Options and Language screens and the title menu's words, and highlights without hard edges | 13.2&nbsp;MB&nbsp;`.zip` |
 
 1. Unpack both. Each one gives you a folder.
 2. Put both folders in a folder called `textures` (make it if it isn't there):

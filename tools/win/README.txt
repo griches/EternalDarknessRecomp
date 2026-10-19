@@ -23,9 +23,9 @@ in a folder called "textures" in this folder.
 
 - Eternal Darkness HD Texture Pack by Zombie (DDS, 2.9 GB .7z, on Mega):
   https://mega.nz/file/6m5TQToI#v09Y_gYdtZ24WTT6BlfCeM5uvw1nRs3QozcYZkUVVqg
-- PAL supplement, the European disc's screens and words the pack misses
-  (DDS, 10.7 MB .zip):
-  https://www.bouncingball.mobi/eternaldarkness/files/ED-PAL-supplement-dds.zip?v=2
+- PAL supplement, the European disc's screens, words and Tome inventory page
+  the pack misses (DDS, 13.2 MB .zip):
+  https://www.bouncingball.mobi/eternaldarkness/files/ED-PAL-supplement-dds.zip?v=3
 
 Leave both folders as they are; the supplement wins where they overlap.
 Options > Game > HD textures turns them on and off.

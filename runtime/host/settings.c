@@ -13,7 +13,6 @@
 
 Settings g_settings = {
     .aspect = 2,  // 16:9
-    .widescreen_hud = true,
     .render_scale = 0,
     .frame_rate = 60,
     .game_font = 1,  // Tome
@@ -94,9 +93,7 @@ void settings_load(void) {
         const char* value = trim(eq + 1);
         const int n = atoi(value);
         if (strcmp(key, "aspect") == 0)
-            g_settings.aspect = n == 1 ? 1 : 2;
-        else if (strcmp(key, "widescreen_hud") == 0)
-            g_settings.widescreen_hud = n != 0;
+            g_settings.aspect = n == 1 || n == 4 ? n : 2;
         else if (strcmp(key, "render_scale") == 0)
             g_settings.render_scale = clamp_int(n, 0, 4);
         else if (strcmp(key, "frame_rate") == 0)
@@ -158,7 +155,6 @@ void settings_save(void) {
     }
     fprintf(f, "# Eternal Darkness settings (written by the launcher)\n");
     fprintf(f, "aspect = %d\n", g_settings.aspect);
-    fprintf(f, "widescreen_hud = %d\n", g_settings.widescreen_hud ? 1 : 0);
     fprintf(f, "render_scale = %d\n", g_settings.render_scale);
     fprintf(f, "frame_rate = %d\n", g_settings.frame_rate);
     fprintf(f, "game_font = %d\n", g_settings.game_font);
@@ -192,7 +188,7 @@ void settings_save(void) {
 void settings_apply(void) {
 #ifdef ED_AURORA
     dol_aurora_set_aspect_mode(g_settings.aspect);
-    dol_aurora_set_widescreen_hud(g_settings.widescreen_hud);
+    dol_aurora_set_widescreen_hud(true);  // the HUD's side prompts at the screen's edges
     static const int kRenderLines[] = {0, 720, 1080, 1440, 2160};
     dol_aurora_set_render_height(kRenderLines[g_settings.render_scale]);
     dol_aurora_set_fullscreen(g_settings.fullscreen);

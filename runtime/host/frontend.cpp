@@ -579,12 +579,14 @@ Uint64 g_notice_at = 0;
 void run_hdr_calibration(int first_step);
 
 void build_options() {
-    static const char* const kAspect[] = {"16:9", "4:3", "16:9"};
+    static const char* const kAspect[] = {"16:9", "4:3", "16:9", "16:9", "21:9"};
     // Each resolution as the pixels it draws at, for the display shape in use:
     // the window's own, or a standard height at 4:3 or 16:9. The shape comes
     // from the choice itself: the renderer takes a new aspect at its next
     // present, after these rows are built, so its own value lags one change.
-    const float display_aspect = g_settings.aspect == 1 ? 4.f / 3.f : 16.f / 9.f;
+    const float display_aspect = g_settings.aspect == 1   ? 4.f / 3.f
+                                 : g_settings.aspect == 4 ? 21.f / 9.f
+                                                          : 16.f / 9.f;
     uint32_t win_w = 0, win_h = 0;
     dol_aurora_get_display_info(nullptr, &win_w, &win_h);
     auto size_label = [&](int scale) {
@@ -679,23 +681,20 @@ void build_options() {
     g_rows.push_back(rate);
 
     Row aspect{"Aspect ratio", kAspect[g_settings.aspect]};
-    aspect.note = "16:9 is the game's own widescreen view: more at the sides, not stretched. "
-                  "Changing it in the game's options changes it here too.";
+    aspect.note = "16:9 is the game's own widescreen view: more at the sides, not stretched. 21:9 widens it "
+                  "for an ultrawide screen. The HUD keeps to the screen's edges.";
     aspect.change = [](int dir) {
-        int choice = g_settings.aspect - 1;  // 4:3, 16:9
-        cycle(choice, 2, dir);
-        g_settings.aspect = choice + 1;
+        static const int kChoices[] = {1, 2, 4};  // 4:3, 16:9, 21:9
+        int at = 1;
+        for (int i = 0; i < 3; i++)
+            if (kChoices[i] == g_settings.aspect)
+                at = i;
+        cycle(at, 3, dir);
+        g_settings.aspect = kChoices[at];
         changed();
     };
     g_rows.push_back(aspect);
 
-    Row hud{"Widescreen HUD", g_settings.widescreen_hud ? "Screen edges" : "Centred (4:3)"};
-    hud.note = "In the game's widescreen mode, where prompts like Examine sit.";
-    hud.change = [](int) {
-        g_settings.widescreen_hud = !g_settings.widescreen_hud;
-        changed();
-    };
-    g_rows.push_back(hud);
 
     {
         using namespace enhancement;

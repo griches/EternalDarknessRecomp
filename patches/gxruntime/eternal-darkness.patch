@@ -3519,10 +3519,10 @@ index b86b214..f6b70de 100644
  AuroraBackend aurora_get_backend();
  const AuroraBackend* aurora_get_available_backends(size_t* count);
 diff --git a/graphics/aurora/include/aurora/gfx.h b/graphics/aurora/include/aurora/gfx.h
-index a13ce39..df6fc15 100644
+index a13ce39..9872748 100644
 --- a/graphics/aurora/include/aurora/gfx.h
 +++ b/graphics/aurora/include/aurora/gfx.h
-@@ -29,10 +29,73 @@ typedef struct {
+@@ -29,10 +29,74 @@ typedef struct {
  } AuroraStats;
  
  const AuroraStats* aurora_get_stats();
@@ -3586,10 +3586,11 @@ index a13ce39..df6fc15 100644
 +unsigned aurora_texture_pack_pending(void);
 +/* Host texture replacements (light maps) still being made. */
 +unsigned aurora_texture_override_pending(void);
-+/* A texture that glows when HDR is on: draws using it (by guest address, GX
-+ * format, width and height) glow with the glow setting, or with it off at
++/* A texture that glows when HDR is on: draws using it (by GX format, width,
++ * height and Dolphin's name hash; hash 0: a paletted texture whose palette
++ * changes every frame) glow with the glow setting, or with it off at
 + * strength in a glow of their own (GXRuntime recomp patch). */
-+void aurora_glow_add_texture(uint32_t address, uint32_t format, uint32_t width, uint32_t height, float strength);
++void aurora_glow_add_texture(uint32_t format, uint32_t width, uint32_t height, uint64_t hash, float strength);
 +/* A movie is playing: HDR shows it at video's white, with no glow. */
 +void aurora_hdr_set_movie(bool playing);
 +
@@ -3597,7 +3598,7 @@ index a13ce39..df6fc15 100644
   * EFB readback (GXRuntime recomp patch): arm a one-shot copy of the next
   * submitted frame's present source; take returns tightly packed RGBA8 rows
 diff --git a/graphics/aurora/lib/aurora.cpp b/graphics/aurora/lib/aurora.cpp
-index b09ef4d..e841ee9 100644
+index b09ef4d..9911cb4 100644
 --- a/graphics/aurora/lib/aurora.cpp
 +++ b/graphics/aurora/lib/aurora.cpp
 @@ -1,6 +1,17 @@
@@ -4437,8 +4438,8 @@ index b09ef4d..e841ee9 100644
 +}
 +void aurora_photo_save(const char* path) { aurora::gfx::photo_save(path); }
 +unsigned aurora_photo_saved(void) { return aurora::gfx::photo_saved(); }
-+void aurora_glow_add_texture(uint32_t address, uint32_t format, uint32_t width, uint32_t height, float strength) {
-+  aurora::gfx::glow_add_texture(address, format, width, height, strength);
++void aurora_glow_add_texture(uint32_t format, uint32_t width, uint32_t height, uint64_t hash, float strength) {
++  aurora::gfx::glow_add_texture(format, width, height, hash, strength);
 +}
 +void aurora_hdr_set_movie(bool playing) { aurora::gfx::glow::set_movie(playing); }
 +unsigned aurora_texture_override_pending(void) {
@@ -4548,7 +4549,7 @@ index 421bd9e..0cbf52d 100644
 +}
  } // namespace aurora::webgpu::utils
 diff --git a/graphics/aurora/lib/gfx/common.cpp b/graphics/aurora/lib/gfx/common.cpp
-index a64dd2d..b3a89e0 100644
+index a64dd2d..65bf403 100644
 --- a/graphics/aurora/lib/gfx/common.cpp
 +++ b/graphics/aurora/lib/gfx/common.cpp
 @@ -10,6 +10,10 @@
@@ -5068,9 +5069,9 @@ index a64dd2d..b3a89e0 100644
 +  photo::g_savePath = path != nullptr ? path : "";
 +}
 +unsigned photo_saved() noexcept { return photo::g_saved.load(); }
-+void glow_add_texture(uint32_t address, uint32_t format, uint32_t width, uint32_t height, float strength) noexcept {
++void glow_add_texture(uint32_t format, uint32_t width, uint32_t height, uint64_t hash, float strength) noexcept {
 +#ifdef AURORA_ENABLE_GXCORE
-+  gxcore::add_emit_texture(address, format, width, height);
++  gxcore::add_emit_texture(format, width, height, hash);
 +  glow::set_emit_strength(strength);
 +#endif
 +}
@@ -5386,7 +5387,7 @@ index a64dd2d..b3a89e0 100644
  }
  
 diff --git a/graphics/aurora/lib/gfx/common.hpp b/graphics/aurora/lib/gfx/common.hpp
-index 37acf2b..962f4fb 100644
+index 37acf2b..e723d52 100644
 --- a/graphics/aurora/lib/gfx/common.hpp
 +++ b/graphics/aurora/lib/gfx/common.hpp
 @@ -1,5 +1,6 @@
@@ -5470,7 +5471,7 @@ index 37acf2b..962f4fb 100644
 +// Host replacements (light maps) still being made (gxcore::override_pending).
 +size_t texture_override_pending() noexcept;
 +// A texture that glows when HDR is on (aurora_glow_add_texture).
-+void glow_add_texture(uint32_t address, uint32_t format, uint32_t width, uint32_t height, float strength) noexcept;
++void glow_add_texture(uint32_t format, uint32_t width, uint32_t height, uint64_t hash, float strength) noexcept;
 +struct InterpStats {
 +  uint32_t draws, matched, loose, moved, jumped;
 +  int result; // 0 blended, 1 still, 2 cut, 3 no previous frame
@@ -5548,10 +5549,10 @@ index 7af8fca..4c14e34 100644
    else
 diff --git a/graphics/aurora/lib/gfx/glow.cpp b/graphics/aurora/lib/gfx/glow.cpp
 new file mode 100644
-index 0000000..3412944
+index 0000000..57e7217
 --- /dev/null
 +++ b/graphics/aurora/lib/gfx/glow.cpp
-@@ -0,0 +1,706 @@
+@@ -0,0 +1,708 @@
 +#include "glow.hpp"
 +
 +#include "../webgpu/gpu_prof.hpp"
@@ -6126,7 +6127,9 @@ index 0000000..3412944
 +  if (g_ePresent) {
 +    write_params();
 +    const webgpu::gpu_prof::Zone zone{cmd, "Emit"};
-+    draw(cmd, g_down, g_eBase.source, g_eLevels[0].view, false, "Emit down");
++    // As the glow at Soft takes these surfaces: the scene's bright pass, here
++    // over their own pixels only.
++    draw(cmd, g_scene > 0.f ? g_bright : g_down, g_eBase.source, g_eLevels[0].view, false, "Emit bright");
 +    for (size_t i = 1; i < g_eLevels.size(); ++i)
 +      draw(cmd, g_down, g_eLevels[i - 1].source, g_eLevels[i].view, false, "Emit down");
 +    for (size_t i = g_eLevels.size() - 1; i-- > 0;)
@@ -6323,7 +6326,7 @@ index 0000000..1f35c9b
 +
 +} // namespace aurora::gfx::glow
 diff --git a/graphics/aurora/lib/gfx/gxcore_draw.cpp b/graphics/aurora/lib/gfx/gxcore_draw.cpp
-index 71136b9..f4f0663 100644
+index 71136b9..697ea66 100644
 --- a/graphics/aurora/lib/gfx/gxcore_draw.cpp
 +++ b/graphics/aurora/lib/gfx/gxcore_draw.cpp
 @@ -1,4 +1,11 @@
@@ -7000,7 +7003,7 @@ index 71136b9..f4f0663 100644
    gfx::resolve_pass(it->second, srcRect, do_clear && cmd.color_update,
                      do_clear && cmd.alpha_update,
                      do_clear && cmd.depth_update,
-@@ -723,73 +1159,538 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -723,73 +1159,579 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
                                  static_cast<float>(cmd.clear_a) / 255.f},
                      clearDepthValue, fmt, &filter);
  
@@ -7169,29 +7172,70 @@ index 71136b9..f4f0663 100644
 +size_t override_pending() noexcept { return g_pendingOverrideCount.load(); }
 +
 +namespace {
-+std::vector<std::array<uint32_t, 4>> g_emitTextures;  // address, format, width, height
++// Textures that glow with HDR (add_emit_texture): by GX format and size, and
++// Dolphin's name hash (XXH64 of the base level), or with no hash a paletted
++// texture whose palette changes every frame (the temples' energy: its indices
++// differ room to room, and the game puts it anywhere in memory).
++struct EmitTexture {
++  uint32_t format, width, height;
++  uint64_t hash;
++};
++std::vector<EmitTexture> g_emitTextures;
++// Per guest address, once a frame: the texture's Dolphin hash and when its
++// palette last changed.
++struct EmitSeen {
++  uint32_t frame = UINT32_MAX;
++  uint64_t hash = 0, palette = 0;
++  uint32_t paletteChanged = UINT32_MAX;
++};
++absl::flat_hash_map<uint32_t, EmitSeen> g_emitSeen;
++
++bool emits_texture(uint32_t address, uint32_t format, uint32_t width, uint32_t height, const void* data,
++                   uint32_t available, const void* tlut, uint32_t tlutEntries, uint32_t tlutAvailable) {
++  bool sized = false;
++  for (const auto& e : g_emitTextures)
++    sized = sized || (format == e.format && width == e.width && height == e.height);
++  if (!sized || data == nullptr)
++    return false;
++  EmitSeen& seen = g_emitSeen[address & 0x01FFFFFFu];
++  const uint32_t frame = current_frame();
++  if (seen.frame != frame) {
++    seen.frame = frame;
++    const uint32_t base = gxc::texture_base_level_size(format, width, height);
++    seen.hash = base != 0u && base <= available ? XXH64(data, base, 0) : 0u;
++    const uint64_t palette =
++        tlut != nullptr ? XXH3_64bits(tlut, std::min(tlutEntries * 2u, tlutAvailable)) : 0u;
++    if (palette != seen.palette)
++      seen.paletteChanged = frame;
++    seen.palette = palette;
++  }
++  const bool cycling = seen.paletteChanged != UINT32_MAX && frame - seen.paletteChanged <= 8u;
++  for (const auto& e : g_emitTextures)
++    if (format == e.format && width == e.width && height == e.height &&
++        (e.hash != 0u ? seen.hash == e.hash : cycling))
++      return true;
++  return false;
++}
 +
 +// The draw's own texture is one of them: its only one, or its first. (The
 +// temples' energy texture is also projected on the stone round it as a later
 +// layer: that stone does not glow.)
 +bool emits(const gxc::DrawPlan& plan) {
-+  const auto match = [](uint32_t address, uint32_t format, uint32_t width, uint32_t height) {
-+    for (const auto& e : g_emitTextures)
-+      if ((address & 0x01FFFFFFu) == e[0] && format == e[1] && width == e[2] && height == e[3])
-+        return true;
-+    return false;
-+  };
 +  if (plan.texmap_mask == 0u)
-+    return plan.has_texture && match(plan.tex_address, plan.tex_format, plan.tex_width, plan.tex_height);
++    return plan.has_texture && emits_texture(plan.tex_address, plan.tex_format, plan.tex_width, plan.tex_height,
++                                             plan.tex_data, plan.tex_available, plan.has_tlut ? plan.tlut_data : nullptr,
++                                             plan.tlut_entries, plan.tlut_available);
 +  const auto& tex = plan.textures[std::countr_zero(plan.texmap_mask)];
-+  return tex.valid && match(tex.address, tex.format, tex.width, tex.height);
++  return tex.valid && emits_texture(tex.address, tex.format, tex.width, tex.height, tex.data, tex.available,
++                                    tex.has_tlut ? tex.tlut_data : nullptr, tex.tlut_entries, tex.tlut_available);
 +}
 +} // namespace
 +
-+void add_emit_texture(uint32_t address, uint32_t format, uint32_t width, uint32_t height) noexcept {
-+  const std::array<uint32_t, 4> e{address & 0x01FFFFFFu, format, width, height};
-+  if (std::find(g_emitTextures.begin(), g_emitTextures.end(), e) == g_emitTextures.end())
-+    g_emitTextures.push_back(e);
++void add_emit_texture(uint32_t format, uint32_t width, uint32_t height, uint64_t hash) noexcept {
++  for (const auto& e : g_emitTextures)
++    if (e.format == format && e.width == width && e.height == height && e.hash == hash)
++      return;
++  g_emitTextures.push_back(EmitTexture{format, width, height, hash});
 +}
 +
 +void set_texture_pack(const TexturePack& pack) noexcept {
@@ -7420,7 +7464,7 @@ index 71136b9..f4f0663 100644
 +        ++g_frameDrawsWide;
 +    }
 +  }
-+
+ 
 +  // GXRuntime recomp patch: the merge fast path. A draw whose fingerprints
 +  // (pipeline, constants, pixel and shared constants), textures, samplers,
 +  // viewport and scissor match the draw just submitted joins it straight
@@ -7565,7 +7609,7 @@ index 71136b9..f4f0663 100644
 +    s_last.single = single_texture();
 +    std::memcpy(&s_last.sampler, &plan.sampler, sizeof s_last.sampler);
 +  };
- 
++
 +  // The EFB's render scale, for the next plans' pixel centre correction.
 +  if (!is_offscreen()) {
 +    const auto [logicalWidth, logicalHeight] = gx::logical_fb_size();
@@ -7596,7 +7640,7 @@ index 71136b9..f4f0663 100644
      const float sx = plan.viewport[0];
      const float sy = plan.viewport[1];
      const float sz = plan.viewport[2];
-@@ -799,13 +1700,15 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -799,13 +1741,15 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      const float width = sx * 2.0f;
      const float height = -sy * 2.0f;
      gx::set_logical_viewport({
@@ -7614,7 +7658,7 @@ index 71136b9..f4f0663 100644
    }
  
    // U4: apply DrawPlan scissor as a logical render-pass scissor. Multi-rect
-@@ -827,7 +1730,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -827,7 +1771,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
        [&](uint32_t address, uint32_t tsize, uint32_t format, uint32_t width,
            uint32_t height, const void* data, uint32_t available, bool has_tlut,
            uint32_t tlut_address, uint32_t tlut_format, uint32_t tlut_entries,
@@ -7623,7 +7667,7 @@ index 71136b9..f4f0663 100644
      auto efbIt = g_efbCopyTextures.find(address);
      if (efbIt != g_efbCopyTextures.end() && efbIt->second) {
        ++g_textureCacheStats.hits;
-@@ -839,23 +1742,275 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -839,23 +1783,275 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      const uint32_t size = std::min(tsize, available);
      // Hash the actual source texels (+ TLUT for CI) so a content change under an
      // unchanged guest identity is a distinct cache entry — see TextureKey.
@@ -7906,7 +7950,7 @@ index 71136b9..f4f0663 100644
      // gxcore owns the decode for every format: produce tightly-packed RGBA8 and
      // upload it as a pre-decoded PC texture (no substrate re-conversion).
      std::vector<uint8_t> decoded;
-@@ -868,8 +2023,50 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -868,8 +2064,50 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      } else {
        decoded = gxc::decode_texture(format, width, height, bytes, size);
      }
@@ -7958,7 +8002,7 @@ index 71136b9..f4f0663 100644
        handle = new_static_texture_2d(
            width, height, 1, GX_TF_RGBA8_PC,
            ArrayRef<uint8_t>{decoded.data(), decoded.size()}, false,
-@@ -892,7 +2089,98 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -892,7 +2130,98 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    };
  
    BindGroupRef textureBindGroup = 0;
@@ -8057,7 +8101,7 @@ index 71136b9..f4f0663 100644
      if (plan.texmap_mask == 0u) {
        // Single-texmap fast path: primary texture + plan.sampler at binding 0/1.
        if (plan.has_texture) {
-@@ -903,7 +2191,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -903,7 +2232,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
              plan.tlut_data, plan.tlut_available);
          if (bound) {
            const auto sampler =
@@ -8066,7 +8110,7 @@ index 71136b9..f4f0663 100644
            const std::array entries{
                WGPUBindGroupEntry{.binding = 0,
                                   .textureView =
-@@ -919,6 +2207,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -919,6 +2248,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            textureBindGroup = bind_group_ref(descriptor);
          }
        }
@@ -8074,7 +8118,7 @@ index 71136b9..f4f0663 100644
      } else {
        // Multi-texmap: bind each used texmap at 2t (texture) / 2t+1 (sampler),
        // matching the WGSL declarations. Per-texmap PlanSampler from
-@@ -932,12 +2221,15 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -932,12 +2262,15 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
          if ((plan.texmap_mask & (1u << t)) == 0u)
            continue;
          const gxc::PlanTexture& pt = plan.textures[t];
@@ -8091,7 +8135,7 @@ index 71136b9..f4f0663 100644
          if (!bound) {
            complete = false;
            break;
-@@ -945,14 +2237,16 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -945,14 +2278,16 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
          held.push_back(bound);
          const gxc::PlanSampler& ps =
              pt.sampler.valid ? pt.sampler : plan.samplers[t];
@@ -8110,7 +8154,7 @@ index 71136b9..f4f0663 100644
        const WGPUBindGroupDescriptor descriptor{
            .label = {"GXCore Texture Bind Group", WGPU_STRLEN},
            .layout = texture_bind_group_layout(plan.texmap_mask).Get(),
-@@ -960,6 +2254,298 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -960,6 +2295,299 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            .entries = entries.data(),
        };
        textureBindGroup = bind_group_ref(descriptor);
@@ -8251,15 +8295,16 @@ index 71136b9..f4f0663 100644
 +  const PipelineRef pipeline = s_lastPipeline;
 +  PipelineRef glowPipeline = s_lastGlowPipeline;
 +  // A texture that glows with HDR (add_emit_texture): with the glow setting
-+  // on it joins the glow; off, it glows on its own (glowEmit).
++  // on the scene's glow takes it as it is; off, it glows on its own as that
++  // glow would at Soft (glowEmit).
 +  bool glowEmit = false;
-+  if (webgpu::g_hdrActive && !g_emitTextures.empty() && emits(plan)) {
++  if (webgpu::g_hdrActive && glow::strength() <= 0.f && !g_emitTextures.empty() && emits(plan)) {
 +    if (glowPipeline == 0) {
 +      PipelineConfig glowConfig = pipelineConfig;
 +      glowConfig.glow = 1;
 +      glowPipeline = pipeline_ref(glowConfig);
 +    }
-+    glowEmit = glow::strength() <= 0.f;
++    glowEmit = true;
 +  }
 +  // AURORA_GLOW_LOG: each 60th frame's draws by blend (src,dst factors), and
 +  // how many added glow.
@@ -8409,7 +8454,7 @@ index 71136b9..f4f0663 100644
      }
    }
  
-@@ -969,31 +2555,19 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -969,31 +2597,19 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    const auto idxRange = push_indices(
        reinterpret_cast<const uint8_t*>(plan.indices.data()),
        plan.indices.size() * sizeof(uint16_t), 4);
@@ -8445,7 +8490,7 @@ index 71136b9..f4f0663 100644
      });
    };
  
-@@ -1006,6 +2580,8 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -1006,6 +2622,8 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      }
    } else {
      issue_draw();
@@ -8455,7 +8500,7 @@ index 71136b9..f4f0663 100644
    return true;
  }
 diff --git a/graphics/aurora/lib/gfx/gxcore_draw.hpp b/graphics/aurora/lib/gfx/gxcore_draw.hpp
-index 0a23a3f..a22d4ee 100644
+index 0a23a3f..bb77937 100644
 --- a/graphics/aurora/lib/gfx/gxcore_draw.hpp
 +++ b/graphics/aurora/lib/gfx/gxcore_draw.hpp
 @@ -1,5 +1,8 @@
@@ -8581,7 +8626,7 @@ index 0a23a3f..a22d4ee 100644
 +void set_texture_pack(const TexturePack& pack) noexcept;
 +// A texture that glows when HDR is on (with the glow setting off, at the emit
 +// strength in a glow of its own): by guest address, GX format and size.
-+void add_emit_texture(uint32_t address, uint32_t format, uint32_t width, uint32_t height) noexcept;
++void add_emit_texture(uint32_t format, uint32_t width, uint32_t height, uint64_t hash) noexcept;
 +// HD pack images still waiting to be uploaded (their originals drawn meanwhile).
 +size_t pack_pending() noexcept;
 +// Textures whose host replacement is still being made (apply answered 2).

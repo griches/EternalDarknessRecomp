@@ -204,13 +204,13 @@ void settings_apply_graphics(void) {
     static const float kGlow[] = {0.f, 0.6f, 1.0f};
     dol_aurora_set_glow(kGlow[g_settings.glow]);
     /* The living energy in the temples (the red doorways, the yellow floors):
-     * one 256x256 C8 texture the game redraws every frame. With HDR on it
-     * glows, at Soft when the glow setting is off. */
-    aurora_glow_add_texture(0x010D6080u, 9u, 256u, 256u, kGlow[1]);
+     * a 256x256 C8 texture whose palette the game cycles every frame. With
+     * HDR on it glows, at Soft when the glow setting is off. */
+    aurora_glow_add_texture(9u, 256u, 256u, 0u, kGlow[1]);
     /* The streaks of a magick effect (green and white), round a struck
-     * enemy and the player. */
-    aurora_glow_add_texture(0x012C4DA0u, 14u, 64u, 64u, kGlow[1]);
-    aurora_glow_add_texture(0x012C5DA0u, 14u, 64u, 64u, kGlow[1]);
+     * enemy and the player: by Dolphin's hash. */
+    aurora_glow_add_texture(14u, 64u, 64u, 0x81aacb2ba734f59bull, kGlow[1]);
+    aurora_glow_add_texture(14u, 64u, 64u, 0x7cb863247f69c913ull, kGlow[1]);
     dol_aurora_set_hdr(g_settings.hdr);
     static const float kSsao[] = {0.f, 1.3f, 2.4f};
     dol_aurora_set_ssao(kSsao[g_settings.ssao]);

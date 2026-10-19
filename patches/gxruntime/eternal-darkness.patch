@@ -4072,7 +4072,7 @@ index 421bd9e..0cbf52d 100644
 +}
  } // namespace aurora::webgpu::utils
 diff --git a/graphics/aurora/lib/gfx/common.cpp b/graphics/aurora/lib/gfx/common.cpp
-index a64dd2d..63e4753 100644
+index a64dd2d..2eb70cc 100644
 --- a/graphics/aurora/lib/gfx/common.cpp
 +++ b/graphics/aurora/lib/gfx/common.cpp
 @@ -10,6 +10,8 @@
@@ -4165,7 +4165,7 @@ index a64dd2d..63e4753 100644
    // GPNF §7: if plane capture armed for this copy, tag the pass for pre-resolve
    // EFB color + depth snapshot at encode time.
    {
-@@ -781,6 +815,64 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
+@@ -781,6 +815,65 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
    push_command(CommandType::SetScissor, Command::Data{.setScissor = g_cachedScissor});
  }
  
@@ -4186,13 +4186,14 @@ index a64dd2d..63e4753 100644
 +  return scene;
 +}
 +
-+void glow_scene_here(const ssao::Scene& scene) {
++void glow_scene_here(const ssao::Scene& scene, bool ao) {
 +  if (g_currentRenderPass == UINT32_MAX || g_inOffscreen)
 +    return;
 +  auto& pass = current_render_passes()[g_currentRenderPass];
 +  if (pass.colorView.Get() == webgpu::g_frameBuffer.view.Get()) {
 +    pass.glowScene = true;
 +    pass.ssaoScene = with_viewport(scene);
++    pass.ssaoScene.valid = pass.ssaoScene.valid && ao;
 +  }
 +}
 +
@@ -4230,7 +4231,7 @@ index a64dd2d..63e4753 100644
  void queue_palette_conv(tex_palette_conv::ConvRequest req) {
    auto& renderPass = current_render_passes()[g_currentRenderPass];
    ASSERT(!renderPass.sealed, "Attempted to append palette conversion to sealed render pass {}", g_currentRenderPass);
-@@ -1271,6 +1363,9 @@ bool begin_frame() {
+@@ -1271,6 +1364,9 @@ bool begin_frame() {
    push_command(CommandType::SetViewport, Command::Data{.setViewport = g_cachedViewport});
    push_command(CommandType::SetScissor, Command::Data{.setScissor = g_cachedScissor});
    begin_pipeline_frame();
@@ -4240,7 +4241,7 @@ index a64dd2d..63e4753 100644
    render_worker::enqueue_begin_frame(frame.frameId, [frameSlot] {
      static constexpr wgpu::CommandEncoderDescriptor EncoderDescriptor{.label = "Redraw encoder"};
      g_framePackets[frameSlot].encoder = g_device.CreateCommandEncoder(&EncoderDescriptor);
-@@ -1309,7 +1404,60 @@ void finish() {
+@@ -1309,7 +1405,60 @@ void finish() {
    }
  }
  
@@ -4302,7 +4303,7 @@ index a64dd2d..63e4753 100644
    ZoneScoped;
    ASSERT(!g_inOffscreen, "end_frame called while offscreen rendering is active");
    ASSERT(g_currentRenderPass == UINT32_MAX, "end_frame called before finish finalized the current render pass");
-@@ -1352,10 +1500,33 @@ void end_frame(EndFrameCallback callback) {
+@@ -1352,10 +1501,33 @@ void end_frame(EndFrameCallback callback) {
  #endif
  
    const size_t stagingSlot = frame.stagingBuffer;
@@ -4337,7 +4338,7 @@ index a64dd2d..63e4753 100644
      auto encoder = std::move(packet.encoder);
      const auto stats = packet.stats;
      packet = {};
-@@ -1367,7 +1538,12 @@ void end_frame(EndFrameCallback callback) {
+@@ -1367,7 +1539,12 @@ void end_frame(EndFrameCallback callback) {
      g_stats.lastStorageSize = stats.lastStorageSize;
      g_stats.lastTextureUploadSize = stats.lastTextureUploadSize;
      if (callback) {
@@ -4351,7 +4352,7 @@ index a64dd2d..63e4753 100644
      }
      g_frameSlots.release(frameSlot);
      expire_cached_bind_groups();
-@@ -1561,7 +1737,46 @@ static void encode_op(wgpu::CommandEncoder& cmd, FramePacket& frame, const Frame
+@@ -1561,7 +1738,46 @@ static void encode_op(wgpu::CommandEncoder& cmd, FramePacket& frame, const Frame
    }
  }
  
@@ -4399,7 +4400,7 @@ index a64dd2d..63e4753 100644
    ZoneScoped;
    if (!passInfo.sealed) {
      return;
-@@ -1570,7 +1785,7 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
+@@ -1570,7 +1786,7 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
    for (const auto& conv : passInfo.paletteConvs) {
      tex_palette_conv::run(cmd, conv);
    }
@@ -4408,7 +4409,7 @@ index a64dd2d..63e4753 100644
      // Skip intermediate EFB render passes without observable output.
      return;
    }
-@@ -1622,15 +1837,26 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
+@@ -1622,15 +1838,26 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
    auto pass = cmd.BeginRenderPass(&renderPassDescriptor);
    render_pass(pass, frame, passInfo);
    pass.End();
@@ -4437,7 +4438,7 @@ index a64dd2d..63e4753 100644
      depth_peek::encode_frame_snapshot(cmd, passInfo.copySourceDepthView, passInfo.targetSize, passInfo.msaaSamples);
    }
  
-@@ -1682,7 +1908,78 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
+@@ -1682,7 +1909,78 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
        };
        cmd.CopyTextureToTexture(&src, &dst, &size);
      }
@@ -4516,7 +4517,7 @@ index a64dd2d..63e4753 100644
  }
  
  void after_submit() noexcept {
-@@ -1892,8 +2189,14 @@ Range push_indices(const uint8_t* data, size_t length, size_t alignment) {
+@@ -1892,8 +2190,14 @@ Range push_indices(const uint8_t* data, size_t length, size_t alignment) {
  
  Range push_uniform(const uint8_t* data, size_t length) {
    ZoneScoped;
@@ -4534,7 +4535,7 @@ index a64dd2d..63e4753 100644
  
  Range push_storage(const uint8_t* data, size_t length) {
 diff --git a/graphics/aurora/lib/gfx/common.hpp b/graphics/aurora/lib/gfx/common.hpp
-index 37acf2b..2736a2f 100644
+index 37acf2b..7065a1c 100644
 --- a/graphics/aurora/lib/gfx/common.hpp
 +++ b/graphics/aurora/lib/gfx/common.hpp
 @@ -1,5 +1,6 @@
@@ -4607,7 +4608,7 @@ index 37acf2b..2736a2f 100644
  void render_pass(const wgpu::RenderPassEncoder& pass, uint32_t idx);
  void after_submit() noexcept;
  void gpu_synchronize();
-@@ -276,9 +312,20 @@ struct EfbCopyFilterParams {
+@@ -276,9 +312,22 @@ struct EfbCopyFilterParams {
    std::uint32_t filter_row[3]{0, 64, 0};
  };
  
@@ -4622,8 +4623,10 @@ index 37acf2b..2736a2f 100644
 +// scene: its projection for ambient occlusion (ssao.hpp; the viewport is
 +// filled in here).
 +void glow_scene_break(const ssao::Scene& scene);
-+// The same at the end of the current pass (a frame with no HUD).
-+void glow_scene_here(const ssao::Scene& scene);
++// The same at the end of the current pass (a frame with no HUD); ao false
++// when this frame already took its occlusion at a break (it multiplies, so
++// twice would darken twice).
++void glow_scene_here(const ssao::Scene& scene, bool ao);
 +// The viewport just set is the 3D scene's (not a HUD model's in a corner).
 +void note_scene_viewport();
  
@@ -5247,7 +5250,7 @@ index 0000000..3515790
 +
 +} // namespace aurora::gfx::glow
 diff --git a/graphics/aurora/lib/gfx/gxcore_draw.cpp b/graphics/aurora/lib/gfx/gxcore_draw.cpp
-index 71136b9..58173de 100644
+index 71136b9..c17c04b 100644
 --- a/graphics/aurora/lib/gfx/gxcore_draw.cpp
 +++ b/graphics/aurora/lib/gfx/gxcore_draw.cpp
 @@ -1,4 +1,11 @@
@@ -5754,7 +5757,7 @@ index 71136b9..58173de 100644
    if (data.tev) {
      // group 2 = PS uniform (same dynamic-uniform bind group, its own offset);
      // group 3 = texture.
-@@ -591,18 +929,43 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
+@@ -591,18 +929,45 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
  
  void reset_texture_cache() {
    g_textureCache.clear();
@@ -5794,11 +5797,13 @@ index 71136b9..58173de 100644
 +static bool scene_effects_on() { return glow::active() || gfx::ssao::strength() > 0.f; }
 +static uint32_t g_glowSwitches = 0;     // 3D to flat, this frame
 +static uint32_t g_glowLastSwitches = 0; // and the frame before
++static bool g_glowLastEndedIn3d = false; // the frame before drew 3D after its last switch
++static bool g_glowBrokeThisFrame = false;
 +
  // Resolve the current EFB region into a texture the guest-identity path can bind
  // later, keyed by the copy's destination address (63/S16). Mirrors aurora
  // lib/dolphin/gx/GXFrameBuffer.cpp copy_tex on the same substrate: map the EFB
-@@ -612,6 +975,8 @@ const TextureCacheStats& texture_cache_stats() { return g_textureCacheStats; }
+@@ -612,6 +977,8 @@ const TextureCacheStats& texture_cache_stats() { return g_textureCacheStats; }
  // color/Z afterwards. The bound draw's geometry is already in the pass (the
  // sink flushed the pending draw before firing this).
  void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
@@ -5807,7 +5812,7 @@ index 71136b9..58173de 100644
    // Mirror the copy-clear color/Z (BP 0x4F-0x51 at this copy) into the gx
    // state GXSetCopyClear would have written: begin_frame's pass-0 EFB clear
    // reads g_gxState.clearColor/clearDepth, and in gxcore mode the live gx
-@@ -635,11 +1000,25 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -635,11 +1002,25 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
    const auto fmt = is_xfb ? GX_TF_RGBA8 : static_cast<GXTexFmt>(cmd.format);
    // Dual dims: EFB source rect stays cmd.height; XFB dest height from
    // byte_size/stride (or cmd.xfb_height if gxcore latched it).
@@ -5834,7 +5839,7 @@ index 71136b9..58173de 100644
    });
    // U8: half_scale halves destination dims (TextureEncoder box 2:1).
    const uint32_t scaleShift = cmd.half_scale ? 1u : 0u;
-@@ -660,8 +1039,9 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -660,8 +1041,9 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
        dstHeight = xfb_h;
    }
  
@@ -5846,7 +5851,7 @@ index 71136b9..58173de 100644
        it->second->size.width != dstWidth || it->second->size.height != dstHeight) {
      TextureHandle handle;
      if (!is_xfb && gfx::tex_copy_conv::needs_conversion(fmt)) {
-@@ -670,7 +1050,7 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -670,7 +1052,7 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
        handle = gfx::new_render_texture(dstWidth, dstHeight, GX_TF_RGBA8,
                                         is_xfb ? "GXCore XFB" : "GXCore Copy");
      }
@@ -5855,7 +5860,7 @@ index 71136b9..58173de 100644
    }
    if (!it->second) {
      return;
-@@ -709,11 +1089,39 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -709,11 +1091,42 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
    // XFB YUYV into guest RAM from this readback on every display copy, so it
    // must stay armed in product runs too (cost: one EFB readback per display
    // copy, ~1-2/frame).
@@ -5880,8 +5885,11 @@ index 71136b9..58173de 100644
 +                                         "GXCore Display Copy");
 +    g_lastDisplayCopy = snapshot;
 +    // A 3D frame with no HUD: its scene is the EFB as it is now.
-+    if (g_glowSaw3d && !g_glowSceneKept && scene_effects_on())
-+      gfx::glow_scene_here(g_scene);
++    const bool endsIn3d = g_glowSaw3d && !g_glowSceneKept;
++    if (endsIn3d && scene_effects_on())
++      gfx::glow_scene_here(g_scene, /*ao=*/!g_glowBrokeThisFrame);
++    g_glowLastEndedIn3d = endsIn3d;
++    g_glowBrokeThisFrame = false;
 +    g_glowSaw3d = false;
 +    g_glowSceneKept = false;
 +    g_glowLastSwitches = g_glowSwitches;
@@ -5896,7 +5904,7 @@ index 71136b9..58173de 100644
    gfx::resolve_pass(it->second, srcRect, do_clear && cmd.color_update,
                      do_clear && cmd.alpha_update,
                      do_clear && cmd.depth_update,
-@@ -723,73 +1131,438 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -723,73 +1136,444 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
                                  static_cast<float>(cmd.clear_a) / 255.f},
                      clearDepthValue, fmt, &filter);
  
@@ -6204,9 +6212,15 @@ index 71136b9..58173de 100644
 +                                 .a = pw + pz * P[2][2], .b = pz * P[2][3], .valid = true};
 +    } else if (g_glowSaw3d && !g_glowSceneKept && !gfx::is_offscreen()) {
 +      ++g_glowSwitches;
-+      g_glowSceneKept = g_glowSwitches == g_glowLastSwitches && scene_effects_on();
-+      if (g_glowSceneKept)
++      // Only where the frame before ended its 3D: Eternal Darkness draws one
++      // flat quad mid-scene and more 3D after it, and keeping the scene at
++      // both that quad and the display copy took the occlusion twice (twice
++      // as dark, until the Examine prompt changed the order).
++      g_glowSceneKept = g_glowSwitches == g_glowLastSwitches && !g_glowLastEndedIn3d && scene_effects_on();
++      if (g_glowSceneKept) {
 +        gfx::glow_scene_break(g_scene);
++        g_glowBrokeThisFrame = true;
++      }
 +    }
 +    if (P[3][2] == -1.f && P[0][0] != 0.f) {
 +      const float aspect = std::fabs(P[1][1] / P[0][0]);
@@ -6392,7 +6406,7 @@ index 71136b9..58173de 100644
      const float sx = plan.viewport[0];
      const float sy = plan.viewport[1];
      const float sz = plan.viewport[2];
-@@ -799,13 +1572,15 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -799,13 +1583,15 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      const float width = sx * 2.0f;
      const float height = -sy * 2.0f;
      gx::set_logical_viewport({
@@ -6410,7 +6424,7 @@ index 71136b9..58173de 100644
    }
  
    // U4: apply DrawPlan scissor as a logical render-pass scissor. Multi-rect
-@@ -827,7 +1602,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -827,7 +1613,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
        [&](uint32_t address, uint32_t tsize, uint32_t format, uint32_t width,
            uint32_t height, const void* data, uint32_t available, bool has_tlut,
            uint32_t tlut_address, uint32_t tlut_format, uint32_t tlut_entries,
@@ -6419,7 +6433,7 @@ index 71136b9..58173de 100644
      auto efbIt = g_efbCopyTextures.find(address);
      if (efbIt != g_efbCopyTextures.end() && efbIt->second) {
        ++g_textureCacheStats.hits;
-@@ -839,23 +1614,262 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -839,23 +1625,262 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      const uint32_t size = std::min(tsize, available);
      // Hash the actual source texels (+ TLUT for CI) so a content change under an
      // unchanged guest identity is a distinct cache entry — see TextureKey.
@@ -6689,7 +6703,7 @@ index 71136b9..58173de 100644
      // gxcore owns the decode for every format: produce tightly-packed RGBA8 and
      // upload it as a pre-decoded PC texture (no substrate re-conversion).
      std::vector<uint8_t> decoded;
-@@ -868,8 +1882,48 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -868,8 +1893,48 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      } else {
        decoded = gxc::decode_texture(format, width, height, bytes, size);
      }
@@ -6739,7 +6753,7 @@ index 71136b9..58173de 100644
        handle = new_static_texture_2d(
            width, height, 1, GX_TF_RGBA8_PC,
            ArrayRef<uint8_t>{decoded.data(), decoded.size()}, false,
-@@ -892,7 +1946,98 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -892,7 +1957,98 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    };
  
    BindGroupRef textureBindGroup = 0;
@@ -6838,7 +6852,7 @@ index 71136b9..58173de 100644
      if (plan.texmap_mask == 0u) {
        // Single-texmap fast path: primary texture + plan.sampler at binding 0/1.
        if (plan.has_texture) {
-@@ -903,7 +2048,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -903,7 +2059,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
              plan.tlut_data, plan.tlut_available);
          if (bound) {
            const auto sampler =
@@ -6847,7 +6861,7 @@ index 71136b9..58173de 100644
            const std::array entries{
                WGPUBindGroupEntry{.binding = 0,
                                   .textureView =
-@@ -919,6 +2064,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -919,6 +2075,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            textureBindGroup = bind_group_ref(descriptor);
          }
        }
@@ -6855,7 +6869,7 @@ index 71136b9..58173de 100644
      } else {
        // Multi-texmap: bind each used texmap at 2t (texture) / 2t+1 (sampler),
        // matching the WGSL declarations. Per-texmap PlanSampler from
-@@ -932,12 +2078,15 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -932,12 +2089,15 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
          if ((plan.texmap_mask & (1u << t)) == 0u)
            continue;
          const gxc::PlanTexture& pt = plan.textures[t];
@@ -6872,7 +6886,7 @@ index 71136b9..58173de 100644
          if (!bound) {
            complete = false;
            break;
-@@ -945,14 +2094,16 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -945,14 +2105,16 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
          held.push_back(bound);
          const gxc::PlanSampler& ps =
              pt.sampler.valid ? pt.sampler : plan.samplers[t];
@@ -6891,7 +6905,7 @@ index 71136b9..58173de 100644
        const WGPUBindGroupDescriptor descriptor{
            .label = {"GXCore Texture Bind Group", WGPU_STRLEN},
            .layout = texture_bind_group_layout(plan.texmap_mask).Get(),
-@@ -960,6 +2111,280 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -960,6 +2122,280 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            .entries = entries.data(),
        };
        textureBindGroup = bind_group_ref(descriptor);
@@ -7172,7 +7186,7 @@ index 71136b9..58173de 100644
      }
    }
  
-@@ -969,31 +2394,18 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -969,31 +2405,18 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    const auto idxRange = push_indices(
        reinterpret_cast<const uint8_t*>(plan.indices.data()),
        plan.indices.size() * sizeof(uint16_t), 4);
@@ -7207,7 +7221,7 @@ index 71136b9..58173de 100644
      });
    };
  
-@@ -1006,6 +2418,8 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -1006,6 +2429,8 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      }
    } else {
      issue_draw();

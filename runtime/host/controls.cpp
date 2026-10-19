@@ -226,6 +226,9 @@ void attach_virtual_pad() {
     desc.name = ps ? "Scripted DualSense" : "Scripted Xbox controller";
     const SDL_JoystickID id = SDL_AttachVirtualJoystick(&desc);
     g_virtual = id != 0 ? SDL_OpenJoystick(id) : nullptr;
+    // The game reads the scripted pad, even with a real one connected.
+    if (g_virtual != nullptr)
+        g_pad = SDL_OpenGamepad(id);
     // A trigger at rest is the axis minimum (0 is half pressed).
     if (g_virtual != nullptr) {
         SDL_SetJoystickVirtualAxis(g_virtual, SDL_GAMEPAD_AXIS_LEFT_TRIGGER, SDL_JOYSTICK_AXIS_MIN);

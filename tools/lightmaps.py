@@ -173,7 +173,8 @@ def upscale4(rgba):
 def main():
     out_dir = sys.argv[1]
     os.makedirs(out_dir, exist_ok=True)
-    wanted = {line.split()[-1].split("_")[2] for line in open(sys.argv[2]) if "tex1_" in line}
+    # The name is the word starting tex1_ (the log adds address=... after it).
+    wanted = {w.split("_")[2] for line in open(sys.argv[2]) for w in line.split() if w.startswith("tex1_")}
     seen = set()
     for d in sys.argv[3:]:
         for name in sorted(os.listdir(d)):

@@ -19,6 +19,12 @@ typedef struct {
     int glow;             // light glows round lamps, flames, magick: 0 off, 1 soft, 2 strong
     bool hdr;             // HDR output where the display has it (light past SDR white)
     int ssao;             // ambient occlusion: 0 off, 1 soft, 2 strong
+    // HDR calibration (Graphics enhancements > Calibrate HDR): the display's
+    // peak and SDR white in nits, and the black level in steps (-5 sinks,
+    // up to 10 lifts the darkest light).
+    int hdr_peak;
+    int hdr_paper;
+    int hdr_black;
     bool fullscreen;
     bool fps_counter;     // frames per second in the window title
     int music_volume;     // disc-streamed music, 0-100

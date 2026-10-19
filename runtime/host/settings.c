@@ -21,6 +21,13 @@ Settings g_settings = {
     .glow = 0,
     .hdr = true,  // only where the display has it
     .ssao = 1,
+    .hdr_peak = 1000,
+#if defined(__APPLE__)
+    .hdr_paper = 100,  // macOS's own SDR white (EDR 1.0)
+#else
+    .hdr_paper = 140,  // the PS5's own SDR picture
+#endif
+    .hdr_black = 0,
     .fullscreen = true,
     .fps_counter = false,
     .music_volume = 100,
@@ -105,6 +112,12 @@ void settings_load(void) {
             g_settings.hdr = n != 0;
         else if (strcmp(key, "ssao") == 0)
             g_settings.ssao = clamp_int(n, 0, 2);
+        else if (strcmp(key, "hdr_peak") == 0)
+            g_settings.hdr_peak = clamp_int(n, 200, 4000);
+        else if (strcmp(key, "hdr_paper") == 0)
+            g_settings.hdr_paper = clamp_int(n, 60, 400);
+        else if (strcmp(key, "hdr_black") == 0)
+            g_settings.hdr_black = clamp_int(n, -5, 10);
         else if (strcmp(key, "fullscreen") == 0)
             g_settings.fullscreen = n != 0;
         else if (strcmp(key, "fps_counter") == 0)
@@ -153,6 +166,9 @@ void settings_save(void) {
     fprintf(f, "glow = %d\n", g_settings.glow);
     fprintf(f, "hdr = %d\n", g_settings.hdr ? 1 : 0);
     fprintf(f, "ssao = %d\n", g_settings.ssao);
+    fprintf(f, "hdr_peak = %d\n", g_settings.hdr_peak);
+    fprintf(f, "hdr_paper = %d\n", g_settings.hdr_paper);
+    fprintf(f, "hdr_black = %d\n", g_settings.hdr_black);
     fprintf(f, "fullscreen = %d\n", g_settings.fullscreen ? 1 : 0);
     fprintf(f, "fps_counter = %d\n", g_settings.fps_counter ? 1 : 0);
     fprintf(f, "music_volume = %d\n", g_settings.music_volume);
@@ -193,6 +209,8 @@ void settings_apply_graphics(void) {
     dol_aurora_set_hdr(g_settings.hdr);
     static const float kSsao[] = {0.f, 1.3f, 2.4f};
     dol_aurora_set_ssao(kSsao[g_settings.ssao]);
+    dol_aurora_set_hdr_levels((float)g_settings.hdr_paper, (float)g_settings.hdr_peak,
+                              (float)g_settings.hdr_black * 0.002f);
     // Highlights up to 3.5x SDR white, 4x with ambient occlusion (which
     // darkens the room round them). The PS5 (HDR10, SDR white at 140 nits to
     // match the console's own SDR picture) goes to 5x and 6x: about 700 and

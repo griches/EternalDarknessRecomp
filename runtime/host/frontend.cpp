@@ -787,6 +787,8 @@ std::string g_notice;
 Uint64 g_notice_at = 0;
 }  // namespace enhancement
 
+void run_hdr_calibration(int first_step);
+
 void build_enhancements() {
     using namespace enhancement;
     for (int which = 0; which < kCount; which++) {
@@ -802,6 +804,16 @@ void build_enhancements() {
         r.change = [which](int dir) { change(which, dir); };
         g_rows.push_back(r);
     }
+    Row calibrate{"Calibrate HDR"};
+    calibrate.enabled = dol_aurora_hdr_available() && g_settings.hdr;
+    calibrate.value = std::to_string(g_settings.hdr_peak) + " nits peak";
+    calibrate.note = calibrate.enabled
+                         ? "Three steps for your display: the brightest it shows, how bright the picture is, "
+                           "and where black begins."
+                         : "Turn HDR on (on an HDR display) to calibrate it.";
+    calibrate.activate = [] { run_hdr_calibration(0); };
+    g_rows.push_back(calibrate);
+
     Row keys{"In the game"};
     keys.enabled = false;
     keys.gap = true;
@@ -1547,6 +1559,96 @@ void update_enhancement_notice() {
                   IM_COL32(0xb8, 0xae, 0x98, a(0xff)), legend.c_str());
 }
 
+namespace {
+
+// HDR calibration: the menu steps aside and the renderer draws each step's
+// test pattern in place of the picture (dol_aurora_set_hdr_pattern), with
+// this caption under it. 1 peak: the ring (the most a signal asks for) in a
+// box at the chosen peak disappears once the box reaches what the display
+// shows. 2 brightness: the game picture, SDR white to taste. 3 black: a ring
+// a shade above black, set to only just visible.
+void draw_hdr_calibration_caption(int step) {
+    if (ImGui::GetCurrentContext() == nullptr)
+        return;
+    static const char* const kTitles[3] = {"1 / 3  Peak brightness", "2 / 3  Brightness", "3 / 3  Black level"};
+    static const char* const kHelp[3] = {
+        "Raise it until the ring in the box disappears, then go back one step.",
+        "How bright the picture is: set it so the game looks right to you.",
+        "Set it so the ring is only just visible against the black.",
+    };
+    char value[48];
+    if (step == 0)
+        std::snprintf(value, sizeof value, "%d nits", g_settings.hdr_peak);
+    else if (step == 1)
+        std::snprintf(value, sizeof value, "%d nits", g_settings.hdr_paper);
+    else
+        std::snprintf(value, sizeof value, "%+d", g_settings.hdr_black);
+    const std::string head = std::string(kTitles[step]) + ":  " + value;
+    const char* const hint = "Left / Right adjust  \u00b7  A next  \u00b7  B back";
+    const float dp = overlay_dp();
+    ImFont* font = g_fps_font != nullptr ? g_fps_font : ImGui::GetFont();
+    const float big = 28.f * dp, small = 17.f * dp;
+    const ImVec2 a = font->CalcTextSizeA(big, FLT_MAX, 0.f, head.c_str());
+    const ImVec2 b = font->CalcTextSizeA(small, FLT_MAX, 0.f, kHelp[step]);
+    const ImVec2 c = font->CalcTextSizeA(small, FLT_MAX, 0.f, hint);
+    const float pad = 16.f * dp, gap = 6.f * dp;
+    const float width = std::max({a.x, b.x, c.x}) + 2.f * pad;
+    const float height = a.y + b.y + c.y + 2.f * gap + 2.f * pad;
+    const ImVec2 screen = ImGui::GetMainViewport()->Size;
+    const ImVec2 at{(screen.x - width) / 2.f, screen.y - height - 40.f * dp};
+    ImDrawList* draw = ImGui::GetForegroundDrawList(ImGui::GetMainViewport());
+    draw->AddRectFilled(at, ImVec2{at.x + width, at.y + height}, IM_COL32(0, 0, 0, 0xff), 6.f * dp);
+    float y = at.y + pad;
+    draw->AddText(font, big, ImVec2{at.x + (width - a.x) / 2.f, y}, IM_COL32(0xf0, 0xe6, 0xc8, 0xff), head.c_str());
+    y += a.y + gap;
+    draw->AddText(font, small, ImVec2{at.x + (width - b.x) / 2.f, y}, IM_COL32(0xd8, 0xd0, 0xb8, 0xff), kHelp[step]);
+    y += b.y + gap;
+    draw->AddText(font, small, ImVec2{at.x + (width - c.x) / 2.f, y}, IM_COL32(0xa0, 0x98, 0x88, 0xff), hint);
+}
+
+// ED_HDR_CALIBRATION_TEST=seconds,step (testing): calibration opens on its
+// own at that step after that many seconds and closes 4 s later.
+Uint64 g_calibration_test_until = 0;
+
+void run_hdr_calibration(int first_step = 0) {
+    static const int kPatterns[3] = {1, 2, 3};
+    g_doc->Hide();
+    bool pressed[kButtonCount];
+    g_input.poll(pressed);
+    int step = first_step;
+    bool open = true;
+    while (open) {
+        if (g_calibration_test_until != 0 && SDL_GetTicks() >= g_calibration_test_until) {
+            g_calibration_test_until = 0;
+            break;
+        }
+        dol_aurora_set_hdr_pattern(kPatterns[step]);
+        g_input.poll(pressed);
+        const int dir = pressed[kRight] ? 1 : pressed[kLeft] ? -1 : 0;
+        if (dir != 0) {
+            if (step == 0)
+                g_settings.hdr_peak = std::clamp(g_settings.hdr_peak + dir * 50, 200, 4000);
+            else if (step == 1)
+                g_settings.hdr_paper = std::clamp(g_settings.hdr_paper + dir * 10, 60, 400);
+            else
+                g_settings.hdr_black = std::clamp(g_settings.hdr_black + dir, -5, 10);
+            settings_apply_graphics();
+        }
+        if (pressed[kAccept] && ++step == 3)
+            break;
+        if (pressed[kBack] && step-- == 0)
+            break;
+        draw_hdr_calibration_caption(step);
+        open = dol_aurora_ui_frame();
+    }
+    dol_aurora_set_hdr_pattern(0);
+    settings_save();
+    if (open)
+        g_doc->Show(Rml::ModalFlag::None, Rml::FocusFlag::Document);
+}
+
+}  // namespace
+
 extern "C" void frontend_cycle_enhancement(int which) {
     using namespace enhancement;
     if (which == kCount || which == kCount + 1) {
@@ -1584,6 +1686,23 @@ extern "C" void frontend_cycle_enhancement(int which) {
 }
 
 extern "C" void frontend_frame(void) {
+    static Uint64 calibration_test_at = 0;
+    static int calibration_test_step = 0;
+    static bool calibration_test_checked = false;
+    if (!calibration_test_checked) {
+        calibration_test_checked = true;
+        unsigned long after = 0;
+        int step = 0;
+        if (const char* t = std::getenv("ED_HDR_CALIBRATION_TEST"); t && std::sscanf(t, "%lu,%d", &after, &step) >= 1) {
+            calibration_test_at = SDL_GetTicks() + after * 1000u;
+            calibration_test_step = std::clamp(step, 0, 2);
+        }
+    }
+    if (calibration_test_at != 0 && SDL_GetTicks() >= calibration_test_at && ensure_ui()) {
+        calibration_test_at = 0;
+        g_calibration_test_until = SDL_GetTicks() + 4000;
+        run_hdr_calibration(calibration_test_step);
+    }
     update_fps_counter();
     update_enhancement_notice();
     update_fast_forward_prompt();

@@ -1552,10 +1552,11 @@ extern "C" void frontend_cycle_enhancement(int which) {
     if (which == kCount || which == kCount + 1) {
         // Before and after: off is the game as the GameCube showed it (its
         // own 528 lines, the disc's light maps and textures); on is Gary's set
-        // at the chosen resolution. The resolution is not saved.
+        // (the defaults: HDR, Soft occlusion, sharp shadows, HD textures, no
+        // glow) at the chosen resolution. The resolution is not saved.
         const bool on = which == kCount + 1;
         g_settings.hdr = on;
-        g_settings.glow = on ? 1 : 0;
+        g_settings.glow = 0;  // not in Gary's set either way
         g_settings.ssao = on ? 1 : 0;
         g_settings.hd_textures = on;
         g_settings.sharp_shadows = on;
@@ -1565,7 +1566,7 @@ extern "C" void frontend_cycle_enhancement(int which) {
         settings_save();
         std::fprintf(stderr, "[frontend] enhancements %s\n", on ? "on" : "off");
         std::lock_guard<std::mutex> lock(g_notice_mutex);
-        g_notice = on ? "Enhanced: HDR, soft glow and occlusion, sharp shadows, HD textures"
+        g_notice = on ? "Enhanced: HDR, soft occlusion, sharp shadows, HD textures"
                       : "Original: the GameCube's resolution, shadows and textures";
         g_notice_at = SDL_GetTicks();
         return;

@@ -67,6 +67,8 @@ uint64_t glyph_signature();
 // cutscene plays; and whether RB or Tab is fast-forwarding now.
 std::string fast_forward_glyph();
 bool fast_forwarding();
+// The graphics-enhancement shortcuts on this controller ("Hold RS: A glow...").
+std::string enhancement_legend();
 
 // Switch layout (Custom starts from the layout in use).
 void set_layout(int layout);

@@ -41,6 +41,7 @@
 #include <filesystem>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <string>
 #include <sys/stat.h>
 #include <vector>
@@ -254,7 +255,7 @@ std::string region_name(const std::string& id) {
 
 // --- Menu model -------------------------------------------------------------
 
-enum class Screen { Launcher, Play, Options, Controls, Mapping, InGame, Problem };
+enum class Screen { Launcher, Play, Options, Controls, Mapping, InGame, Problem, Enhancements };
 
 struct Row {
     std::string label;
@@ -707,37 +708,14 @@ void build_options() {
     font.change = [](int dir) { cycle(g_settings.game_font, 3, dir); };
     g_rows.push_back(font);
 
-    Row hd{"HD textures", texpack_count() != 0 ? on_off(g_settings.hd_textures) : "No pack"};
-    hd.page = 1;
-    hd.enabled = texpack_count() != 0;
-    hd.note = texpack_count() != 0
-                  ? "The texture pack in your textures folder (" +
-                        std::to_string(texpack_count()) + " images)."
-                  : "Put a Dolphin-format texture pack (tex1_*.png) in the textures folder.";
-    hd.change = [](int) { g_settings.hd_textures = !g_settings.hd_textures; };
-    g_rows.push_back(hd);
-
-    Row shadows{"Baked shadows", g_settings.sharp_shadows ? "Sharp" : "Original"};
-    shadows.page = 1;
-    shadows.note = "The rooms' light and shadow: Sharp upscales it as each room loads, "
-                   "Original keeps the disc's soft, blocky maps.";
-    shadows.change = [](int) { g_settings.sharp_shadows = !g_settings.sharp_shadows; };
-    g_rows.push_back(shadows);
-
-    static const char* const kGlow[] = {"Off", "Soft", "Strong"};
-    Row glow{"Glow", kGlow[g_settings.glow]};
-    glow.page = 1;
-    glow.note = "Lamps, flames, magick and glowing runes give off a soft haze of light.";
-    glow.change = [](int dir) { cycle(g_settings.glow, 3, dir); };
-    g_rows.push_back(glow);
-
-    Row hdr{"HDR", on_off(g_settings.hdr)};
-    hdr.page = 1;
-    hdr.note = dol_aurora_hdr_available()
-                   ? "On an HDR display, glowing light shines brighter than white."
-                   : "Needs an HDR display (on a Mac, its XDR screen or an HDR monitor).";
-    hdr.change = [](int) { g_settings.hdr = !g_settings.hdr; };
-    g_rows.push_back(hdr);
+    Row enhancements{"Graphics enhancements"};
+    enhancements.page = 1;
+    enhancements.note = "HD textures, baked shadows, glow, ambient occlusion and HDR.";
+    enhancements.activate = [] {
+        g_screen = Screen::Enhancements;
+        g_selected = 0;
+    };
+    g_rows.push_back(enhancements);
 
     if (g_options_return == Screen::Launcher && !g_disc_on_main) {
         Row disc = disc_row();
@@ -751,6 +729,89 @@ void build_options() {
     back.activate = [] {
         settings_save();
         g_screen = g_options_return;
+        g_selected = 0;
+    };
+    g_rows.push_back(back);
+}
+
+// Graphics enhancements: the menu's rows and the in-game shortcuts (hold R3
+// and press a button, frontend_cycle_enhancement) change the same values,
+// applied at once so they can be compared.
+namespace enhancement {
+enum { kGlow, kOcclusion, kHdr, kShadows, kHdTextures, kCount };
+const char* const kNames[kCount] = {"Glow", "Ambient occlusion", "HDR", "Baked shadows", "HD textures"};
+const char* const kLevels[] = {"Off", "Soft", "Strong"};
+
+bool available(int which) {
+    if (which == kHdr)
+        return dol_aurora_hdr_available();
+    if (which == kHdTextures)
+        return texpack_count() != 0;
+    return true;
+}
+
+std::string value(int which) {
+    switch (which) {
+    case kGlow: return kLevels[g_settings.glow];
+    case kOcclusion: return kLevels[g_settings.ssao];
+    case kHdr: return available(which) ? on_off(g_settings.hdr) : "Not on this display";
+    case kShadows: return g_settings.sharp_shadows ? "Sharp" : "Original";
+    case kHdTextures: return available(which) ? on_off(g_settings.hd_textures) : "No pack";
+    default: return "";
+    }
+}
+
+void change(int which, int dir) {
+    switch (which) {
+    case kGlow: cycle(g_settings.glow, 3, dir); break;
+    case kOcclusion: cycle(g_settings.ssao, 3, dir); break;
+    case kHdr: g_settings.hdr = !g_settings.hdr; break;
+    case kShadows: g_settings.sharp_shadows = !g_settings.sharp_shadows; break;
+    case kHdTextures: g_settings.hd_textures = !g_settings.hd_textures; break;
+    default: return;
+    }
+    settings_apply_graphics();
+}
+
+const char* const kNotes[kCount] = {
+    "Lamps, flames, magick and glowing runes give off a soft haze of light.",
+    "Corners, creases and the ground round feet darken where light can't reach, worked out from depth each frame.",
+    "On an HDR display, glowing light shines brighter than white.",
+    "The rooms' light and shadow: Sharp upscales it as each room loads, Original keeps the disc's soft, blocky maps.",
+    "The texture pack in your textures folder.",
+};
+
+// What changed, shown over the game for a moment (update_enhancement_notice).
+std::mutex g_notice_mutex;
+std::string g_notice;
+Uint64 g_notice_at = 0;
+}  // namespace enhancement
+
+void build_enhancements() {
+    using namespace enhancement;
+    for (int which = 0; which < kCount; which++) {
+        Row r{kNames[which], value(which)};
+        r.enabled = available(which);
+        r.note = kNotes[which];
+        if (which == kHdTextures && available(which))
+            r.note = "The texture pack in your textures folder (" + std::to_string(texpack_count()) + " images).";
+        if (which == kHdTextures && !available(which))
+            r.note = "Put a Dolphin-format texture pack (tex1_*.png) in the textures folder.";
+        if (which == kHdr && !available(which))
+            r.note = "Needs an HDR display (on a Mac, its XDR screen or an HDR monitor).";
+        r.change = [which](int dir) { change(which, dir); };
+        g_rows.push_back(r);
+    }
+    Row keys{"In the game"};
+    keys.enabled = false;
+    keys.gap = true;
+    keys.note = controls::enhancement_legend() + ", to compare.";
+    keys.value = "Hold R3";
+    g_rows.push_back(keys);
+    Row back{"Back"};
+    back.activate = [] {
+        settings_save();
+        g_screen = Screen::Options;
         g_selected = 0;
     };
     g_rows.push_back(back);
@@ -943,6 +1004,7 @@ void render() {
                           : g_screen == Screen::Play     ? "Load Game"
                           : g_screen == Screen::Options  ? "Options"
                           : g_screen == Screen::Controls ? "Controls"
+                          : g_screen == Screen::Enhancements ? "Graphics Enhancements"
                           : g_screen == Screen::Mapping  ? "Button Mapping"
                           : g_screen == Screen::Problem  ? g_problem_heading.c_str()
                                                          : "Paused";
@@ -995,6 +1057,7 @@ void render() {
     g_doc->SetClass("overlay", g_screen == Screen::InGame || g_screen == Screen::Problem ||
                                    ((g_screen == Screen::Options ||
                                      g_screen == Screen::Controls ||
+                                     g_screen == Screen::Enhancements ||
                                      g_screen == Screen::Mapping) &&
                                     g_options_return == Screen::InGame));
 }
@@ -1006,6 +1069,7 @@ void build_rows() {
     case Screen::Play: build_play(); break;
     case Screen::Options: build_options(); break;
     case Screen::Controls: build_controls(); break;
+    case Screen::Enhancements: build_enhancements(); break;
     case Screen::Mapping: build_mapping(); break;
     case Screen::InGame: build_in_game(); break;
     case Screen::Problem: build_problem(); break;
@@ -1043,6 +1107,11 @@ void go_back() {
         g_selected = 0;
         break;
     case Screen::Controls:
+        g_screen = Screen::Options;
+        g_selected = 0;
+        break;
+    case Screen::Enhancements:
+        settings_save();
         g_screen = Screen::Options;
         g_selected = 0;
         break;
@@ -1442,8 +1511,57 @@ void update_fast_forward_prompt() {
     }
 }
 
+// What a shortcut changed ("Glow: Strong"), top centre for two seconds, with
+// the shortcuts under it. Through ImGui, as the FPS counter.
+void update_enhancement_notice() {
+    std::string text;
+    Uint64 at;
+    {
+        std::lock_guard<std::mutex> lock(enhancement::g_notice_mutex);
+        text = enhancement::g_notice;
+        at = enhancement::g_notice_at;
+    }
+    const Uint64 now = SDL_GetTicks();
+    if (text.empty() || now - at > 2500 || ImGui::GetCurrentContext() == nullptr)
+        return;
+    const float fade = now - at > 2000 ? 1.f - (now - at - 2000) / 500.f : 1.f;
+    const float dp = overlay_dp();
+    ImFont* font = g_fps_font != nullptr ? g_fps_font : ImGui::GetFont();
+    static const std::string legend = controls::enhancement_legend();
+    const float size = 26.f * dp, small = 15.f * dp;
+    const ImVec2 big = font->CalcTextSizeA(size, FLT_MAX, 0.f, text.c_str());
+    const ImVec2 line = font->CalcTextSizeA(small, FLT_MAX, 0.f, legend.c_str());
+    const ImVec2 pad{16.f * dp, 9.f * dp};
+    const float width = std::max(big.x, line.x) + 2.f * pad.x;
+    const float height = big.y + 4.f * dp + line.y + 2.f * pad.y;
+    const ImVec2 screen = ImGui::GetMainViewport()->Size;
+    const ImVec2 at0{(screen.x - width) / 2.f, 28.f * dp};
+    ImDrawList* draw = ImGui::GetForegroundDrawList(ImGui::GetMainViewport());
+    const auto a = [&](int v) { return static_cast<ImU32>(v * fade); };
+    draw->AddRectFilled(at0, ImVec2{at0.x + width, at0.y + height}, IM_COL32(0, 0, 0, a(0xb0)), 6.f * dp);
+    draw->AddText(font, size, ImVec2{at0.x + (width - big.x) / 2.f, at0.y + pad.y}, IM_COL32(0xf0, 0xe6, 0xc8, a(0xff)),
+                  text.c_str());
+    draw->AddText(font, small, ImVec2{at0.x + (width - line.x) / 2.f, at0.y + pad.y + big.y + 4.f * dp},
+                  IM_COL32(0xb8, 0xae, 0x98, a(0xff)), legend.c_str());
+}
+
+extern "C" void frontend_cycle_enhancement(int which) {
+    using namespace enhancement;
+    if (which < 0 || which >= kCount)
+        return;
+    if (available(which)) {
+        change(which, +1);
+        settings_save();
+    }
+    std::fprintf(stderr, "[frontend] %s: %s\n", kNames[which], value(which).c_str());
+    std::lock_guard<std::mutex> lock(g_notice_mutex);
+    g_notice = std::string(kNames[which]) + ": " + value(which);
+    g_notice_at = SDL_GetTicks();
+}
+
 extern "C" void frontend_frame(void) {
     update_fps_counter();
+    update_enhancement_notice();
     update_fast_forward_prompt();
     update_cursor();
     static bool menu_was_held = false;

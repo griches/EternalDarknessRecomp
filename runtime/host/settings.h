@@ -18,6 +18,7 @@ typedef struct {
     bool sharp_shadows;   // upscale the rooms' light maps as they load (lightmaps.cpp)
     int glow;             // light glows round lamps, flames, magick: 0 off, 1 soft, 2 strong
     bool hdr;             // HDR output where the display has it (light past SDR white)
+    int ssao;             // ambient occlusion: 0 off, 1 soft, 2 strong
     bool fullscreen;
     bool fps_counter;     // frames per second in the window title
     int music_volume;     // disc-streamed music, 0-100
@@ -43,6 +44,9 @@ void settings_save(void);
 // Push the current values to the renderer, window and audio (safe to call
 // again after any change).
 void settings_apply(void);
+// Glow, ambient occlusion and HDR only: safe from the game thread (the
+// in-game shortcuts); baked shadows and HD textures are read where used.
+void settings_apply_graphics(void);
 
 #ifdef __cplusplus
 }

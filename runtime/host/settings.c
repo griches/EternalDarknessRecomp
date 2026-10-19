@@ -20,6 +20,7 @@ Settings g_settings = {
     .sharp_shadows = true,
     .glow = 2,
     .hdr = false,
+    .ssao = 1,
     .fullscreen = true,
     .fps_counter = false,
     .music_volume = 100,
@@ -102,6 +103,8 @@ void settings_load(void) {
             g_settings.glow = clamp_int(n, 0, 2);
         else if (strcmp(key, "hdr") == 0)
             g_settings.hdr = n != 0;
+        else if (strcmp(key, "ssao") == 0)
+            g_settings.ssao = clamp_int(n, 0, 2);
         else if (strcmp(key, "fullscreen") == 0)
             g_settings.fullscreen = n != 0;
         else if (strcmp(key, "fps_counter") == 0)
@@ -149,6 +152,7 @@ void settings_save(void) {
     fprintf(f, "sharp_shadows = %d\n", g_settings.sharp_shadows ? 1 : 0);
     fprintf(f, "glow = %d\n", g_settings.glow);
     fprintf(f, "hdr = %d\n", g_settings.hdr ? 1 : 0);
+    fprintf(f, "ssao = %d\n", g_settings.ssao);
     fprintf(f, "fullscreen = %d\n", g_settings.fullscreen ? 1 : 0);
     fprintf(f, "fps_counter = %d\n", g_settings.fps_counter ? 1 : 0);
     fprintf(f, "music_volume = %d\n", g_settings.music_volume);
@@ -178,8 +182,16 @@ void settings_apply(void) {
     dol_aurora_set_frame_rate(g_settings.frame_rate);
     dol_aurora_set_audio_buffer_ms(g_settings.audio_buffer_ms);
     dol_aurora_set_vibration(g_settings.vibration);
-    static const float kGlow[] = {0.f, 1.2f, 2.f};
+#endif
+    settings_apply_graphics();
+}
+
+void settings_apply_graphics(void) {
+#ifdef ED_AURORA
+    static const float kGlow[] = {0.f, 0.6f, 1.0f};
     dol_aurora_set_glow(kGlow[g_settings.glow]);
     dol_aurora_set_hdr(g_settings.hdr);
+    static const float kSsao[] = {0.f, 1.5f, 2.2f};
+    dol_aurora_set_ssao(kSsao[g_settings.ssao]);
 #endif
 }

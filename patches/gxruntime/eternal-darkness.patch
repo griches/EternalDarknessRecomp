@@ -4731,16 +4731,17 @@ index 7af8fca..4c14e34 100644
    else
 diff --git a/graphics/aurora/lib/gfx/glow.cpp b/graphics/aurora/lib/gfx/glow.cpp
 new file mode 100644
-index 0000000..e453aa8
+index 0000000..7f9b27e
 --- /dev/null
 +++ b/graphics/aurora/lib/gfx/glow.cpp
-@@ -0,0 +1,533 @@
+@@ -0,0 +1,553 @@
 +#include "glow.hpp"
 +
 +#include "../webgpu/gpu_prof.hpp"
 +
 +#include <atomic>
 +#include <cstdlib>
++#include <string>
 +#include <vector>
 +
 +namespace aurora::gfx::glow {
@@ -4848,6 +4849,20 @@ index 0000000..e453aa8
 +  let v = max(c, vec3f(0.0));
 +  return select(pow((v + 0.055) / 1.055, vec3f(2.4)), v / 12.92, v <= vec3f(0.04045));
 +}
++// The surface's encoding of linear light (1.0 = SDR white): as it is for an
++// extended linear sRGB surface; for HDR10, BT.709 to BT.2020 primaries, SDR
++// white at b.w nits, and the PQ curve (SMPTE ST 2084).
++const PQ_OUT: bool = false;
++fn encode_out(lin: vec3f) -> vec3f {
++  if (!PQ_OUT) {
++    return lin;
++  }
++  let m = mat3x3f(vec3f(0.6274040, 0.0690970, 0.0163916), vec3f(0.3292820, 0.9195400, 0.0880132),
++                  vec3f(0.0433136, 0.0113612, 0.8955950));
++  let y = clamp(m * lin * params.b.w / 10000.0, vec3f(0.0), vec3f(1.0));
++  let ym = pow(y, vec3f(0.1593017578125));
++  return pow((0.8359375 + 18.8515625 * ym) / (1.0 + 18.6875 * ym), vec3f(78.84375));
++}
 +fn tap(uv: vec2f, t: vec2f, x: f32, y: f32) -> vec3f {
 +  return textureSampleLevel(src, samp, uv + t * vec2f(x, y), 0.0).rgb;
 +}
@@ -4865,12 +4880,12 @@ index 0000000..e453aa8
 +  let h = textureSampleLevel(highlights, samp, in.uv, 0.0).rgb;
 +  let k = clamp(max(h.r, max(h.g, h.b)) / max(params.b.z * 0.5, 1e-3), 0.0, 1.0);
 +  let lin = min(to_linear(c + g) * params.c.x * (1.0 + params.c.w * k), vec3f(params.c.z));
-+  return vec4f(lin, 1.0);
++  return vec4f(encode_out(lin), 1.0);
 +}
 +// A page drawn over the picture (premultiplied alpha).
 +@fragment fn overlay(in: VOut) -> @location(0) vec4f {
 +  let c = textureSample(efb_texture, efb_sampler, in.uv);
-+  let rgb = select(vec3f(0.0), to_linear(c.rgb / c.a) * c.a, c.a > 0.0) * params.c.x;
++  let rgb = select(vec3f(0.0), encode_out(to_linear(c.rgb / c.a) * params.c.x) * c.a, c.a > 0.0);
 +  return vec4f(rgb, c.a);
 +}
 +)";
@@ -4893,6 +4908,8 @@ index 0000000..e453aa8
 +const float g_paper = env_float("AURORA_HDR_PAPER", 1.0f);
 +const float g_hdrGain = env_float("AURORA_HDR_GLOW", 1.0f);
 +const float g_peak = env_float("AURORA_HDR_PEAK", 8.0f);
++// HDR10 (the PS5): SDR white's brightness in nits (AURORA_HDR_PAPER_NITS).
++const float g_paperNits = env_float("AURORA_HDR_PAPER_NITS", 200.0f);
 +// The scene's highlights (lamps, flames, sunlight, a portal) up to this much
 +// past their SDR level, glow or not.
 +std::atomic<float> g_highlight{env_float("AURORA_HDR_HIGHLIGHT", 2.5f)};
@@ -5101,7 +5118,7 @@ index 0000000..e453aa8
 +    return;
 +  g_highlightWritten = highlight;
 +  g_uniformWritten = true;
-+  const float value[12]{s, g_threshold, g_knee, g_scene, g_saturation, g_spread, g_cap, 0.f,
++  const float value[12]{s, g_threshold, g_knee, g_scene, g_saturation, g_spread, g_cap, g_paperNits,
 +                        g_paper, g_hdrGain, g_peak, highlight};
 +  g_queue.WriteBuffer(g_uniform, 0, value, sizeof value);
 +  g_uniformValue = s;
@@ -5230,8 +5247,11 @@ index 0000000..e453aa8
 +  if (!g_black.texture)
 +    g_black = make_level(1, 1, "No glow");
 +  if (g_presentPipelineFormat != webgpu::g_presentFormat) {
++    std::string code = kPresentShader;
++    if (webgpu::g_presentFormat == wgpu::TextureFormat::RGB10A2Unorm)
++      code.replace(code.find("const PQ_OUT: bool = false;"), 27, "const PQ_OUT: bool = true; ");
 +    wgpu::ShaderSourceWGSL source{};
-+    source.code = kPresentShader;
++    source.code = code.c_str();
 +    const wgpu::ShaderModuleDescriptor moduleDesc{.nextInChain = &source, .label = "HDR present"};
 +    const auto module = g_device.CreateShaderModule(&moduleDesc);
 +    g_presentPipeline = make_present_pipeline(module, "present", false);
@@ -8634,7 +8654,7 @@ index 02adbe1..bcc38f3 100644
  }
  
 diff --git a/graphics/aurora/lib/webgpu/gpu.cpp b/graphics/aurora/lib/webgpu/gpu.cpp
-index 7aff76e..7f1ea96 100644
+index 7aff76e..987a7bc 100644
 --- a/graphics/aurora/lib/webgpu/gpu.cpp
 +++ b/graphics/aurora/lib/webgpu/gpu.cpp
 @@ -1,3 +1,4 @@
@@ -8651,17 +8671,18 @@ index 7aff76e..7f1ea96 100644
  wgpu::RenderPipeline g_CopyPipeline;
  wgpu::RenderPipeline g_CopyPremultipliedAlphaPipeline;
  wgpu::BindGroup g_CopyBindGroup;
-@@ -60,6 +61,9 @@ static wgpu::Adapter g_adapter;
+@@ -60,6 +61,10 @@ static wgpu::Adapter g_adapter;
  wgpu::Instance g_instance;
  wgpu::AdapterInfo g_adapterInfo;
  static wgpu::SurfaceCapabilities g_surfaceCapabilities;
 +bool g_hdrActive = false;
 +wgpu::TextureFormat g_presentFormat = wgpu::TextureFormat::Undefined;
 +static bool g_hdrWanted = std::getenv("AURORA_HDR") != nullptr;  // AURORA_HDR=1 (testing)
++static wgpu::TextureFormat hdr_surface_format() noexcept;
  bool g_hasCoreFeatures = false;
  bool g_bcTexturesSupported = false;
  bool g_astcTexturesSupported = false;
-@@ -932,6 +936,11 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+@@ -932,6 +937,11 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
        if (feature == wgpu::FeatureName::TimestampQuery) {
          requiredFeatures.push_back(feature);
        }
@@ -8673,7 +8694,7 @@ index 7aff76e..7f1ea96 100644
  #endif
      }
      // Stash for GraphicsConfig fill after device create (device request below).
-@@ -1051,7 +1060,11 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+@@ -1051,7 +1061,11 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
        .surfaceConfiguration =
            wgpu::SurfaceConfiguration{
                .format = surfaceFormat,
@@ -8686,7 +8707,7 @@ index 7aff76e..7f1ea96 100644
                .width = size.native_fb_width,
                .height = size.native_fb_height,
                .presentMode = presentMode,
-@@ -1123,9 +1136,19 @@ static void resize_swapchain_internal(uint32_t width, uint32_t height, uint32_t
+@@ -1123,9 +1137,19 @@ static void resize_swapchain_internal(uint32_t width, uint32_t height, uint32_t
    g_graphicsConfig.surfaceConfiguration.height = nativeHeight;
    auto surfaceConfiguration = g_graphicsConfig.surfaceConfiguration;
    surfaceConfiguration.device = g_device;
@@ -8694,7 +8715,7 @@ index 7aff76e..7f1ea96 100644
 +  // extended linear sRGB once configured (this Dawn takes no colour space).
 +  g_hdrActive = g_hdrWanted && hdr_available();
 +  if (g_hdrActive)
-+    surfaceConfiguration.format = wgpu::TextureFormat::RGBA16Float;
++    surfaceConfiguration.format = hdr_surface_format();
 +  if (g_presentFormat != surfaceConfiguration.format)
 +    Log.info("Present format {} (HDR {})", magic_enum::enum_name(surfaceConfiguration.format),
 +             g_hdrActive ? "on" : "off");
@@ -8706,16 +8727,27 @@ index 7aff76e..7f1ea96 100644
    }
    g_frameBuffer = create_render_texture(width, height, true);
    g_frameBufferResolved = create_render_texture(width, height, false);
-@@ -1133,6 +1156,24 @@ static void resize_swapchain_internal(uint32_t width, uint32_t height, uint32_t
+@@ -1133,6 +1157,35 @@ static void resize_swapchain_internal(uint32_t width, uint32_t height, uint32_t
    g_CopyBindGroup = create_copy_bind_group(present_source());
  }
  
-+bool hdr_available() noexcept {
-+#if !defined(__APPLE__)
-+  return false;  // the extended-range layer is macOS's (MetalBinding.mm) so far
++// The window's HDR format: 16-bit float in extended linear sRGB on macOS
++// (MetalBinding.mm sets the layer), 10-bit BT.2020 PQ (HDR10) on the PS5
++// (its Vulkan driver registers such buffers as HDR with VideoOut).
++static wgpu::TextureFormat hdr_surface_format() noexcept {
++#if defined(__APPLE__)
++  return wgpu::TextureFormat::RGBA16Float;
++#elif defined(__PROSPERO__)
++  return wgpu::TextureFormat::RGB10A2Unorm;
++#else
++  return wgpu::TextureFormat::Undefined;  // not yet (Windows, Linux)
 +#endif
-+  for (size_t i = 0; i < g_surfaceCapabilities.formatCount; ++i)
-+    if (g_surfaceCapabilities.formats[i] == wgpu::TextureFormat::RGBA16Float)
++}
++
++bool hdr_available() noexcept {
++  const auto format = hdr_surface_format();
++  for (size_t i = 0; format != wgpu::TextureFormat::Undefined && i < g_surfaceCapabilities.formatCount; ++i)
++    if (g_surfaceCapabilities.formats[i] == format)
 +      return true;
 +  return false;
 +}
@@ -8732,16 +8764,17 @@ index 7aff76e..7f1ea96 100644
    gfx::gpu_synchronize();
    if (!g_instance || !g_device) {
 diff --git a/graphics/aurora/lib/webgpu/gpu.hpp b/graphics/aurora/lib/webgpu/gpu.hpp
-index cd65d98..057fcf0 100644
+index cd65d98..8c355fa 100644
 --- a/graphics/aurora/lib/webgpu/gpu.hpp
 +++ b/graphics/aurora/lib/webgpu/gpu.hpp
-@@ -60,6 +60,16 @@ extern bool g_bcTexturesSupported;
+@@ -60,6 +60,17 @@ extern bool g_bcTexturesSupported;
  extern bool g_astcTexturesSupported;
  extern bool g_textureComponentSwizzleSupported;
  
 +// GXRuntime recomp patch: HDR. While on (and the surface offers it) the
-+// window's surface is 16-bit float in extended linear sRGB: the picture keeps
-+// its SDR white at 1.0 and light (glow.hpp) can go past it. Everything drawn
++// window's surface is 16-bit float in extended linear sRGB (macOS) or 10-bit
++// HDR10, BT.2020 PQ (g_presentFormat RGB10A2Unorm, the PS5): the picture
++// keeps its SDR white and light (glow.hpp) can go past it. Everything drawn
 +// before the present keeps the internal format (surfaceConfiguration.format).
 +extern bool g_hdrActive;
 +extern wgpu::TextureFormat g_presentFormat;

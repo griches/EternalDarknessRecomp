@@ -28,7 +28,62 @@ set(GXRUNTIME_ENABLE_AURORA ${ED_ENABLE_AURORA} CACHE BOOL "" FORCE)
 # The launcher and in-game menu are RmlUi documents (res/ui).
 set(AURORA_ENABLE_RMLUI ${ED_ENABLE_AURORA} CACHE BOOL "" FORCE)
 set(GXRUNTIME_AURORA_DIR "${ED_GXRUNTIME_DIR}/graphics/aurora" CACHE PATH "" FORCE)
+
+# Linux x86-64: HDR (Steam Deck Game Mode) needs Dawn with patches/dawn/hdr.patch;
+# the prebuilt package Aurora fetches has none. That Dawn, built by
+# tools/deck/build-dawn-hdr.sh, is on this repo's releases: fetched here unless
+# another package is named (-DAURORA_DAWN_PACKAGE_URL) or Dawn is built from source.
+set(ED_LINUX_DAWN FALSE)
+if(ED_ENABLE_AURORA AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    set(ED_LINUX_DAWN TRUE)
+endif()
+option(ED_ALLOW_DAWN_WITHOUT_HDR "Linux: build with a Dawn that lacks patches/dawn/hdr.patch (no HDR)" OFF)
+if(ED_LINUX_DAWN AND NOT AURORA_DAWN_PACKAGE_URL AND
+   (NOT AURORA_DAWN_PROVIDER OR AURORA_DAWN_PROVIDER MATCHES "^(auto|package)$"))
+    set(ED_DAWN_HDR_SHA256 d0926c99d472414973561c1bc3c0b0832b69981167a33b8c81689739ef1358ea)
+    set(ED_DAWN_HDR_FILE "${CMAKE_BINARY_DIR}/dawn-linux-x86_64-hdr.tar.gz")
+    set(ED_DAWN_HDR_HASH "")
+    if(EXISTS "${ED_DAWN_HDR_FILE}")
+        file(SHA256 "${ED_DAWN_HDR_FILE}" ED_DAWN_HDR_HASH)
+    endif()
+    if(NOT ED_DAWN_HDR_HASH STREQUAL ED_DAWN_HDR_SHA256)
+        message(STATUS "Fetching Dawn with the HDR patch")
+        file(DOWNLOAD
+            "https://github.com/griches/EternalDarknessRecomp/releases/download/dawn-266c1cf8-hdr/dawn-linux-x86_64-hdr.tar.gz"
+            "${ED_DAWN_HDR_FILE}" EXPECTED_HASH SHA256=${ED_DAWN_HDR_SHA256} TLS_VERIFY ON)
+    endif()
+    set(AURORA_DAWN_PACKAGE_URL "file://${ED_DAWN_HDR_FILE}")
+endif()
+
 add_subdirectory("${ED_GXRUNTIME_DIR}" "${CMAKE_BINARY_DIR}/GXRuntime")
+
+# A Linux build whose Dawn lacks the HDR patch would never offer HDR: stop here.
+if(ED_LINUX_DAWN AND TARGET dawn::webgpu_dawn AND NOT ED_ALLOW_DAWN_WITHOUT_HDR)
+    set(ED_DAWN_INCLUDES "")
+    foreach(target dawn::webgpu_dawn dawn::dawn_public_config)
+        if(TARGET ${target})
+            get_target_property(dirs ${target} INTERFACE_INCLUDE_DIRECTORIES)
+            if(dirs)
+                list(APPEND ED_DAWN_INCLUDES ${dirs})
+            endif()
+        endif()
+    endforeach()
+    set(ED_DAWN_HAS_HDR FALSE)
+    foreach(dir IN LISTS ED_DAWN_INCLUDES)
+        if(EXISTS "${dir}/dawn/native/VulkanBackend.h")
+            file(STRINGS "${dir}/dawn/native/VulkanBackend.h" hdr_define REGEX "define DAWN_VULKAN_HDR10_SURFACES")
+            if(hdr_define)
+                set(ED_DAWN_HAS_HDR TRUE)
+            endif()
+        endif()
+    endforeach()
+    if(NOT ED_DAWN_HAS_HDR)
+        message(FATAL_ERROR
+            "This Dawn lacks patches/dawn/hdr.patch, so the game would never offer HDR.\n"
+            "Leave AURORA_DAWN_PACKAGE_URL unset to fetch the patched one, build it with\n"
+            "tools/deck/build-dawn-hdr.sh, or pass -DED_ALLOW_DAWN_WITHOUT_HDR=ON.")
+    endif()
+endif()
 
 file(GLOB ED_CHUNKS CONFIGURE_DEPENDS "${ED_GENERATED_DIR}/chunks/*.c")
 list(LENGTH ED_CHUNKS ED_CHUNK_COUNT)

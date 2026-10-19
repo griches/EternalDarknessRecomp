@@ -4,7 +4,9 @@
 # dawn-linux-x86_64.tar.gz, with the options of its release CI
 # (.github/workflows/dawn-ci.cmake). The prebuilt package has no HDR on Linux:
 # Dawn picks no colour space for a Vulkan swapchain. Run inside the edbuild
-# container; about 25 minutes on a Steam Deck. Then point build-linux at it:
+# container; about 25 minutes on a Steam Deck. CMakeLists.txt fetches the copy on
+# this repo's releases (tag dawn-266c1cf8-hdr) by its SHA-256: after a rebuild,
+# upload the new archive and update ED_DAWN_HDR_SHA256 there, or try it first with
 #   cmake -B build-linux -DAURORA_DAWN_PACKAGE_URL=file://WORK/dawn-linux-x86_64-hdr.tar.gz
 set -e
 HERE=$(dirname "$(readlink -f "$0")")
@@ -27,5 +29,6 @@ cmake -S "$WORK" -B "$WORK/build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
 cmake --build "$WORK/build" --config Release
 rm -rf "$WORK/install"
 cmake --install "$WORK/build" --config Release --prefix "$WORK/install"
+cp "$WORK/LICENSE" "$WORK/install/LICENSE-dawn"
 tar -czf "$WORK/dawn-linux-x86_64-hdr.tar.gz" -C "$WORK/install" .
-ls -la "$WORK/dawn-linux-x86_64-hdr.tar.gz"
+sha256sum "$WORK/dawn-linux-x86_64-hdr.tar.gz"

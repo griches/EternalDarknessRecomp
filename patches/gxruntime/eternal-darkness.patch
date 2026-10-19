@@ -3274,7 +3274,7 @@ index a13ce39..eb4d9fc 100644
   * EFB readback (GXRuntime recomp patch): arm a one-shot copy of the next
   * submitted frame's present source; take returns tightly packed RGBA8 rows
 diff --git a/graphics/aurora/lib/aurora.cpp b/graphics/aurora/lib/aurora.cpp
-index b09ef4d..fc323ad 100644
+index b09ef4d..8fdd293 100644
 --- a/graphics/aurora/lib/aurora.cpp
 +++ b/graphics/aurora/lib/aurora.cpp
 @@ -1,6 +1,17 @@
@@ -3303,7 +3303,7 @@ index b09ef4d..fc323ad 100644
  #include <magic_enum.hpp>
  
  #include "system_info.hpp"
-@@ -41,6 +53,268 @@ using webgpu::g_device;
+@@ -41,6 +53,301 @@ using webgpu::g_device;
  using webgpu::g_queue;
  using webgpu::g_surface;
  
@@ -3327,9 +3327,30 @@ index b09ef4d..fc323ad 100644
 +  uint32_t width = 0, height = 0, bytesPerRow = 0, frame = 0;
 +  bool bgra = false;
 +  bool half = false;
++  bool pq10 = false;
 +  std::atomic<bool> busy{false};
 +};
 +Slot g_slots[8];
++
++// A 10-bit PQ (SMPTE ST 2084) value as an 8-bit sRGB one: back to nits, then
++// to SDR white = AURORA_HDR_PAPER_NITS (200), divided by
++// AURORA_FRAME_DUMP_HDR_SCALE like the float frames (BT.2020 left as is).
++uint8_t pq10_to_srgb8(uint32_t code) {
++  static const float paper = [] {
++    const char* e = std::getenv("AURORA_HDR_PAPER_NITS");
++    return e != nullptr && std::atof(e) > 0 ? static_cast<float>(std::atof(e)) : 200.f;
++  }();
++  static const float scale = [] {
++    const char* e = std::getenv("AURORA_FRAME_DUMP_HDR_SCALE");
++    return e != nullptr && std::atof(e) > 0 ? static_cast<float>(std::atof(e)) : 1.f;
++  }();
++  const float e = static_cast<float>(code) / 1023.f;
++  const float p = std::pow(e, 1.f / 78.84375f);
++  const float y = std::pow(std::max(p - 0.8359375f, 0.f) / (18.8515625f - 18.6875f * p), 1.f / 0.1593017578125f);
++  const float v = std::min(y * 10000.f / paper / scale, 1.f);
++  const float s = v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1.f / 2.4f) - 0.055f;
++  return static_cast<uint8_t>(std::lround(s * 255.f));
++}
 +
 +// A 16-bit float (linear, extended) value as an 8-bit sRGB one, divided by
 +// AURORA_FRAME_DUMP_HDR_SCALE (1) first to see what goes past white.
@@ -3392,6 +3413,8 @@ index b09ef4d..fc323ad 100644
 +  const uint32_t width = texture.GetWidth(), height = texture.GetHeight();
 +  // An HDR surface is 16-bit float (8 bytes a pixel).
 +  const bool half = texture.GetFormat() == wgpu::TextureFormat::RGBA16Float;
++  // The PS5's HDR10 surface: 10-bit PQ, four bytes a pixel.
++  const bool pq10 = texture.GetFormat() == wgpu::TextureFormat::RGB10A2Unorm;
 +  const uint32_t bytesPerRow = (width * (half ? 8u : 4u) + 255u) & ~255u;
 +  const uint64_t size = static_cast<uint64_t>(bytesPerRow) * height;
 +  if (!slot->buffer || slot->size != size) {
@@ -3406,6 +3429,7 @@ index b09ef4d..fc323ad 100644
 +  const auto format = texture.GetFormat();
 +  slot->bgra = format == wgpu::TextureFormat::BGRA8Unorm || format == wgpu::TextureFormat::BGRA8UnormSrgb;
 +  slot->half = half;
++  slot->pq10 = pq10;
 +  slot->width = width;
 +  slot->height = height;
 +  slot->bytesPerRow = bytesPerRow;
@@ -3442,6 +3466,15 @@ index b09ef4d..fc323ad 100644
 +            const uint8_t* row = data + static_cast<size_t>(y) * step * slot->bytesPerRow;
 +            for (uint32_t x = 0; x < w; x++) {
 +              uint8_t* o = &rgb[(static_cast<size_t>(y) * w + x) * 3u];
++              if (slot->pq10) {
++                const uint8_t* p = row + static_cast<size_t>(x) * step * 4u;
++                const uint32_t v = static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
++                                   (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
++                o[0] = pq10_to_srgb8(v & 1023u);
++                o[1] = pq10_to_srgb8((v >> 10) & 1023u);
++                o[2] = pq10_to_srgb8((v >> 20) & 1023u);
++                continue;
++              }
 +              if (slot->half) {
 +                const uint8_t* p = row + static_cast<size_t>(x) * step * 8u;
 +                o[0] = half_to_srgb8(p);
@@ -3572,7 +3605,7 @@ index b09ef4d..fc323ad 100644
  uint32_t clamp_scissor_coord(double value, uint32_t maximum) noexcept {
    if (!std::isfinite(value)) {
      return 0;
-@@ -106,7 +380,14 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
+@@ -106,7 +413,14 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
    } else {
      g_config.userPath = strdup(g_config.userPath);
    }
@@ -3588,7 +3621,7 @@ index b09ef4d..fc323ad 100644
      g_config.cachePath = SDL_GetPrefPath(nullptr, g_config.appName);
    } else {
      g_config.cachePath = strdup(g_config.cachePath);
-@@ -248,6 +529,33 @@ bool begin_frame() noexcept {
+@@ -248,6 +562,33 @@ bool begin_frame() noexcept {
    return true;
  }
  
@@ -3622,7 +3655,7 @@ index b09ef4d..fc323ad 100644
  void end_frame() noexcept {
    ZoneScoped;
  #ifdef AURORA_ENABLE_GX
-@@ -257,10 +565,38 @@ void end_frame() noexcept {
+@@ -257,10 +598,38 @@ void end_frame() noexcept {
  
    // E7 present-from-XFB: VI current → GPU Virtual-XFB, else YUYV-from-RAM
    // decode, else EFB-direct (Strikers when no RAM XFB / match fails).
@@ -3663,7 +3696,7 @@ index b09ef4d..fc323ad 100644
    const uint32_t contentW =
        xfbTex && *xfbTex ? (*xfbTex)->size.width : efbSource.size.width;
    const uint32_t contentH =
-@@ -282,28 +618,37 @@ void end_frame() noexcept {
+@@ -282,28 +651,37 @@ void end_frame() noexcept {
    // Capture XFB handle by value for the worker lambda (shared_ptr).
    gfx::TextureHandle xfbHandle = (xfbTex && *xfbTex) ? *xfbTex : nullptr;
  
@@ -3716,7 +3749,7 @@ index b09ef4d..fc323ad 100644
        wgpu::BindGroup presentBindGroup;
        if (rmlBindGroup && !rmlOverlay) {
          presentBindGroup = rmlBindGroup;
-@@ -318,7 +663,7 @@ void end_frame() noexcept {
+@@ -318,7 +696,7 @@ void end_frame() noexcept {
          };
          presentBindGroup = webgpu::create_copy_bind_group(xfbSrc);
        } else {
@@ -3725,7 +3758,7 @@ index b09ef4d..fc323ad 100644
          presentBindGroup = webgpu::create_copy_bind_group(resampledSource);
        }
        {
-@@ -333,20 +678,30 @@ void end_frame() noexcept {
+@@ -333,20 +711,30 @@ void end_frame() noexcept {
              .label = xfbHandle ? "XFB present render pass" : "EFB copy render pass",
              .colorAttachmentCount = attachments.size(),
              .colorAttachments = attachments.data(),
@@ -3767,7 +3800,7 @@ index b09ef4d..fc323ad 100644
          }
          pass.End();
        }
-@@ -362,67 +717,227 @@ void end_frame() noexcept {
+@@ -362,67 +750,227 @@ void end_frame() noexcept {
              .label = "ImGui render pass",
              .colorAttachmentCount = attachments.size(),
              .colorAttachments = attachments.data(),
@@ -4016,7 +4049,7 @@ index b09ef4d..fc323ad 100644
      gfx::after_submit();
  
      TracyPlotConfig("aurora: lastVertSize", tracy::PlotFormatType::Memory, false, true, 0);
-@@ -440,7 +955,7 @@ void end_frame() noexcept {
+@@ -440,7 +988,7 @@ void end_frame() noexcept {
      TracyPlot("aurora: lastIndexSize", static_cast<int64_t>(gfx::g_stats.lastIndexSize));
      TracyPlot("aurora: lastStorageSize", static_cast<int64_t>(gfx::g_stats.lastStorageSize));
      TracyPlot("aurora: lastTextureUploadSize", static_cast<int64_t>(gfx::g_stats.lastTextureUploadSize));
@@ -4025,7 +4058,7 @@ index b09ef4d..fc323ad 100644
  
  #endif
  }
-@@ -475,6 +990,38 @@ void aurora_set_resampler(AuroraSampler sampler) {
+@@ -475,6 +1023,38 @@ void aurora_set_resampler(AuroraSampler sampler) {
    (void)sampler;
  #endif
  }

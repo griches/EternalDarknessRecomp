@@ -1,0 +1,86 @@
+diff --git a/include/dawn/native/VulkanBackend.h b/include/dawn/native/VulkanBackend.h
+index 355c4b864..1c1a6b96f 100644
+--- a/include/dawn/native/VulkanBackend.h
++++ b/include/dawn/native/VulkanBackend.h
+@@ -35,6 +35,11 @@
+ 
+ #include "dawn/native/DawnNative.h"
+ 
++// Eternal Darkness Recomp's HDR patch (patches/dawn/hdr.patch): a surface
++// offers RGB10A2Unorm only where its swapchain can be HDR10 (BT.2020 PQ,
++// VK_COLOR_SPACE_HDR10_ST2084_EXT), and a swapchain of that format is made so.
++#define DAWN_VULKAN_HDR10_SURFACES 1
++
+ namespace dawn::native::vulkan {
+ 
+ DAWN_NATIVE_EXPORT VkInstance GetInstance(WGPUDevice device);
+diff --git a/src/dawn/native/vulkan/PhysicalDeviceVk.cpp b/src/dawn/native/vulkan/PhysicalDeviceVk.cpp
+index b3fa6a424..14d1117aa 100644
+--- a/src/dawn/native/vulkan/PhysicalDeviceVk.cpp
++++ b/src/dawn/native/vulkan/PhysicalDeviceVk.cpp
+@@ -1561,9 +1561,16 @@ ResultOrError<PhysicalDeviceSurfaceCapabilities> PhysicalDevice::GetSurfaceCapab
+                 return wgpu::TextureFormat::Undefined;
+         }
+     };
++    // HDR: a 10-bit surface is offered only where it can be HDR10 (BT.2020 PQ), and the
++    // swapchain then asks for that (SwapChain::ChooseConfig); everything else as sRGB.
+     for (VkSurfaceFormatKHR surfaceFormat : vkCaps.formats) {
++        const VkColorSpaceKHR colorSpace = surfaceFormat.format == VK_FORMAT_A2B10G10R10_UNORM_PACK32
++                                               ? VK_COLOR_SPACE_HDR10_ST2084_EXT
++                                               : VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+         wgpu::TextureFormat format = ToWGPUSwapChainFormat(surfaceFormat.format);
+-        if (format != wgpu::TextureFormat::Undefined) {
++        if (format != wgpu::TextureFormat::Undefined && surfaceFormat.colorSpace == colorSpace &&
++            std::find(capabilities.formats.begin(), capabilities.formats.end(), format) ==
++                capabilities.formats.end()) {
+             capabilities.formats.push_back(format);
+         }
+     }
+diff --git a/src/dawn/native/vulkan/SwapChainVk.cpp b/src/dawn/native/vulkan/SwapChainVk.cpp
+index 7d88e5fcb..561abf556 100644
+--- a/src/dawn/native/vulkan/SwapChainVk.cpp
++++ b/src/dawn/native/vulkan/SwapChainVk.cpp
+@@ -282,6 +282,11 @@ ResultOrError<SwapChain::Config> SwapChain::ChooseConfig(
+     config.wgpuFormat = GetFormat();
+     config.format = VulkanImageFormat(ToBackend(GetDevice()), config.wgpuFormat);
+     config.colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
++    // HDR: a 10-bit swapchain is HDR10 (BT.2020 PQ), the only way the surface's
++    // capabilities offer it (PhysicalDevice::GetSurfaceCapabilities).
++    if (config.format == VK_FORMAT_A2B10G10R10_UNORM_PACK32) {
++        config.colorSpace = VK_COLOR_SPACE_HDR10_ST2084_EXT;
++    }
+ 
+     bool formatIsSupported = false;
+     for (const VkSurfaceFormatKHR& format : surfaceInfo.formats) {
+diff --git a/src/dawn/native/vulkan/VulkanExtensions.cpp b/src/dawn/native/vulkan/VulkanExtensions.cpp
+index 548726690..27f09a517 100644
+--- a/src/dawn/native/vulkan/VulkanExtensions.cpp
++++ b/src/dawn/native/vulkan/VulkanExtensions.cpp
+@@ -52,6 +52,7 @@ static constexpr std::array<InstanceExtInfo, kInstanceExtCount> sInstanceExtInfo
+ 
+     {InstanceExt::DebugUtils, "VK_EXT_debug_utils"},
+     {InstanceExt::ValidationFeatures, "VK_EXT_validation_features"},
++    {InstanceExt::SwapchainColorSpace, "VK_EXT_swapchain_colorspace"},
+     //
+ }};
+ 
+@@ -102,6 +103,7 @@ InstanceExtSet EnsureDependencies(const InstanceExtSet& advertisedExts) {
+             case InstanceExt::Win32Surface:
+             case InstanceExt::XcbSurface:
+             case InstanceExt::XlibSurface:
++            case InstanceExt::SwapchainColorSpace:
+                 hasDependencies = HasDep(InstanceExt::Surface);
+                 break;
+ 
+diff --git a/src/dawn/native/vulkan/VulkanExtensions.h b/src/dawn/native/vulkan/VulkanExtensions.h
+index e0ea4da59..92c337f63 100644
+--- a/src/dawn/native/vulkan/VulkanExtensions.h
++++ b/src/dawn/native/vulkan/VulkanExtensions.h
+@@ -51,6 +51,7 @@ enum class InstanceExt : uint32_t {
+     // Others
+     DebugUtils,
+     ValidationFeatures,
++    SwapchainColorSpace,
+ 
+     EnumCount,
+ };

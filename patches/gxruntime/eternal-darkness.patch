@@ -4647,7 +4647,7 @@ index 421bd9e..69b25fd 100644
 +bool DisplayShowsHDR(SDL_Window*) { return true; }  // EDR: SDR white stays 1.0, any display
  } // namespace aurora::webgpu::utils
 diff --git a/graphics/aurora/lib/gfx/common.cpp b/graphics/aurora/lib/gfx/common.cpp
-index a64dd2d..65bf403 100644
+index a64dd2d..0d4a953 100644
 --- a/graphics/aurora/lib/gfx/common.cpp
 +++ b/graphics/aurora/lib/gfx/common.cpp
 @@ -10,6 +10,10 @@
@@ -5358,13 +5358,14 @@ index a64dd2d..65bf403 100644
      depth_peek::encode_frame_snapshot(cmd, passInfo.copySourceDepthView, passInfo.targetSize, passInfo.msaaSamples);
    }
  
-@@ -1682,9 +2235,87 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
+@@ -1682,9 +2235,88 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
        };
        cmd.CopyTextureToTexture(&src, &dst, &size);
      }
 +#ifdef AURORA_ENABLE_GXCORE
 +    if (passInfo.composeGlow)
-+      glow::compose(cmd, passInfo.resolveTarget->attachmentTextureView, passInfo.resolveTarget->format);
++      glow::compose(cmd, passInfo.resolveTarget->attachmentTextureView, passInfo.resolveTarget->format,
++                    passInfo.copySourceView);
 +#endif
    }
  }
@@ -5446,7 +5447,7 @@ index a64dd2d..65bf403 100644
  void after_submit() noexcept {
    depth_peek::after_submit();
    efb_readback::after_submit();
-@@ -1892,8 +2523,14 @@ Range push_indices(const uint8_t* data, size_t length, size_t alignment) {
+@@ -1892,8 +2524,14 @@ Range push_indices(const uint8_t* data, size_t length, size_t alignment) {
  
  Range push_uniform(const uint8_t* data, size_t length) {
    ZoneScoped;
@@ -5463,7 +5464,7 @@ index a64dd2d..65bf403 100644
  }
  
  Range push_storage(const uint8_t* data, size_t length) {
-@@ -1935,7 +2572,19 @@ BindGroupRef bind_group_ref(const WGPUBindGroupDescriptor& descriptor) {
+@@ -1935,7 +2573,19 @@ BindGroupRef bind_group_ref(const WGPUBindGroupDescriptor& descriptor) {
  wgpu::BindGroup find_bind_group(BindGroupRef id) {
    std::lock_guard lock{g_bindGroupCacheMutex};
    const auto it = g_cachedBindGroups.find(id);
@@ -5647,10 +5648,10 @@ index 7af8fca..4c14e34 100644
    else
 diff --git a/graphics/aurora/lib/gfx/glow.cpp b/graphics/aurora/lib/gfx/glow.cpp
 new file mode 100644
-index 0000000..4b56de3
+index 0000000..81567b4
 --- /dev/null
 +++ b/graphics/aurora/lib/gfx/glow.cpp
-@@ -0,0 +1,740 @@
+@@ -0,0 +1,862 @@
 +#include "glow.hpp"
 +
 +#include "../webgpu/gpu_prof.hpp"
@@ -5950,13 +5951,96 @@ index 0000000..4b56de3
 +
 +wgpu::ShaderModule g_module;
 +wgpu::BindGroupLayout g_layout;
++// What was drawn over the scene after it was taken (the black bars, the HUD,
++// a fade): the finished frame (group 0) against the scene's copy (group 1),
++// both at the levels' half size. Multiplies what is under it (glow,
++// highlights) by 0 where something brighter was drawn over the scene, by
++// what still shows of it where it was darkened, 1 where nothing covered it.
++// A row or column black right across the finished frame is a bar, whatever
++// was under it (a bar over a dark scene leaves it unchanged).
++constexpr const char* kCoverShader = R"(
++struct VOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
++@vertex fn vs(@builtin(vertex_index) i: u32) -> VOut {
++  let p = vec2f(f32((i << 1u) & 2u), f32(i & 2u));
++  var o: VOut;
++  o.pos = vec4f(p.x * 2.0 - 1.0, 1.0 - p.y * 2.0, 0.0, 1.0);
++  o.uv = p;
++  return o;
++}
++@group(0) @binding(0) var finished: texture_2d<f32>;
++@group(0) @binding(1) var samp: sampler;
++@group(1) @binding(0) var scene: texture_2d<f32>;
++fn brightest(uv: vec2f) -> f32 {
++  let c = textureSampleLevel(finished, samp, uv, 0.0).rgb;
++  return max(c.r, max(c.g, c.b));
++}
++@fragment fn cover(in: VOut) -> @location(0) vec4f {
++  var row = 0.0;
++  var column = 0.0;
++  for (var i = 0; i < 24; i++) {
++    let t = (f32(i) + 0.5) / 24.0;
++    row = max(row, brightest(vec2f(t, in.uv.y)));
++    column = max(column, brightest(vec2f(in.uv.x, t)));
++  }
++  if (row < 0.004 || column < 0.004) {
++    return vec4f(0.0, 0.0, 0.0, 1.0);
++  }
++  let a = textureSampleLevel(finished, samp, in.uv, 0.0).rgb;
++  let b = textureSampleLevel(scene, samp, in.uv, 0.0).rgb;
++  let d = max(abs(a.r - b.r), max(abs(a.g - b.g), abs(a.b - b.b)));
++  let la = dot(a, vec3f(0.299, 0.587, 0.114));
++  let lb = dot(b, vec3f(0.299, 0.587, 0.114));
++  let shows = select(clamp(la / max(lb, 1e-3), 0.0, 1.0), 0.0, la > lb + 0.01);
++  let m = mix(1.0, shows, smoothstep(0.02, 0.08, d));
++  return vec4f(m, m, m, 1.0);
++}
++)";
++
 +wgpu::PipelineLayout g_pipelineLayout;
 +wgpu::Sampler g_sampler;
 +wgpu::Buffer g_uniform;
 +float g_uniformValue = -1.f;
 +bool g_uniformWritten = false;
-+wgpu::RenderPipeline g_down, g_downAdd, g_up, g_bright;
++wgpu::RenderPipeline g_down, g_downAdd, g_up, g_bright, g_copy, g_cover;
 +std::vector<std::pair<wgpu::TextureFormat, wgpu::RenderPipeline>> g_compose;
++Level g_split;                 // the scene as taken (half size), for cover
++bool g_splitTaken = false;
++wgpu::TextureView g_finishedView; // the finished frame cover compares
++wgpu::BindGroup g_finishedSource;
++
++// cover: the target times the cover's mask (dst * src), colour only.
++wgpu::RenderPipeline make_cover_pipeline() {
++  wgpu::ShaderSourceWGSL source{};
++  source.code = kCoverShader;
++  const wgpu::ShaderModuleDescriptor moduleDesc{.nextInChain = &source, .label = "Glow cover"};
++  const auto module = g_device.CreateShaderModule(&moduleDesc);
++  const std::array layouts{g_layout, g_layout};
++  const wgpu::PipelineLayoutDescriptor layoutDesc{
++      .label = "Glow cover", .bindGroupLayoutCount = layouts.size(), .bindGroupLayouts = layouts.data()};
++  const auto layout = g_device.CreatePipelineLayout(&layoutDesc);
++  const wgpu::BlendState blend{
++      .color = {.operation = wgpu::BlendOperation::Add,
++                .srcFactor = wgpu::BlendFactor::Zero,
++                .dstFactor = wgpu::BlendFactor::Src},
++      .alpha = {.operation = wgpu::BlendOperation::Add,
++                .srcFactor = wgpu::BlendFactor::Zero,
++                .dstFactor = wgpu::BlendFactor::One},
++  };
++  const wgpu::ColorTargetState target{
++      .format = kFormat,
++      .blend = &blend,
++      .writeMask = wgpu::ColorWriteMask::Red | wgpu::ColorWriteMask::Green | wgpu::ColorWriteMask::Blue,
++  };
++  const wgpu::FragmentState fragment{.module = module, .entryPoint = "cover", .targetCount = 1, .targets = &target};
++  const wgpu::RenderPipelineDescriptor desc{
++      .label = "Glow cover",
++      .layout = layout,
++      .vertex = {.module = module, .entryPoint = "vs"},
++      .primitive = {.topology = wgpu::PrimitiveTopology::TriangleList},
++      .fragment = &fragment,
++  };
++  return g_device.CreateRenderPipeline(&desc);
++}
 +
 +// add: dst + src. screen (the compose onto the frame): dst + src * (1 - dst),
 +// which lifts the dark round a light and never pushes a bright wall past white.
@@ -6037,6 +6121,8 @@ index 0000000..4b56de3
 +  g_up = make_pipeline("up", kFormat, true, false);
 +  g_downAdd = make_pipeline("down", kFormat, true, false);
 +  g_bright = make_pipeline("bright", kFormat, false, false);
++  g_copy = make_pipeline("show", kFormat, false, false);
++  g_cover = make_cover_pipeline();
 +}
 +
 +wgpu::BindGroup source_group(const wgpu::TextureView& view, const char* label) {
@@ -6084,6 +6170,8 @@ index 0000000..4b56de3
 +  }
 +  g_levels.clear();
 +  g_sharp = make_level((size.width + 1) / 2, (size.height + 1) / 2, "Glow highlights");
++  g_split = make_level((size.width + 1) / 2, (size.height + 1) / 2, "Glow scene copy");
++  g_splitTaken = false;
 +  uint32_t w = size.width, h = size.height;
 +  while (g_levels.size() < kMaxLevels && w >= 16 && h >= 16) {
 +    w = (w + 1) / 2;
@@ -6230,7 +6318,7 @@ index 0000000..4b56de3
 +
 +void take_scene(const wgpu::CommandEncoder& cmd, const wgpu::TextureView& efb, const wgpu::Extent3D& size,
 +                uint32_t msaaSamples) {
-+  if (!active() || g_scene <= 0.f)
++  if (!active())
 +    return;
 +  ensure_targets(size, msaaSamples);
 +  if (g_levels.empty())
@@ -6241,11 +6329,40 @@ index 0000000..4b56de3
 +  }
 +  write_params();
 +  // A later keep (3D drawn after a flat draw) replaces an earlier one.
++  draw(cmd, g_copy, g_sceneSource, g_split.view, false, "Glow scene copy");
++  g_splitTaken = true;
++  if (g_scene <= 0.f)
++    return;
 +  draw(cmd, g_bright, g_sceneSource, g_levels[0].view, false, "Glow scene");
 +  g_sceneTaken = true;
 +}
 +
-+void compose(const wgpu::CommandEncoder& cmd, const wgpu::TextureView& dst, wgpu::TextureFormat format) {
++namespace {
++// Glow and highlights only where the scene still shows (kCoverShader).
++void cover(const wgpu::CommandEncoder& cmd, const wgpu::TextureView& target, const char* label) {
++  const wgpu::RenderPassColorAttachment attachment{
++      .view = target, .loadOp = wgpu::LoadOp::Load, .storeOp = wgpu::StoreOp::Store};
++  const wgpu::RenderPassDescriptor desc{.label = label, .colorAttachmentCount = 1, .colorAttachments = &attachment};
++  auto pass = cmd.BeginRenderPass(&desc);
++  pass.SetPipeline(g_cover);
++  pass.SetBindGroup(0, g_finishedSource);
++  pass.SetBindGroup(1, g_split.source);
++  pass.Draw(3);
++  pass.End();
++}
++} // namespace
++
++void compose(const wgpu::CommandEncoder& cmd, const wgpu::TextureView& dst, wgpu::TextureFormat format,
++             const wgpu::TextureView& efb) {
++  // What covered the scene since it was taken (a scene from this frame, the
++  // same size as the levels): no glow or highlights there.
++  const bool covered = g_splitTaken && efb && !g_levels.empty() &&
++                       g_split.texture.GetWidth() == g_levels[0].texture.GetWidth();
++  g_splitTaken = false;
++  if (covered && g_finishedView.Get() != efb.Get()) {
++    g_finishedView = efb;
++    g_finishedSource = source_group(efb, "Glow finished frame");
++  }
 +  // The emit chain: blurred down and up as the glow is, for the HDR present.
 +  g_ePresent = g_eDrawn && !g_eLevels.empty();
 +  g_eDrawn = false;
@@ -6260,6 +6377,8 @@ index 0000000..4b56de3
 +      draw(cmd, g_down, g_eLevels[i - 1].source, g_eLevels[i].view, false, "Emit down");
 +    for (size_t i = g_eLevels.size() - 1; i-- > 0;)
 +      draw(cmd, g_up, g_eLevels[i + 1].source, g_eLevels[i].view, true, "Emit up");
++    if (covered && g_eLevels[0].texture.GetWidth() == g_split.texture.GetWidth())
++      cover(cmd, g_eLevels[0].view, "Emit cover");
 +  }
 +  // Nothing glows this frame (a menu, the quote screen): the present adds no
 +  // glow, not the last 3D frame's left in level 0.
@@ -6296,6 +6415,10 @@ index 0000000..4b56de3
 +    draw(cmd, g_down, g_levels[i - 1].source, g_levels[i].view, false, "Glow down");
 +  for (size_t i = g_levels.size() - 1; i-- > 0;)
 +    draw(cmd, g_up, g_levels[i + 1].source, g_levels[i].view, true, "Glow up");
++  if (covered) {
++    cover(cmd, g_levels[0].view, "Glow cover");
++    cover(cmd, g_sharp.view, "Highlights cover");
++  }
 +  g_presentGlow = true;
 +  // HDR: the present adds it, past white. Glow off: only HDR's highlights.
 +  if ((webgpu::g_hdrActive && !g_show) || strength() <= 0.f)
@@ -6393,10 +6516,10 @@ index 0000000..4b56de3
 +} // namespace aurora::gfx::glow
 diff --git a/graphics/aurora/lib/gfx/glow.hpp b/graphics/aurora/lib/gfx/glow.hpp
 new file mode 100644
-index 0000000..1f35c9b
+index 0000000..64bd328
 --- /dev/null
 +++ b/graphics/aurora/lib/gfx/glow.hpp
-@@ -0,0 +1,58 @@
+@@ -0,0 +1,62 @@
 +#pragma once
 +
 +// GXRuntime recomp patch: glow (bloom). A draw that adds light to the screen
@@ -6439,14 +6562,18 @@ index 0000000..1f35c9b
 +void set_movie(bool playing) noexcept;
 +
 +// Keep the frame's 3D scene (the EFB before the HUD is drawn over it): its
-+// highlights are added to the glow at the next compose.
++// highlights are added to the glow at the next compose, and a copy of it
++// shows the compose what was drawn over the scene since.
 +void take_scene(const wgpu::CommandEncoder& cmd, const wgpu::TextureView& efb, const wgpu::Extent3D& size,
 +                uint32_t msaaSamples);
 +
 +// Blur this frame's glow and add it to dst (a render texture of the frame:
 +// rect of the EFB's size), then clear the glow for the next frame. Nothing
-+// when no glow was drawn since the last display.
-+void compose(const wgpu::CommandEncoder& cmd, const wgpu::TextureView& dst, wgpu::TextureFormat format);
++// when no glow was drawn since the last display. efb: the finished frame;
++// where it differs from the scene taken (the black bars, the HUD, a fade
++// drawn over it) no glow or highlight is added.
++void compose(const wgpu::CommandEncoder& cmd, const wgpu::TextureView& dst, wgpu::TextureFormat format,
++             const wgpu::TextureView& efb);
 +
 +// HDR (webgpu::g_hdrActive): draw the picture (a copy bind group) onto the
 +// window's float surface, with the shown frame's glow added past white when

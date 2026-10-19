@@ -3274,7 +3274,7 @@ index a13ce39..eb4d9fc 100644
   * EFB readback (GXRuntime recomp patch): arm a one-shot copy of the next
   * submitted frame's present source; take returns tightly packed RGBA8 rows
 diff --git a/graphics/aurora/lib/aurora.cpp b/graphics/aurora/lib/aurora.cpp
-index b09ef4d..8fdd293 100644
+index b09ef4d..a5d9b06 100644
 --- a/graphics/aurora/lib/aurora.cpp
 +++ b/graphics/aurora/lib/aurora.cpp
 @@ -1,6 +1,17 @@
@@ -3333,12 +3333,12 @@ index b09ef4d..8fdd293 100644
 +Slot g_slots[8];
 +
 +// A 10-bit PQ (SMPTE ST 2084) value as an 8-bit sRGB one: back to nits, then
-+// to SDR white = AURORA_HDR_PAPER_NITS (200), divided by
++// to SDR white = AURORA_HDR_PAPER_NITS (140), divided by
 +// AURORA_FRAME_DUMP_HDR_SCALE like the float frames (BT.2020 left as is).
 +uint8_t pq10_to_srgb8(uint32_t code) {
 +  static const float paper = [] {
 +    const char* e = std::getenv("AURORA_HDR_PAPER_NITS");
-+    return e != nullptr && std::atof(e) > 0 ? static_cast<float>(std::atof(e)) : 200.f;
++    return e != nullptr && std::atof(e) > 0 ? static_cast<float>(std::atof(e)) : 140.f;
 +  }();
 +  static const float scale = [] {
 +    const char* e = std::getenv("AURORA_FRAME_DUMP_HDR_SCALE");
@@ -4764,10 +4764,10 @@ index 7af8fca..4c14e34 100644
    else
 diff --git a/graphics/aurora/lib/gfx/glow.cpp b/graphics/aurora/lib/gfx/glow.cpp
 new file mode 100644
-index 0000000..7f9b27e
+index 0000000..731fa50
 --- /dev/null
 +++ b/graphics/aurora/lib/gfx/glow.cpp
-@@ -0,0 +1,553 @@
+@@ -0,0 +1,555 @@
 +#include "glow.hpp"
 +
 +#include "../webgpu/gpu_prof.hpp"
@@ -4941,8 +4941,10 @@ index 0000000..7f9b27e
 +const float g_paper = env_float("AURORA_HDR_PAPER", 1.0f);
 +const float g_hdrGain = env_float("AURORA_HDR_GLOW", 1.0f);
 +const float g_peak = env_float("AURORA_HDR_PEAK", 8.0f);
-+// HDR10 (the PS5): SDR white's brightness in nits (AURORA_HDR_PAPER_NITS).
-+const float g_paperNits = env_float("AURORA_HDR_PAPER_NITS", 200.0f);
++// HDR10 (the PS5): SDR white's brightness in nits (AURORA_HDR_PAPER_NITS):
++// 140 matches the console's own SDR picture (at 200 the game only looked
++// lighter with HDR on).
++const float g_paperNits = env_float("AURORA_HDR_PAPER_NITS", 140.0f);
 +// The scene's highlights (lamps, flames, sunlight, a portal) up to this much
 +// past their SDR level, glow or not.
 +std::atomic<float> g_highlight{env_float("AURORA_HDR_HIGHLIGHT", 2.5f)};

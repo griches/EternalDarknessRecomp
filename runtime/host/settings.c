@@ -194,7 +194,13 @@ void settings_apply_graphics(void) {
     static const float kSsao[] = {0.f, 1.3f, 2.4f};
     dol_aurora_set_ssao(kSsao[g_settings.ssao]);
     // Highlights up to 3.5x SDR white, 4x with ambient occlusion (which
-    // darkens the room round them).
+    // darkens the room round them). The PS5 (HDR10, SDR white at 140 nits to
+    // match the console's own SDR picture) goes to 5x and 6x: about 700 and
+    // 850 nits, a TV's peak, where 3.5x at 200 nits only looked lighter.
+#if defined(__PROSPERO__)
+    dol_aurora_set_hdr_highlight(g_settings.ssao != 0 ? 5.0f : 4.0f);
+#else
     dol_aurora_set_hdr_highlight(g_settings.ssao != 0 ? 3.0f : 2.5f);
+#endif
 #endif
 }

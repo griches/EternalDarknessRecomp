@@ -467,38 +467,6 @@ bool SDLCALL mark_watch(void*, SDL_Event* event) {
 bool g_tome_was = false;
 bool g_held_over[kNativeCount];
 
-// Graphics-enhancement shortcuts: hold R3 and press one of these (glow,
-// ambient occlusion, HDR, baked shadows, HD textures, all off, all on;
-// frontend.h). The game sees neither button, and a toggle R3 made as it went
-// down (Modern's creep) is put back.
-constexpr int kEnhancementCount = 7;
-const int kEnhancementButtons[kEnhancementCount] = {kSouth, kEast, kWest, kNorth, kDUp, kLT, kRT};
-bool g_enh_was[kEnhancementCount];
-bool g_r3_was = false;
-bool g_r3_used = false;
-bool g_toggled_at_r3[kActionCount];
-
-void enhancement_shortcuts(SDL_Gamepad* pad) {
-    const bool r3 = native_value(pad, kR3) >= 128;
-    if (r3 && !g_r3_was) {
-        std::copy(std::begin(g_toggled), std::end(g_toggled), std::begin(g_toggled_at_r3));
-        g_r3_used = false;
-    }
-    g_r3_was = r3;
-    for (int k = 0; k < kEnhancementCount; k++) {
-        const bool down = native_value(pad, kEnhancementButtons[k]) >= 128;
-        if (r3 && down && !g_enh_was[k]) {
-            if (!g_r3_used)
-                std::copy(std::begin(g_toggled_at_r3), std::end(g_toggled_at_r3), std::begin(g_toggled));
-            g_r3_used = true;
-            g_held_over[kR3] = true;
-            g_held_over[kEnhancementButtons[k]] = true;
-            frontend_cycle_enhancement(k);
-        }
-        g_enh_was[k] = down;
-    }
-}
-
 int live_value(SDL_Gamepad* pad, int n) {
     const int v = native_value(pad, n);
     if (n == kNone || !g_held_over[n])
@@ -649,7 +617,6 @@ bool read_pad(DolPadState* state) {
     if (fast != g_fast_forward.exchange(fast, std::memory_order_relaxed))
         std::fprintf(stderr, "[controls] fast-forward %s at frame %llu\n",
                      fast ? "on" : "off", g_frame.load());
-    enhancement_shortcuts(pad);
     DolPadState s{};
     // The main stick first: toggled sprint ends when you stop moving.
     int x = stick(pad, SDL_GAMEPAD_AXIS_LEFTX, false);
@@ -853,21 +820,6 @@ std::string glyph_set() {
     if (gamepad() == nullptr || g_keyboard_last)
         return "kb";
     return brand() == kPlayStation ? "ps" : brand() == kNintendo ? "switch" : "xbox";
-}
-
-std::string enhancement_legend() {
-    static const char* const kNames[kEnhancementCount] = {"glow", "occlusion", "HDR", "shadows", "HD textures",
-                                                           "all off", "all on"};
-    std::string out = std::string("Hold ") + native_name(kR3) + ":";
-    for (int k = 0; k < kEnhancementCount; k++)
-        out += std::string(k == 0 ? " " : " \u00b7 ") + native_name(kEnhancementButtons[k]) + " " + kNames[k];
-    return out;
-}
-
-std::string enhancement_shortcut(int which) {
-    if (which < 0 || which >= kEnhancementCount)
-        return "";
-    return std::string("Hold ") + native_name(kR3) + " and press " + native_name(kEnhancementButtons[which]);
 }
 
 std::string fast_forward_glyph() {

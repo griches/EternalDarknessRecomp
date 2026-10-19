@@ -31,14 +31,6 @@ const char* ed_game_id(void);
 // For AuroraBackendConfig.imgui_init: the FPS counter's font into ImGui.
 void frontend_imgui_init(void);
 
-// Graphics enhancements (Options > Graphics enhancements), cycled in the game
-// by holding R3 and pressing a button: 0 glow, 1 ambient occlusion, 2 HDR,
-// 3 baked shadows, 4 HD textures; 5 all off (and the GameCube's own 528
-// lines) and 6 all on (the defaults: HDR, Soft occlusion, sharp shadows, HD
-// textures, no glow, the chosen resolution: Gary's before/after). Shows what
-// changed on screen.
-void frontend_cycle_enhancement(int which);
-
 // Photo mode is on (holding Back): the game sees no input.
 bool frontend_photo_active(void);
 

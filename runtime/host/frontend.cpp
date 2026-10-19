@@ -523,9 +523,8 @@ Row vibration_row() {
     return vibration;
 }
 
-// Graphics enhancements: the menu's rows and the in-game shortcuts (hold R3
-// and press a button, frontend_cycle_enhancement) change the same values,
-// applied at once so they can be compared.
+// Graphics enhancements: the options' rows and photo mode change the same
+// values, applied at once.
 namespace enhancement {
 enum { kGlow, kOcclusion, kHdr, kShadows, kHdTextures, kCount };
 const char* const kNames[kCount] = {"Glow", "Ambient occlusion", "HDR", "Baked shadows", "HD textures"};
@@ -570,10 +569,6 @@ const char* const kNotes[kCount] = {
     "The texture pack in your textures folder.",
 };
 
-// What changed, shown over the game for a moment (update_enhancement_notice).
-std::mutex g_notice_mutex;
-std::string g_notice;
-Uint64 g_notice_at = 0;
 }  // namespace enhancement
 
 void run_hdr_calibration(int first_step);
@@ -700,8 +695,7 @@ void build_options() {
         using namespace enhancement;
         Row hdr{kNames[kHdr], value(kHdr)};
         hdr.enabled = available(kHdr);
-        hdr.note = available(kHdr) ? std::string(kNotes[kHdr]) + " " + controls::enhancement_shortcut(kHdr) +
-                                         " in the game to compare."
+        hdr.note = available(kHdr) ? kNotes[kHdr]
                                    : "Needs an HDR display (on a Mac, its XDR screen or an HDR monitor).";
         hdr.change = [](int dir) { change(kHdr, dir); };
         g_rows.push_back(hdr);
@@ -748,8 +742,6 @@ void build_options() {
                 r.note = available(which) ? "The texture pack in your textures folder (" +
                                                 std::to_string(texpack_count()) + " images)."
                                           : "Put a Dolphin-format texture pack (tex1_*.png) in the textures folder.";
-            if (available(which))
-                r.note += " " + controls::enhancement_shortcut(which) + " in the game to compare.";
             r.change = [which](int dir) { change(which, dir); };
             g_rows.push_back(r);
         }
@@ -1516,42 +1508,6 @@ void update_fast_forward_prompt() {
     }
 }
 
-// What a shortcut changed ("Glow: Strong"), top centre for two seconds, with
-// the shortcuts under it. Through ImGui, as the FPS counter.
-void update_enhancement_notice() {
-    std::string text;
-    Uint64 at;
-    {
-        std::lock_guard<std::mutex> lock(enhancement::g_notice_mutex);
-        text = enhancement::g_notice;
-        at = enhancement::g_notice_at;
-    }
-    const Uint64 now = SDL_GetTicks();
-    if (text.empty() || now - at > 2500 || ImGui::GetCurrentContext() == nullptr)
-        return;
-    const float fade = now - at > 2000 ? 1.f - (now - at - 2000) / 500.f : 1.f;
-    const float dp = overlay_dp();
-    ImFont* font = g_fps_font != nullptr ? g_fps_font : ImGui::GetFont();
-    static const std::string legend = controls::enhancement_legend();
-    const float size = 26.f * dp, small = 15.f * dp;
-    const ImVec2 big = font->CalcTextSizeA(size, FLT_MAX, 0.f, text.c_str());
-    const ImVec2 line = font->CalcTextSizeA(small, FLT_MAX, 0.f, legend.c_str());
-    const ImVec2 pad{16.f * dp, 9.f * dp};
-    const float width = std::max(big.x, line.x) + 2.f * pad.x;
-    const float height = big.y + 4.f * dp + line.y + 2.f * pad.y;
-    const ImVec2 screen = ImGui::GetMainViewport()->Size;
-    const ImVec2 at0{(screen.x - width) / 2.f, 28.f * dp};
-    ImDrawList* draw = ImGui::GetForegroundDrawList(ImGui::GetMainViewport());
-    const auto a = [&](int v) { return static_cast<ImU32>(v * fade); };
-    // Solid: with HDR on, a lamp behind it can be up to eight times
-    // brighter than white and shone through even a nearly solid box.
-    draw->AddRectFilled(at0, ImVec2{at0.x + width, at0.y + height}, IM_COL32(0, 0, 0, a(0xff)), 6.f * dp);
-    draw->AddText(font, size, ImVec2{at0.x + (width - big.x) / 2.f, at0.y + pad.y}, IM_COL32(0xf0, 0xe6, 0xc8, a(0xff)),
-                  text.c_str());
-    draw->AddText(font, small, ImVec2{at0.x + (width - line.x) / 2.f, at0.y + pad.y + big.y + 4.f * dp},
-                  IM_COL32(0xb8, 0xae, 0x98, a(0xff)), legend.c_str());
-}
-
 namespace {
 
 // A button's picture for the controller in hand (or the key's), as an ImGui
@@ -1684,42 +1640,6 @@ void run_hdr_calibration(int first_step = 0) {
 }
 
 }  // namespace
-
-extern "C" void frontend_cycle_enhancement(int which) {
-    using namespace enhancement;
-    if (which == kCount || which == kCount + 1) {
-        // Before and after: off is the game as the GameCube showed it (its
-        // own 528 lines, the disc's light maps and textures); on is Gary's set
-        // (the defaults: HDR, Soft occlusion, sharp shadows, HD textures, no
-        // glow) at the chosen resolution. The resolution is not saved.
-        const bool on = which == kCount + 1;
-        g_settings.hdr = on;
-        g_settings.glow = 0;  // not in Gary's set either way
-        g_settings.ssao = on ? 1 : 0;
-        g_settings.hd_textures = on;
-        g_settings.sharp_shadows = on;
-        settings_apply_graphics();
-        static const int kRenderLines[] = {0, 720, 1080, 1440, 2160};
-        dol_aurora_set_render_height(on ? kRenderLines[g_settings.render_scale] : 528);
-        settings_save();
-        std::fprintf(stderr, "[frontend] enhancements %s\n", on ? "on" : "off");
-        std::lock_guard<std::mutex> lock(g_notice_mutex);
-        g_notice = on ? "Enhanced: HDR, soft occlusion, sharp shadows, HD textures"
-                      : "Original: the GameCube's resolution, shadows and textures";
-        g_notice_at = SDL_GetTicks();
-        return;
-    }
-    if (which < 0 || which >= kCount)
-        return;
-    if (available(which)) {
-        change(which, +1);
-        settings_save();
-    }
-    std::fprintf(stderr, "[frontend] %s: %s\n", kNames[which], value(which).c_str());
-    std::lock_guard<std::mutex> lock(g_notice_mutex);
-    g_notice = std::string(kNames[which]) + ": " + value(which);
-    g_notice_at = SDL_GetTicks();
-}
 
 // --- Photo mode ---------------------------------------------------------------
 // Hold Back (P on the keyboard): the game pauses on its frame and a free camera
@@ -2299,7 +2219,6 @@ extern "C" void frontend_frame(void) {
         run_hdr_calibration(calibration_test_step);
     }
     update_fps_counter();
-    update_enhancement_notice();
     update_fast_forward_prompt();
     update_cursor();
     static bool menu_was_held = false;

@@ -482,6 +482,8 @@ static bool exi_read_cb(void* user, CPUState* cpu, u32 ea, u8 size,
 #define SRAM_SIZE 64u
 #define SRAM_FLAGS 0x13u
 #define SRAM_FLAG_STEREO 0x04u
+#define SRAM_NTD 0x11u
+#define SRAM_NTD_EURGB60 0x40u
 
 static struct {
     u8 sram[SRAM_SIZE];
@@ -493,10 +495,8 @@ static struct {
 } g_ipl;
 static char g_sram_path[1024];
 
-static void ipl_init(void) {
-    memset(&g_ipl, 0, sizeof g_ipl);
-    g_ipl.sram[SRAM_FLAGS] = SRAM_FLAG_STEREO;
-    // The two checksums cover bytes 0x0C-0x13 as big-endian halfwords.
+// The two checksums cover bytes 0x0C-0x13 as big-endian halfwords.
+static void sram_checksum(void) {
     u16 sum = 0, inverse = 0;
     for (u32 i = 0x0Cu; i < 0x14u; i += 2u) {
         const u16 half = (u16)(g_ipl.sram[i] << 8 | g_ipl.sram[i + 1u]);
@@ -509,6 +509,22 @@ static void ipl_init(void) {
     g_ipl.sram[3] = (u8)inverse;
 }
 
+// The TV takes 60 Hz (EuRGB60), as Eternal Darkness PAL is played here: it
+// reads the bit to start in 60 Hz again after its own resets (hle.c answers
+// its 50/60 Hz question).
+static void sram_tv_60hz(void) {
+    if ((g_ipl.sram[SRAM_NTD] & SRAM_NTD_EURGB60) != 0u)
+        return;
+    g_ipl.sram[SRAM_NTD] |= SRAM_NTD_EURGB60;
+    sram_checksum();
+}
+
+static void ipl_init(void) {
+    memset(&g_ipl, 0, sizeof g_ipl);
+    g_ipl.sram[SRAM_FLAGS] = SRAM_FLAG_STEREO;
+    sram_tv_60hz();
+}
+
 void mmio_set_sram_path(const char* path) {
     snprintf(g_sram_path, sizeof g_sram_path, "%s", path != NULL ? path : "");
     FILE* f = g_sram_path[0] != '\0' ? fopen(g_sram_path, "rb") : NULL;
@@ -518,6 +534,7 @@ void mmio_set_sram_path(const char* path) {
     if (fread(saved, 1, sizeof saved, f) == sizeof saved)
         memcpy(g_ipl.sram, saved, sizeof saved);
     fclose(f);
+    sram_tv_60hz();
 }
 
 static void save_sram(void) {

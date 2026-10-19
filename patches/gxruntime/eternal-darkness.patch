@@ -3513,10 +3513,10 @@ index b86b214..f6b70de 100644
  AuroraBackend aurora_get_backend();
  const AuroraBackend* aurora_get_available_backends(size_t* count);
 diff --git a/graphics/aurora/include/aurora/gfx.h b/graphics/aurora/include/aurora/gfx.h
-index a13ce39..d823a22 100644
+index a13ce39..df6fc15 100644
 --- a/graphics/aurora/include/aurora/gfx.h
 +++ b/graphics/aurora/include/aurora/gfx.h
-@@ -29,10 +29,62 @@ typedef struct {
+@@ -29,10 +29,73 @@ typedef struct {
  } AuroraStats;
  
  const AuroraStats* aurora_get_stats();
@@ -3575,12 +3575,23 @@ index a13ce39..d823a22 100644
 +void aurora_photo_set_view(const float rot[9], float x, float y, float z, float zoom, float aspect, bool hide_hud);
 +void aurora_photo_save(const char* path);
 +unsigned aurora_photo_saved(void);
++/* HD texture pack images waiting their turn to be uploaded (a few a frame; all
++ * at once while photo mode steps). */
++unsigned aurora_texture_pack_pending(void);
++/* Host texture replacements (light maps) still being made. */
++unsigned aurora_texture_override_pending(void);
++/* A texture that glows when HDR is on: draws using it (by guest address, GX
++ * format, width and height) glow with the glow setting, or with it off at
++ * strength in a glow of their own (GXRuntime recomp patch). */
++void aurora_glow_add_texture(uint32_t address, uint32_t format, uint32_t width, uint32_t height, float strength);
++/* A movie is playing: HDR shows it at video's white, with no glow. */
++void aurora_hdr_set_movie(bool playing);
 +
  /*
   * EFB readback (GXRuntime recomp patch): arm a one-shot copy of the next
   * submitted frame's present source; take returns tightly packed RGBA8 rows
 diff --git a/graphics/aurora/lib/aurora.cpp b/graphics/aurora/lib/aurora.cpp
-index b09ef4d..7f6f594 100644
+index b09ef4d..6056199 100644
 --- a/graphics/aurora/lib/aurora.cpp
 +++ b/graphics/aurora/lib/aurora.cpp
 @@ -1,6 +1,17 @@
@@ -4369,7 +4380,7 @@ index b09ef4d..7f6f594 100644
  
  #endif
  }
-@@ -475,6 +1028,57 @@ void aurora_set_resampler(AuroraSampler sampler) {
+@@ -475,6 +1028,67 @@ void aurora_set_resampler(AuroraSampler sampler) {
    (void)sampler;
  #endif
  }
@@ -4394,6 +4405,16 @@ index b09ef4d..7f6f594 100644
 +}
 +void aurora_photo_save(const char* path) { aurora::gfx::photo_save(path); }
 +unsigned aurora_photo_saved(void) { return aurora::gfx::photo_saved(); }
++void aurora_glow_add_texture(uint32_t address, uint32_t format, uint32_t width, uint32_t height, float strength) {
++  aurora::gfx::glow_add_texture(address, format, width, height, strength);
++}
++void aurora_hdr_set_movie(bool playing) { aurora::gfx::glow::set_movie(playing); }
++unsigned aurora_texture_override_pending(void) {
++  return static_cast<unsigned>(aurora::gfx::texture_override_pending());
++}
++unsigned aurora_texture_pack_pending(void) {
++  return static_cast<unsigned>(aurora::gfx::texture_pack_pending());
++}
 +void aurora_interp_set_phases(const float* phases, uint32_t count) {
 +  aurora::g_interpPhases.assign(phases, phases + count);
 +}
@@ -4495,7 +4516,7 @@ index 421bd9e..0cbf52d 100644
 +}
  } // namespace aurora::webgpu::utils
 diff --git a/graphics/aurora/lib/gfx/common.cpp b/graphics/aurora/lib/gfx/common.cpp
-index a64dd2d..28be905 100644
+index a64dd2d..b3a89e0 100644
 --- a/graphics/aurora/lib/gfx/common.cpp
 +++ b/graphics/aurora/lib/gfx/common.cpp
 @@ -10,6 +10,10 @@
@@ -4563,7 +4584,7 @@ index a64dd2d..28be905 100644
 +static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo, uint32_t passIndex,
 +                   bool replay = false);
  static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, const RenderPass& passInfo);
-+static void render_glow_pass(wgpu::CommandEncoder& cmd, const RenderPass& passInfo);
++static void render_glow_pass(wgpu::CommandEncoder& cmd, const RenderPass& passInfo, bool emit);
  static void expire_cached_bind_groups();
  static void push_command(CommandType type, const Command::Data& data);
  
@@ -4682,7 +4703,7 @@ index a64dd2d..28be905 100644
    render_worker::enqueue_begin_frame(frame.frameId, [frameSlot] {
      static constexpr wgpu::CommandEncoderDescriptor EncoderDescriptor{.label = "Redraw encoder"};
      g_framePackets[frameSlot].encoder = g_device.CreateCommandEncoder(&EncoderDescriptor);
-@@ -1309,7 +1413,353 @@ void finish() {
+@@ -1309,7 +1413,373 @@ void finish() {
    }
  }
  
@@ -5015,6 +5036,26 @@ index a64dd2d..28be905 100644
 +  photo::g_savePath = path != nullptr ? path : "";
 +}
 +unsigned photo_saved() noexcept { return photo::g_saved.load(); }
++void glow_add_texture(uint32_t address, uint32_t format, uint32_t width, uint32_t height, float strength) noexcept {
++#ifdef AURORA_ENABLE_GXCORE
++  gxcore::add_emit_texture(address, format, width, height);
++  glow::set_emit_strength(strength);
++#endif
++}
++size_t texture_pack_pending() noexcept {
++#ifdef AURORA_ENABLE_GXCORE
++  return gxcore::pack_pending();
++#else
++  return 0;
++#endif
++}
++size_t texture_override_pending() noexcept {
++#ifdef AURORA_ENABLE_GXCORE
++  return gxcore::override_pending();
++#else
++  return 0;
++#endif
++}
 +
 +void interp_set_wanted(bool on) noexcept {
 +#ifdef AURORA_ENABLE_GXCORE
@@ -5037,7 +5078,7 @@ index a64dd2d..28be905 100644
    ZoneScoped;
    ASSERT(!g_inOffscreen, "end_frame called while offscreen rendering is active");
    ASSERT(g_currentRenderPass == UINT32_MAX, "end_frame called before finish finalized the current render pass");
-@@ -1320,6 +1770,7 @@ void end_frame(EndFrameCallback callback) {
+@@ -1320,6 +1790,7 @@ void end_frame(EndFrameCallback callback) {
      TracyPlot("aurora: cpuFrameTimeMs", cpuFrameTimeMs);
    }
    auto& frame = current_frame_packet();
@@ -5045,7 +5086,7 @@ index a64dd2d..28be905 100644
    frame.stats.drawCallCount = g_drawCallCount;
    frame.stats.mergedDrawCallCount = g_mergedDrawCallCount;
    frame.stats.lastVertSize = frame.verts.size();
-@@ -1352,12 +1803,37 @@ void end_frame(EndFrameCallback callback) {
+@@ -1352,12 +1823,37 @@ void end_frame(EndFrameCallback callback) {
  #endif
  
    const size_t stagingSlot = frame.stagingBuffer;
@@ -5084,7 +5125,7 @@ index a64dd2d..28be905 100644
      packet = {};
      g_stats.drawCallCount = stats.drawCallCount;
      g_stats.mergedDrawCallCount = stats.mergedDrawCallCount;
-@@ -1367,7 +1843,12 @@ void end_frame(EndFrameCallback callback) {
+@@ -1367,7 +1863,12 @@ void end_frame(EndFrameCallback callback) {
      g_stats.lastStorageSize = stats.lastStorageSize;
      g_stats.lastTextureUploadSize = stats.lastTextureUploadSize;
      if (callback) {
@@ -5098,7 +5139,7 @@ index a64dd2d..28be905 100644
      }
      g_frameSlots.release(frameSlot);
      expire_cached_bind_groups();
-@@ -1561,7 +2042,46 @@ static void encode_op(wgpu::CommandEncoder& cmd, FramePacket& frame, const Frame
+@@ -1561,7 +2062,46 @@ static void encode_op(wgpu::CommandEncoder& cmd, FramePacket& frame, const Frame
    }
  }
  
@@ -5146,7 +5187,7 @@ index a64dd2d..28be905 100644
    ZoneScoped;
    if (!passInfo.sealed) {
      return;
-@@ -1570,7 +2090,7 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
+@@ -1570,7 +2110,7 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
    for (const auto& conv : passInfo.paletteConvs) {
      tex_palette_conv::run(cmd, conv);
    }
@@ -5155,12 +5196,14 @@ index a64dd2d..28be905 100644
      // Skip intermediate EFB render passes without observable output.
      return;
    }
-@@ -1622,15 +2142,26 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
+@@ -1622,15 +2162,28 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
    auto pass = cmd.BeginRenderPass(&renderPassDescriptor);
    render_pass(pass, frame, passInfo);
    pass.End();
-+  if (passInfo.colorView.Get() == webgpu::g_frameBuffer.view.Get())
-+    render_glow_pass(cmd, passInfo);
++  if (passInfo.colorView.Get() == webgpu::g_frameBuffer.view.Get()) {
++    render_glow_pass(cmd, passInfo, false);
++    render_glow_pass(cmd, passInfo, true);
++  }
 +#ifdef AURORA_ENABLE_GXCORE
 +  if (passInfo.glowScene)
 +    ssao::apply(cmd, passInfo.ssaoScene, passInfo.colorView, passInfo.resolveView, passInfo.depthStencilView,
@@ -5184,7 +5227,7 @@ index a64dd2d..28be905 100644
      depth_peek::encode_frame_snapshot(cmd, passInfo.copySourceDepthView, passInfo.targetSize, passInfo.msaaSamples);
    }
  
-@@ -1682,7 +2213,78 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
+@@ -1682,9 +2235,87 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
        };
        cmd.CopyTextureToTexture(&src, &dst, &size);
      }
@@ -5192,24 +5235,31 @@ index a64dd2d..28be905 100644
 +    if (passInfo.composeGlow)
 +      glow::compose(cmd, passInfo.resolveTarget->attachmentTextureView, passInfo.resolveTarget->format);
 +#endif
-+  }
-+}
-+
+   }
+ }
+ 
 +// GXRuntime recomp patch: an EFB pass's draws that add light, again into the
 +// glow buffer (glow.hpp), tested against the pass's depth without writing it.
-+static void render_glow_pass(wgpu::CommandEncoder& cmd, const RenderPass& passInfo) {
++static void render_glow_pass(wgpu::CommandEncoder& cmd, const RenderPass& passInfo, bool emit) {
 +#ifdef AURORA_ENABLE_GXCORE
-+  if (!glow::active() || !passInfo.depthStencilView)
++  // emit: the draws that glow on their own (HDR, the glow setting off) into
++  // the emit buffer; else the glow's.
++  if (!(emit ? webgpu::g_hdrActive : glow::active()) || !passInfo.depthStencilView)
 +    return;
++  const auto wanted = [emit](const Command& c) {
++    return c.type == CommandType::Draw && c.data.draw.type == ShaderType::GXCore &&
++           c.data.draw.gxcore.glowPipeline != 0 && c.data.draw.gxcore.glowEmit == emit;
++  };
 +  bool any = false;
 +  for (const auto& c : passInfo.commands)
-+    if (c.type == CommandType::Draw && c.data.draw.type == ShaderType::GXCore && c.data.draw.gxcore.glowPipeline != 0) {
++    if (wanted(c)) {
 +      any = true;
 +      break;
 +    }
 +  if (!any)
 +    return;
-+  const auto target = glow::begin_pass(passInfo.targetSize, passInfo.msaaSamples);
++  const auto target = emit ? glow::begin_emit_pass(passInfo.targetSize, passInfo.msaaSamples)
++                           : glow::begin_pass(passInfo.targetSize, passInfo.msaaSamples);
 +  const wgpu::RenderPassColorAttachment attachment{
 +      .view = target.view,
 +      .resolveTarget = target.resolveView,
@@ -5250,20 +5300,22 @@ index a64dd2d..28be905 100644
 +      pass.SetScissorRect(x, y, w, h);
 +    } break;
 +    case CommandType::Draw:
-+      if (c.data.draw.type == ShaderType::GXCore && c.data.draw.gxcore.glowPipeline != 0)
++      if (wanted(c))
 +        gxcore::render_glow(c.data.draw.gxcore, pass);
 +      break;
 +    default:
 +      break;
 +    }
-   }
++  }
 +  pass.End();
 +  g_currentPipeline = UINTPTR_MAX;
 +#endif
- }
- 
++}
++
  void after_submit() noexcept {
-@@ -1892,8 +2494,14 @@ Range push_indices(const uint8_t* data, size_t length, size_t alignment) {
+   depth_peek::after_submit();
+   efb_readback::after_submit();
+@@ -1892,8 +2523,14 @@ Range push_indices(const uint8_t* data, size_t length, size_t alignment) {
  
  Range push_uniform(const uint8_t* data, size_t length) {
    ZoneScoped;
@@ -5280,7 +5332,7 @@ index a64dd2d..28be905 100644
  }
  
  Range push_storage(const uint8_t* data, size_t length) {
-@@ -1935,7 +2543,19 @@ BindGroupRef bind_group_ref(const WGPUBindGroupDescriptor& descriptor) {
+@@ -1935,7 +2572,19 @@ BindGroupRef bind_group_ref(const WGPUBindGroupDescriptor& descriptor) {
  wgpu::BindGroup find_bind_group(BindGroupRef id) {
    std::lock_guard lock{g_bindGroupCacheMutex};
    const auto it = g_cachedBindGroups.find(id);
@@ -5302,7 +5354,7 @@ index a64dd2d..28be905 100644
  }
  
 diff --git a/graphics/aurora/lib/gfx/common.hpp b/graphics/aurora/lib/gfx/common.hpp
-index 37acf2b..e98503f 100644
+index 37acf2b..962f4fb 100644
 --- a/graphics/aurora/lib/gfx/common.hpp
 +++ b/graphics/aurora/lib/gfx/common.hpp
 @@ -1,5 +1,6 @@
@@ -5350,7 +5402,7 @@ index 37acf2b..e98503f 100644
  
  enum class ShaderType : uint8_t {
    Clear = 0,
-@@ -252,8 +273,43 @@ void shutdown();
+@@ -252,8 +273,49 @@ void shutdown();
  
  bool begin_frame();
  void finish();
@@ -5381,6 +5433,12 @@ index 37acf2b..e98503f 100644
 +void photo_set_view(const PhotoView& view) noexcept;
 +void photo_save(const char* path) noexcept;
 +unsigned photo_saved() noexcept;
++// HD pack images still waiting to be uploaded (gxcore::pack_pending).
++size_t texture_pack_pending() noexcept;
++// Host replacements (light maps) still being made (gxcore::override_pending).
++size_t texture_override_pending() noexcept;
++// A texture that glows when HDR is on (aurora_glow_add_texture).
++void glow_add_texture(uint32_t address, uint32_t format, uint32_t width, uint32_t height, float strength) noexcept;
 +struct InterpStats {
 +  uint32_t draws, matched, loose, moved, jumped;
 +  int result; // 0 blended, 1 still, 2 cut, 3 no previous frame
@@ -5395,7 +5453,7 @@ index 37acf2b..e98503f 100644
  void render_pass(const wgpu::RenderPassEncoder& pass, uint32_t idx);
  void after_submit() noexcept;
  void gpu_synchronize();
-@@ -276,9 +332,22 @@ struct EfbCopyFilterParams {
+@@ -276,9 +338,22 @@ struct EfbCopyFilterParams {
    std::uint32_t filter_row[3]{0, 64, 0};
  };
  
@@ -5458,10 +5516,10 @@ index 7af8fca..4c14e34 100644
    else
 diff --git a/graphics/aurora/lib/gfx/glow.cpp b/graphics/aurora/lib/gfx/glow.cpp
 new file mode 100644
-index 0000000..6bebd10
+index 0000000..ac5f372
 --- /dev/null
 +++ b/graphics/aurora/lib/gfx/glow.cpp
-@@ -0,0 +1,615 @@
+@@ -0,0 +1,698 @@
 +#include "glow.hpp"
 +
 +#include "../webgpu/gpu_prof.hpp"
@@ -5714,6 +5772,18 @@ index 0000000..6bebd10
 +bool g_drawn = false;      // glow drawn since the last compose
 +bool g_presentGlow = false; // level 0 holds the shown frame's glow (HDR present)
 +bool g_needClear = true;   // next glow pass starts from black
++// The emit chain (begin_emit_pass): its own buffer and levels.
++Level g_eBase;
++wgpu::Texture g_eMs;
++wgpu::TextureView g_eMsView;
++std::vector<Level> g_eLevels;
++wgpu::Extent3D g_eSize{};
++uint32_t g_eSamples = 0;
++bool g_eDrawn = false, g_eNeedClear = true, g_ePresent = false;
++std::atomic<float> g_emitStrength{0.6f};
++// A movie plays (set_movie): shown as video is, its white at SDR white, with
++// no highlights or glow; the game's paper white made a bright movie glare.
++std::atomic<bool> g_movie{false};
 +
 +wgpu::ShaderModule g_module;
 +wgpu::BindGroupLayout g_layout;
@@ -5862,6 +5932,37 @@ index 0000000..6bebd10
 +  g_drawn = false;
 +}
 +
++void ensure_emit_targets(const wgpu::Extent3D& size, uint32_t samples) {
++  if (g_eBase.texture && g_eSize.width == size.width && g_eSize.height == size.height && g_eSamples == samples)
++    return;
++  init_shared();
++  g_eSize = size;
++  g_eSamples = samples;
++  g_eBase = make_level(size.width, size.height, "Emit buffer");
++  g_eMs = {};
++  g_eMsView = {};
++  if (samples > 1) {
++    const wgpu::TextureDescriptor desc{
++        .label = "Emit buffer (MSAA)",
++        .usage = wgpu::TextureUsage::RenderAttachment,
++        .size = {size.width, size.height, 1},
++        .format = kFormat,
++        .sampleCount = samples,
++    };
++    g_eMs = g_device.CreateTexture(&desc);
++    g_eMsView = g_eMs.CreateView();
++  }
++  g_eLevels.clear();
++  uint32_t w = size.width, h = size.height;
++  while (g_eLevels.size() < kMaxLevels && w >= 16 && h >= 16) {
++    w = (w + 1) / 2;
++    h = (h + 1) / 2;
++    g_eLevels.push_back(make_level(w, h, "Emit level"));
++  }
++  g_eNeedClear = true;
++  g_eDrawn = false;
++}
++
 +void ensure_targets(const wgpu::Extent3D& size, uint32_t samples) {
 +  if (!g_base.texture || g_size.width != size.width || g_size.height != size.height || g_samples != samples)
 +    make_targets(size, samples);
@@ -5887,11 +5988,17 @@ index 0000000..6bebd10
 +  pass.End();
 +}
 +void write_params() {
-+  const float s = g_strength.load(std::memory_order_relaxed);
++  // The emit chain is shown (HDR) only with the glow setting off: its strength.
++  const float glow = g_strength.load(std::memory_order_relaxed);
++  const float s = glow > 0.f ? glow : g_ePresent ? g_emitStrength.load(std::memory_order_relaxed) : 0.f;
++  // Video's white: the system's SDR white on EDR (1.0), BT.2408's 203 nits on HDR10.
++  const float paper = g_paperNits.load(std::memory_order_relaxed);
++  const float videoWhite = webgpu::g_presentFormat == wgpu::TextureFormat::RGB10A2Unorm ? 203.f : 100.f;
 +  const float value[16]{s, g_threshold, g_knee, g_scene,
 +                        g_saturation, g_spread, g_cap, 0.f,
 +                        0.f, g_hdrGain, 0.f, g_highlight.load(std::memory_order_relaxed),
-+                        g_paperNits.load(std::memory_order_relaxed), g_peakNits.load(std::memory_order_relaxed),
++                        g_movie.load(std::memory_order_relaxed) ? std::min(paper, videoWhite) : paper,
++                        g_peakNits.load(std::memory_order_relaxed),
 +                        g_blackLevel.load(std::memory_order_relaxed),
 +                        static_cast<float>(g_pattern.load(std::memory_order_relaxed))};
 +  static float s_written[16];
@@ -5940,6 +6047,22 @@ index 0000000..6bebd10
 +  return target;
 +}
 +
++Target begin_emit_pass(const wgpu::Extent3D& size, uint32_t msaaSamples) {
++  ensure_emit_targets(size, msaaSamples);
++  Target target{
++      .view = g_eSamples > 1 ? g_eMsView : g_eBase.view,
++      .resolveView = g_eSamples > 1 ? g_eBase.view : nullptr,
++      .clear = g_eNeedClear,
++  };
++  g_eNeedClear = false;
++  g_eDrawn = true;
++  return target;
++}
++
++void set_emit_strength(float strength) noexcept { g_emitStrength.store(strength, std::memory_order_relaxed); }
++
++void set_movie(bool playing) noexcept { g_movie.store(playing, std::memory_order_relaxed); }
++
 +void take_scene(const wgpu::CommandEncoder& cmd, const wgpu::TextureView& efb, const wgpu::Extent3D& size,
 +                uint32_t msaaSamples) {
 +  if (!active() || g_scene <= 0.f)
@@ -5958,13 +6081,28 @@ index 0000000..6bebd10
 +}
 +
 +void compose(const wgpu::CommandEncoder& cmd, const wgpu::TextureView& dst, wgpu::TextureFormat format) {
++  // The emit chain: blurred down and up as the glow is, for the HDR present.
++  g_ePresent = g_eDrawn && !g_eLevels.empty();
++  g_eDrawn = false;
++  g_eNeedClear = true;
++  if (g_ePresent) {
++    write_params();
++    const webgpu::gpu_prof::Zone zone{cmd, "Emit"};
++    draw(cmd, g_down, g_eBase.source, g_eLevels[0].view, false, "Emit down");
++    for (size_t i = 1; i < g_eLevels.size(); ++i)
++      draw(cmd, g_down, g_eLevels[i - 1].source, g_eLevels[i].view, false, "Emit down");
++    for (size_t i = g_eLevels.size() - 1; i-- > 0;)
++      draw(cmd, g_up, g_eLevels[i + 1].source, g_eLevels[i].view, true, "Emit up");
++  }
++  // Nothing glows this frame (a menu, the quote screen): the present adds no
++  // glow, not the last 3D frame's left in level 0.
++  g_presentGlow = false;
 +  if ((!g_drawn && !g_sceneTaken) || g_levels.empty())
 +    return;
 +  const bool drawn = g_drawn, scene = g_sceneTaken;
 +  g_drawn = false;
 +  g_sceneTaken = false;
 +  g_needClear = true;
-+  g_presentGlow = false;
 +  if (!active())
 +    return;
 +  write_params();
@@ -6055,11 +6193,14 @@ index 0000000..6bebd10
 +bool present_hdr(const wgpu::RenderPassEncoder& pass, const wgpu::BindGroup& source, bool withGlow) {
 +  if (!ready_present())
 +    return false;
++  withGlow = withGlow && !g_movie.load(std::memory_order_relaxed);
 +  const bool scene = withGlow && g_presentGlow && !g_levels.empty();
 +  const bool glow = scene && strength() > 0.f;
++  // With the glow setting off, the emit chain's glow in its place.
++  const bool emit = withGlow && !glow && g_ePresent && !g_eLevels.empty();
 +  pass.SetPipeline(g_presentPipeline);
 +  pass.SetBindGroup(0, source, 0, nullptr);
-+  pass.SetBindGroup(1, glow ? g_levels[0].source : g_black.source, 0, nullptr);
++  pass.SetBindGroup(1, glow ? g_levels[0].source : emit ? g_eLevels[0].source : g_black.source, 0, nullptr);
 +  pass.SetBindGroup(2, scene ? g_sharp.source : g_black.source, 0, nullptr);
 +  pass.Draw(3);
 +  return true;
@@ -6079,10 +6220,10 @@ index 0000000..6bebd10
 +} // namespace aurora::gfx::glow
 diff --git a/graphics/aurora/lib/gfx/glow.hpp b/graphics/aurora/lib/gfx/glow.hpp
 new file mode 100644
-index 0000000..d657ab3
+index 0000000..1f35c9b
 --- /dev/null
 +++ b/graphics/aurora/lib/gfx/glow.hpp
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,58 @@
 +#pragma once
 +
 +// GXRuntime recomp patch: glow (bloom). A draw that adds light to the screen
@@ -6116,6 +6257,13 @@ index 0000000..d657ab3
 +  bool clear = false;
 +};
 +Target begin_pass(const wgpu::Extent3D& size, uint32_t msaaSamples);
++// The emit buffer, the same for draws that glow on their own (HDR on, the
++// glow setting off; gxcore add_emit_texture): blurred at the display copy
++// like the glow and added by the HDR present at the emit strength.
++Target begin_emit_pass(const wgpu::Extent3D& size, uint32_t msaaSamples);
++void set_emit_strength(float strength) noexcept;
++// A movie is playing: the HDR present shows it at video's white, no glow.
++void set_movie(bool playing) noexcept;
 +
 +// Keep the frame's 3D scene (the EFB before the HUD is drawn over it): its
 +// highlights are added to the glow at the next compose.
@@ -6135,7 +6283,7 @@ index 0000000..d657ab3
 +
 +} // namespace aurora::gfx::glow
 diff --git a/graphics/aurora/lib/gfx/gxcore_draw.cpp b/graphics/aurora/lib/gfx/gxcore_draw.cpp
-index 71136b9..4da2afc 100644
+index 71136b9..d6ffe58 100644
 --- a/graphics/aurora/lib/gfx/gxcore_draw.cpp
 +++ b/graphics/aurora/lib/gfx/gxcore_draw.cpp
 @@ -1,4 +1,11 @@
@@ -6150,13 +6298,14 @@ index 71136b9..4da2afc 100644
  #include "xfb_present.hpp"
  #include "efb_readback.hpp"
  #include "plane_capture.hpp"
-@@ -17,9 +24,15 @@
+@@ -17,9 +24,16 @@
  #include "../dolphin/vi/vi_internal.hpp"
  
  #include <absl/container/flat_hash_map.h>
 +#include <absl/container/flat_hash_set.h>
  
  #include <algorithm>
++#include <bit>
 +#include <array>
 +#include <cmath>
 +#include <cstdio>
@@ -6166,7 +6315,7 @@ index 71136b9..4da2afc 100644
  #include <vector>
  
  namespace aurora::gfx::gxcore {
-@@ -40,6 +53,22 @@ namespace {
+@@ -40,6 +54,22 @@ namespace {
  // LOD bias has no WebGPU sampler field — residual stays shader-side if needed.
  // maxAnisotropy>1 is clamped to device capability (textureAnisotropy); WebGPU
  // linear min/mag/mip when aniso is already applied in decode_sampler.
@@ -6189,7 +6338,7 @@ index 71136b9..4da2afc 100644
  wgpu::SamplerDescriptor sampler_from_plan(const gxc::PlanSampler& s) {
    auto address = [](std::uint8_t a) -> wgpu::AddressMode {
      switch (a) {
-@@ -158,6 +187,64 @@ wgpu::BlendFactor to_blend_factor_dst(gxc::DstBlendFactor factor, bool dual_src)
+@@ -158,6 +188,64 @@ wgpu::BlendFactor to_blend_factor_dst(gxc::DstBlendFactor factor, bool dual_src)
    }
  }
  
@@ -6254,7 +6403,7 @@ index 71136b9..4da2afc 100644
  // Texture bind group layout for a used-texmap set (63/Mfin multi-texmap): texmap
  // t occupies binding 2t (texture) + 2t+1 (sampler), matching the WGSL. Cached per
  // mask; used_mask=1 (texmap 0 only) reproduces the pre-Mfin single-texmap layout.
-@@ -228,11 +315,76 @@ struct TextureKey {
+@@ -228,11 +316,80 @@ struct TextureKey {
  };
  
  absl::flat_hash_map<TextureKey, TextureHandle> g_textureCache;
@@ -6295,6 +6444,9 @@ index 71136b9..4da2afc 100644
 +  uint64_t hash;
 +};
 +absl::flat_hash_map<TextureKey, PendingPack> g_pendingPack;
++// This frame's draws still showing an original while their pack image or host
++// replacement waits (photo mode waits for none), for any thread.
++std::atomic<size_t> g_pendingPackCount{0};
 +// Pack images already on the GPU, by the pack's own key. A game may load the
 +// same image into a new buffer (Eternal Darkness's prologue streams its two
 +// backgrounds through a ring of buffers, one reload every few seconds): that is
@@ -6328,10 +6480,11 @@ index 71136b9..4da2afc 100644
 +  uint64_t hash;  // Dolphin's name hash, for apply_hash
 +};
 +absl::flat_hash_map<TextureKey, PendingOverride> g_pendingOverride;
++std::atomic<size_t> g_pendingOverrideCount{0};
  TextureCacheStats g_textureCacheStats;
  
  // EFB copy-to-texture destinations (63/S16): dest guest address -> resolved EFB
-@@ -242,6 +394,26 @@ TextureCacheStats g_textureCacheStats;
+@@ -242,6 +399,26 @@ TextureCacheStats g_textureCacheStats;
  // (a re-copy to the same address updates in place, matching the live path).
  // E7: format-0xF display copies also land here (Virtual XFB GPU texture).
  absl::flat_hash_map<uint32_t, TextureHandle> g_efbCopyTextures;
@@ -6358,7 +6511,7 @@ index 71136b9..4da2afc 100644
  
  // E7 present-from-RAM: YUYV decoded from guest MEM1 when no GPU copy exists
  // (software/external XFB writers). Keyed by physical address; re-upload when
-@@ -261,6 +433,19 @@ static uint32_t g_last_xfb_dest_stride = 0;
+@@ -261,6 +438,19 @@ static uint32_t g_last_xfb_dest_stride = 0;
  // E7: last display-copy XFB height after BP 0x4E y_scale (0 = use VI height).
  static uint32_t g_last_xfb_height = 0;
  
@@ -6378,7 +6531,7 @@ index 71136b9..4da2afc 100644
  static unsigned long long g_xfb_display_copy_count = 0;
  static unsigned long long g_xfb_ram_present_count = 0;
  
-@@ -277,17 +462,118 @@ unsigned long long xfb_display_copy_count() noexcept {
+@@ -277,17 +467,118 @@ unsigned long long xfb_display_copy_count() noexcept {
    return g_xfb_display_copy_count;
  }
  
@@ -6499,7 +6652,7 @@ index 71136b9..4da2afc 100644
      return &it->second;
  
    const auto dims = aurora::vi::configured_xfb_size();
-@@ -345,6 +631,11 @@ const TextureHandle* lookup_xfb_texture(std::uint32_t physical_address) noexcept
+@@ -345,6 +636,11 @@ const TextureHandle* lookup_xfb_texture(std::uint32_t physical_address) noexcept
    return &slot.handle;
  }
  
@@ -6511,7 +6664,7 @@ index 71136b9..4da2afc 100644
  wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
    const gxc::PipelineKey& key = config.key;
    const std::string wgsl = gxc::generate_wgsl(key.shader);
-@@ -364,11 +655,19 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -364,11 +660,19 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
    const bool textured = key.shader.textured != 0;
    // Multi-texmap: the texture group's layout matches the set of texmaps the WGSL
    // declares (derived identically from the shader key), so pipeline and bind
@@ -6534,7 +6687,7 @@ index 71136b9..4da2afc 100644
        tev ? g_uniformBindGroupLayout : texture_bind_group_layout(tex_mask),
        texture_bind_group_layout(tex_mask),
    };
-@@ -427,7 +726,13 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -427,7 +731,13 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
    // vertex FORMAT carries that attribute. A lit/emboss draw whose format omits
    // it reads the cached fallback from the uniform instead (I_CACHED_NORMAL), so
    // the shader does not declare the input and the layout must not provide it.
@@ -6549,7 +6702,7 @@ index 71136b9..4da2afc 100644
        key.shader.has_vertex_normal != 0) {
      attributes.push_back(wgpu::VertexAttribute{
          .format = wgpu::VertexFormat::Float32x3,
-@@ -442,14 +747,14 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -442,14 +752,14 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
          .shaderLocation = 13,
      });
    }
@@ -6566,7 +6719,7 @@ index 71136b9..4da2afc 100644
      attributes.push_back(wgpu::VertexAttribute{
          .format = wgpu::VertexFormat::Float32x3,
          .offset = gxc::kVertexTangentOffset,
-@@ -466,7 +771,7 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -466,7 +776,7 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
    const bool depthCompare = key.depth_test != 0;
    const wgpu::DepthStencilState depthStencil{
        .format = g_graphicsConfig.depthFormat,
@@ -6575,7 +6728,7 @@ index 71136b9..4da2afc 100644
        .depthCompare =
            depthCompare ? to_compare(static_cast<gxc::CompareMode>(
                               key.depth_func))
-@@ -513,8 +818,15 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -513,8 +823,15 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
    // is clear (const-α write with src1-driven color blend).
    const bool blending =
        key.blend_enable != 0 || key.blend_subtract != 0 || dual_src;
@@ -6592,7 +6745,7 @@ index 71136b9..4da2afc 100644
        .blend = blending ? &blendState : nullptr,
        .writeMask = writeMask,
    };
-@@ -536,6 +848,10 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -536,6 +853,10 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
    default:
      break; // None here; All was skipped at plan time
    }
@@ -6603,7 +6756,7 @@ index 71136b9..4da2afc 100644
  
    const wgpu::RenderPipelineDescriptor descriptor{
        .label = "GXCore Pipeline",
-@@ -564,12 +880,34 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+@@ -564,12 +885,34 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
    return g_device.CreateRenderPipeline(&descriptor);
  }
  
@@ -6642,15 +6795,17 @@ index 71136b9..4da2afc 100644
    if (data.tev) {
      // group 2 = PS uniform (same dynamic-uniform bind group, its own offset);
      // group 3 = texture.
-@@ -591,18 +929,46 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
+@@ -591,18 +934,48 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
  
  void reset_texture_cache() {
    g_textureCache.clear();
 +  g_pendingPack.clear();
++  g_pendingPackCount = 0;
 +  g_packTextures.clear();
 +  g_cachePackKey.clear();
 +  g_packKept.clear();
 +  g_pendingOverride.clear();
++  g_pendingOverrideCount = 0;
 +  g_frameTextureHashes.clear();
 +  ++g_textureEpoch;
    g_textureAddrKey.clear();
@@ -6689,7 +6844,7 @@ index 71136b9..4da2afc 100644
  // Resolve the current EFB region into a texture the guest-identity path can bind
  // later, keyed by the copy's destination address (63/S16). Mirrors aurora
  // lib/dolphin/gx/GXFrameBuffer.cpp copy_tex on the same substrate: map the EFB
-@@ -612,6 +978,8 @@ const TextureCacheStats& texture_cache_stats() { return g_textureCacheStats; }
+@@ -612,6 +985,8 @@ const TextureCacheStats& texture_cache_stats() { return g_textureCacheStats; }
  // color/Z afterwards. The bound draw's geometry is already in the pass (the
  // sink flushed the pending draw before firing this).
  void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
@@ -6698,7 +6853,7 @@ index 71136b9..4da2afc 100644
    // Mirror the copy-clear color/Z (BP 0x4F-0x51 at this copy) into the gx
    // state GXSetCopyClear would have written: begin_frame's pass-0 EFB clear
    // reads g_gxState.clearColor/clearDepth, and in gxcore mode the live gx
-@@ -635,11 +1003,25 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -635,11 +1010,25 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
    const auto fmt = is_xfb ? GX_TF_RGBA8 : static_cast<GXTexFmt>(cmd.format);
    // Dual dims: EFB source rect stays cmd.height; XFB dest height from
    // byte_size/stride (or cmd.xfb_height if gxcore latched it).
@@ -6725,7 +6880,7 @@ index 71136b9..4da2afc 100644
    });
    // U8: half_scale halves destination dims (TextureEncoder box 2:1).
    const uint32_t scaleShift = cmd.half_scale ? 1u : 0u;
-@@ -660,8 +1042,9 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -660,8 +1049,9 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
        dstHeight = xfb_h;
    }
  
@@ -6737,7 +6892,7 @@ index 71136b9..4da2afc 100644
        it->second->size.width != dstWidth || it->second->size.height != dstHeight) {
      TextureHandle handle;
      if (!is_xfb && gfx::tex_copy_conv::needs_conversion(fmt)) {
-@@ -670,7 +1053,7 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -670,7 +1060,7 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
        handle = gfx::new_render_texture(dstWidth, dstHeight, GX_TF_RGBA8,
                                         is_xfb ? "GXCore XFB" : "GXCore Copy");
      }
@@ -6746,7 +6901,7 @@ index 71136b9..4da2afc 100644
    }
    if (!it->second) {
      return;
-@@ -709,11 +1092,50 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -709,11 +1099,50 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
    // XFB YUYV into guest RAM from this readback on every display copy, so it
    // must stay armed in product runs too (cost: one EFB readback per display
    // copy, ~1-2/frame).
@@ -6798,7 +6953,7 @@ index 71136b9..4da2afc 100644
    gfx::resolve_pass(it->second, srcRect, do_clear && cmd.color_update,
                      do_clear && cmd.alpha_update,
                      do_clear && cmd.depth_update,
-@@ -723,73 +1145,448 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -723,73 +1152,479 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
                                  static_cast<float>(cmd.clear_a) / 255.f},
                      clearDepthValue, fmt, &filter);
  
@@ -6954,9 +7109,39 @@ index 71136b9..4da2afc 100644
 +void set_widescreen_hud(bool on) noexcept { g_widescreenHud = on; }
 +
 +TextureOverride g_textureOverride;
++size_t pack_pending() noexcept { return g_pendingPackCount.load(); }
++size_t override_pending() noexcept { return g_pendingOverrideCount.load(); }
++
++namespace {
++std::vector<std::array<uint32_t, 4>> g_emitTextures;  // address, format, width, height
++
++// The draw's own texture is one of them: its only one, or its first. (The
++// temples' energy texture is also projected on the stone round it as a later
++// layer: that stone does not glow.)
++bool emits(const gxc::DrawPlan& plan) {
++  const auto match = [](uint32_t address, uint32_t format, uint32_t width, uint32_t height) {
++    for (const auto& e : g_emitTextures)
++      if ((address & 0x01FFFFFFu) == e[0] && format == e[1] && width == e[2] && height == e[3])
++        return true;
++    return false;
++  };
++  if (plan.texmap_mask == 0u)
++    return plan.has_texture && match(plan.tex_address, plan.tex_format, plan.tex_width, plan.tex_height);
++  const auto& tex = plan.textures[std::countr_zero(plan.texmap_mask)];
++  return tex.valid && match(tex.address, tex.format, tex.width, tex.height);
++}
++} // namespace
++
++void add_emit_texture(uint32_t address, uint32_t format, uint32_t width, uint32_t height) noexcept {
++  const std::array<uint32_t, 4> e{address & 0x01FFFFFFu, format, width, height};
++  if (std::find(g_emitTextures.begin(), g_emitTextures.end(), e) == g_emitTextures.end())
++    g_emitTextures.push_back(e);
++}
++
 +void set_texture_pack(const TexturePack& pack) noexcept {
 +  g_texturePack = pack;
 +  g_pendingPack.clear();
++  g_pendingPackCount = 0;
 +}
 +bool bc_textures_supported() noexcept { return webgpu::g_bcTexturesSupported; }
 +// The host override's answer for a decoded texture (apply_hash when it has one).
@@ -6974,6 +7159,7 @@ index 71136b9..4da2afc 100644
 +void set_texture_override(const TextureOverride& override_ops) noexcept {
 +  g_textureOverride = override_ops;
 +  g_pendingOverride.clear();
++  g_pendingOverrideCount = 0;
 +}
 +
 +// NDC x shift for one draw (0: leave it).
@@ -7128,7 +7314,7 @@ index 71136b9..4da2afc 100644
 +        ++g_frameDrawsWide;
 +    }
 +  }
-+
+ 
 +  // GXRuntime recomp patch: the merge fast path. A draw whose fingerprints
 +  // (pipeline, constants, pixel and shared constants), textures, samplers,
 +  // viewport and scissor match the draw just submitted joins it straight
@@ -7273,7 +7459,7 @@ index 71136b9..4da2afc 100644
 +    s_last.single = single_texture();
 +    std::memcpy(&s_last.sampler, &plan.sampler, sizeof s_last.sampler);
 +  };
- 
++
 +  // The EFB's render scale, for the next plans' pixel centre correction.
 +  if (!is_offscreen()) {
 +    const auto [logicalWidth, logicalHeight] = gx::logical_fb_size();
@@ -7304,7 +7490,7 @@ index 71136b9..4da2afc 100644
      const float sx = plan.viewport[0];
      const float sy = plan.viewport[1];
      const float sz = plan.viewport[2];
-@@ -799,13 +1596,15 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -799,13 +1634,15 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      const float width = sx * 2.0f;
      const float height = -sy * 2.0f;
      gx::set_logical_viewport({
@@ -7322,7 +7508,7 @@ index 71136b9..4da2afc 100644
    }
  
    // U4: apply DrawPlan scissor as a logical render-pass scissor. Multi-rect
-@@ -827,7 +1626,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -827,7 +1664,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
        [&](uint32_t address, uint32_t tsize, uint32_t format, uint32_t width,
            uint32_t height, const void* data, uint32_t available, bool has_tlut,
            uint32_t tlut_address, uint32_t tlut_format, uint32_t tlut_entries,
@@ -7331,7 +7517,7 @@ index 71136b9..4da2afc 100644
      auto efbIt = g_efbCopyTextures.find(address);
      if (efbIt != g_efbCopyTextures.end() && efbIt->second) {
        ++g_textureCacheStats.hits;
-@@ -839,23 +1638,262 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -839,23 +1676,275 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      const uint32_t size = std::min(tsize, available);
      // Hash the actual source texels (+ TLUT for CI) so a content change under an
      // unchanged guest identity is a distinct cache entry — see TextureKey.
@@ -7421,8 +7607,12 @@ index 71136b9..4da2afc 100644
 +    if (s_packFrame != current_frame()) {
 +      s_packFrame = current_frame();
 +      s_packUploads = 0;
++      g_pendingPackCount = 0;
++      g_pendingOverrideCount = 0;
 +    }
-+    constexpr uint32_t kPackUploadsPerFrame = 3;
++    // Photo mode's steps (black and silent) take them all at once: its frame
++    // is held with the pack's images, not the originals waiting their turn.
++    const uint32_t kPackUploadsPerFrame = photo_stepping() ? UINT32_MAX : 3u;
 +    // Takes the pack's malloc'd image (every level, largest first) and frees it:
 +    // RGBA8, or a DDS file's BC blocks, which go to the GPU as they are.
 +    auto upload_pack = [&](uint8_t* pixels, uint32_t w, uint32_t h, uint32_t mips,
@@ -7502,6 +7692,8 @@ index 71136b9..4da2afc 100644
 +            std::free(rgba);
 +          if (r != 2)
 +            g_pendingOverride.erase(pending);
++          else
++            ++g_pendingOverrideCount;
 +        }
 +      }
 +      if (!g_pendingPack.empty()) {
@@ -7533,9 +7725,13 @@ index 71136b9..4da2afc 100644
 +          } else {
 +            std::free(rgba);
 +          }
-+          if (r != 2)
++          if (r != 2) {
 +            g_pendingPack.erase(pending);
++            pending = g_pendingPack.end();
++          }
 +        }
++        if (pending != g_pendingPack.end())
++          ++g_pendingPackCount;
 +      }
        return it->second;
      }
@@ -7579,6 +7775,7 @@ index 71136b9..4da2afc 100644
 +        if (s_packUploads >= kPackUploadsPerFrame) {
 +          // This frame's uploads are spent: ask on a later draw.
 +          g_pendingPack[key] = PendingPack{format, width, height, dolphin_hash};
++          ++g_pendingPackCount;
 +        } else {
 +          uint8_t* rgba = nullptr;
 +          uint32_t w = 0, h = 0, mips = 1, pack_format = 0;
@@ -7593,15 +7790,17 @@ index 71136b9..4da2afc 100644
 +            return handle;
 +          }
 +          std::free(rgba);
-+          if (r == 2)
++          if (r == 2) {
 +            g_pendingPack[key] = PendingPack{format, width, height, dolphin_hash};
++            ++g_pendingPackCount;
++          }
 +        }
 +      }
 +    }
      // gxcore owns the decode for every format: produce tightly-packed RGBA8 and
      // upload it as a pre-decoded PC texture (no substrate re-conversion).
      std::vector<uint8_t> decoded;
-@@ -868,8 +1906,48 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -868,8 +1957,50 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      } else {
        decoded = gxc::decode_texture(format, width, height, bytes, size);
      }
@@ -7645,13 +7844,15 @@ index 71136b9..4da2afc 100644
 +    } else if (!decoded.empty()) {
 +      std::free(replaced);
 +      // Still being made: the original shows until apply answers.
-+      if (replace == 2)
++      if (replace == 2) {
 +        g_pendingOverride[key] = PendingOverride{decoded, width, height, current_frame(),
 +                                                 claimed ? override_hash : 0u};
++        ++g_pendingOverrideCount;
++      }
        handle = new_static_texture_2d(
            width, height, 1, GX_TF_RGBA8_PC,
            ArrayRef<uint8_t>{decoded.data(), decoded.size()}, false,
-@@ -892,7 +1970,98 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -892,7 +2023,98 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    };
  
    BindGroupRef textureBindGroup = 0;
@@ -7750,7 +7951,7 @@ index 71136b9..4da2afc 100644
      if (plan.texmap_mask == 0u) {
        // Single-texmap fast path: primary texture + plan.sampler at binding 0/1.
        if (plan.has_texture) {
-@@ -903,7 +2072,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -903,7 +2125,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
              plan.tlut_data, plan.tlut_available);
          if (bound) {
            const auto sampler =
@@ -7759,7 +7960,7 @@ index 71136b9..4da2afc 100644
            const std::array entries{
                WGPUBindGroupEntry{.binding = 0,
                                   .textureView =
-@@ -919,6 +2088,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -919,6 +2141,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            textureBindGroup = bind_group_ref(descriptor);
          }
        }
@@ -7767,7 +7968,7 @@ index 71136b9..4da2afc 100644
      } else {
        // Multi-texmap: bind each used texmap at 2t (texture) / 2t+1 (sampler),
        // matching the WGSL declarations. Per-texmap PlanSampler from
-@@ -932,12 +2102,15 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -932,12 +2155,15 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
          if ((plan.texmap_mask & (1u << t)) == 0u)
            continue;
          const gxc::PlanTexture& pt = plan.textures[t];
@@ -7784,7 +7985,7 @@ index 71136b9..4da2afc 100644
          if (!bound) {
            complete = false;
            break;
-@@ -945,14 +2118,16 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -945,14 +2171,16 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
          held.push_back(bound);
          const gxc::PlanSampler& ps =
              pt.sampler.valid ? pt.sampler : plan.samplers[t];
@@ -7803,7 +8004,7 @@ index 71136b9..4da2afc 100644
        const WGPUBindGroupDescriptor descriptor{
            .label = {"GXCore Texture Bind Group", WGPU_STRLEN},
            .layout = texture_bind_group_layout(plan.texmap_mask).Get(),
-@@ -960,6 +2135,280 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -960,6 +2188,293 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            .entries = entries.data(),
        };
        textureBindGroup = bind_group_ref(descriptor);
@@ -7937,7 +8138,18 @@ index 71136b9..4da2afc 100644
 +    }
 +  }
 +  const PipelineRef pipeline = s_lastPipeline;
-+  const PipelineRef glowPipeline = s_lastGlowPipeline;
++  PipelineRef glowPipeline = s_lastGlowPipeline;
++  // A texture that glows with HDR (add_emit_texture): with the glow setting
++  // on it joins the glow; off, it glows on its own (glowEmit).
++  bool glowEmit = false;
++  if (webgpu::g_hdrActive && !g_emitTextures.empty() && emits(plan)) {
++    if (glowPipeline == 0) {
++      PipelineConfig glowConfig = pipelineConfig;
++      glowConfig.glow = 1;
++      glowPipeline = pipeline_ref(glowConfig);
++    }
++    glowEmit = glow::strength() <= 0.f;
++  }
 +  // AURORA_GLOW_LOG: each 60th frame's draws by blend (src,dst factors), and
 +  // how many added glow.
 +  static const bool s_glowLog = std::getenv("AURORA_GLOW_LOG") != nullptr;
@@ -8063,6 +8275,7 @@ index 71136b9..4da2afc 100644
 +            .textureBindGroup = textureBindGroup,
 +            .tev = tev,
 +            .glowPipeline = glowPipeline,
++            .glowEmit = glowEmit,
 +        });
 +        return true;
 +      }
@@ -8079,12 +8292,13 @@ index 71136b9..4da2afc 100644
 +          .textureBindGroup = textureBindGroup,
 +          .tev = tev,
 +          .glowPipeline = glowPipeline,
++            .glowEmit = glowEmit,
 +      });
 +      return true;
      }
    }
  
-@@ -969,31 +2418,18 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -969,31 +2484,19 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    const auto idxRange = push_indices(
        reinterpret_cast<const uint8_t*>(plan.indices.data()),
        plan.indices.size() * sizeof(uint16_t), 4);
@@ -8116,10 +8330,11 @@ index 71136b9..4da2afc 100644
          .textureBindGroup = textureBindGroup,
          .tev = tev,
 +        .glowPipeline = glowPipeline,
++            .glowEmit = glowEmit,
      });
    };
  
-@@ -1006,6 +2442,8 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -1006,6 +2509,8 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      }
    } else {
      issue_draw();
@@ -8129,7 +8344,7 @@ index 71136b9..4da2afc 100644
    return true;
  }
 diff --git a/graphics/aurora/lib/gfx/gxcore_draw.hpp b/graphics/aurora/lib/gfx/gxcore_draw.hpp
-index 0a23a3f..83fac70 100644
+index 0a23a3f..208ecaf 100644
 --- a/graphics/aurora/lib/gfx/gxcore_draw.hpp
 +++ b/graphics/aurora/lib/gfx/gxcore_draw.hpp
 @@ -1,5 +1,8 @@
@@ -8141,7 +8356,7 @@ index 0a23a3f..83fac70 100644
  // gxcore substrate integration (63/S12): the 4th per-type draw module beside
  // clear/gx/rmlui. Pipelines and WGSL come from the headless
  // gxruntime::gxcore lib; this file owns only the wgpu plumbing (pipeline
-@@ -17,11 +20,15 @@ struct DrawData {
+@@ -17,11 +20,18 @@ struct DrawData {
    PipelineRef pipeline;
    Range vertRange;
    Range idxRange;
@@ -8155,10 +8370,13 @@ index 0a23a3f..83fac70 100644
 +  // GXRuntime recomp patch: a draw that adds light (glow.hpp) is drawn again
 +  // with this pipeline into the glow buffer after its EFB pass; 0 otherwise.
 +  PipelineRef glowPipeline = 0;
++  // ... into the emit buffer instead (glow::begin_emit_pass): a texture that
++  // glows with HDR while the glow setting is off (add_emit_texture).
++  bool glowEmit = false;
  };
  
  // Bump when generate_wgsl output or the DrawData/vertex layout changes: the
-@@ -39,17 +46,28 @@ struct DrawData {
+@@ -39,17 +49,28 @@ struct DrawData {
  // length, still 3×8).
  // v8: U8 dual-source blend factors (Src1Alpha) when use_dst_alpha + device
  // DualSourceBlending; single-source fallback residual counter otherwise.
@@ -8188,7 +8406,7 @@ index 0a23a3f..83fac70 100644
  
  // Perform one EFB copy-to-texture (63/S16): resolve the current EFB region into
  // a texture keyed by the copy destination address, so a later draw binding that
-@@ -83,6 +101,64 @@ struct TextureCacheStats {
+@@ -83,6 +104,71 @@ struct TextureCacheStats {
  };
  const TextureCacheStats& texture_cache_stats();
  
@@ -8247,6 +8465,13 @@ index 0a23a3f..83fac70 100644
 +  void* user = nullptr;
 +};
 +void set_texture_pack(const TexturePack& pack) noexcept;
++// A texture that glows when HDR is on (with the glow setting off, at the emit
++// strength in a glow of its own): by guest address, GX format and size.
++void add_emit_texture(uint32_t address, uint32_t format, uint32_t width, uint32_t height) noexcept;
++// HD pack images still waiting to be uploaded (their originals drawn meanwhile).
++size_t pack_pending() noexcept;
++// Textures whose host replacement is still being made (apply answered 2).
++size_t override_pending() noexcept;
 +// Whether the device takes BC-compressed textures (pack images from DDS files).
 +bool bc_textures_supported() noexcept;
 +

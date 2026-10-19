@@ -257,7 +257,7 @@ std::string region_name(const std::string& id) {
 
 // --- Menu model -------------------------------------------------------------
 
-enum class Screen { Launcher, Play, Options, Controls, Mapping, InGame, Problem, Enhancements };
+enum class Screen { Launcher, Play, Options, Controls, Mapping, InGame, Problem };
 
 struct Row {
     std::string label;
@@ -523,6 +523,61 @@ Row vibration_row() {
     return vibration;
 }
 
+// Graphics enhancements: the menu's rows and the in-game shortcuts (hold R3
+// and press a button, frontend_cycle_enhancement) change the same values,
+// applied at once so they can be compared.
+namespace enhancement {
+enum { kGlow, kOcclusion, kHdr, kShadows, kHdTextures, kCount };
+const char* const kNames[kCount] = {"Glow", "Ambient occlusion", "HDR", "Baked shadows", "HD textures"};
+const char* const kLevels[] = {"Off", "Soft", "Strong"};
+
+bool available(int which) {
+    if (which == kHdr)
+        return dol_aurora_hdr_available();
+    if (which == kHdTextures)
+        return texpack_count() != 0;
+    return true;
+}
+
+std::string value(int which) {
+    switch (which) {
+    case kGlow: return kLevels[g_settings.glow];
+    case kOcclusion: return kLevels[g_settings.ssao];
+    case kHdr: return available(which) ? on_off(g_settings.hdr) : "Not on this display";
+    case kShadows: return g_settings.sharp_shadows ? "Sharp" : "Original";
+    case kHdTextures: return available(which) ? on_off(g_settings.hd_textures) : "No pack";
+    default: return "";
+    }
+}
+
+void change(int which, int dir) {
+    switch (which) {
+    case kGlow: cycle(g_settings.glow, 3, dir); break;
+    case kOcclusion: cycle(g_settings.ssao, 3, dir); break;
+    case kHdr: g_settings.hdr = !g_settings.hdr; break;
+    case kShadows: g_settings.sharp_shadows = !g_settings.sharp_shadows; break;
+    case kHdTextures: g_settings.hd_textures = !g_settings.hd_textures; break;
+    default: return;
+    }
+    settings_apply_graphics();
+}
+
+const char* const kNotes[kCount] = {
+    "Lamps, flames, magick and glowing runes give off a soft haze of light.",
+    "Corners, creases and the ground round feet darken where light can't reach, worked out from depth each frame.",
+    "On an HDR display, glowing light shines brighter than white.",
+    "The rooms' light and shadow: Sharp upscales it as each room loads, Original keeps the disc's soft, blocky maps.",
+    "The texture pack in your textures folder.",
+};
+
+// What changed, shown over the game for a moment (update_enhancement_notice).
+std::mutex g_notice_mutex;
+std::string g_notice;
+Uint64 g_notice_at = 0;
+}  // namespace enhancement
+
+void run_hdr_calibration(int first_step);
+
 void build_options() {
     static const char* const kAspect[] = {"16:9", "4:3", "16:9"};
     // Each resolution as the pixels it draws at, for the display shape in use:
@@ -642,10 +697,27 @@ void build_options() {
     };
     g_rows.push_back(hud);
 
-    Row fps{"FPS counter", on_off(g_settings.fps_counter)};
-    fps.note = "Frames per second in the corner of the screen.";
-    fps.change = [](int) { g_settings.fps_counter = !g_settings.fps_counter; };
-    g_rows.push_back(fps);
+    {
+        using namespace enhancement;
+        Row hdr{kNames[kHdr], value(kHdr)};
+        hdr.enabled = available(kHdr);
+        hdr.note = available(kHdr) ? std::string(kNotes[kHdr]) + " " + controls::enhancement_shortcut(kHdr) +
+                                         " in the game to compare."
+                                   : "Needs an HDR display (on a Mac, its XDR screen or an HDR monitor).";
+        hdr.change = [](int dir) { change(kHdr, dir); };
+        g_rows.push_back(hdr);
+        // Only where HDR can be on: elsewhere it would be one more dead row.
+        if (available(kHdr)) {
+            Row calibrate{"Calibrate HDR"};
+            calibrate.enabled = g_settings.hdr;
+            calibrate.value = std::to_string(g_settings.hdr_peak) + " nits peak";
+            calibrate.note = g_settings.hdr ? "Three steps for your display: the brightest it shows, how bright "
+                                              "the picture is, and where black begins."
+                                            : "Turn HDR on to calibrate it.";
+            calibrate.activate = [] { run_hdr_calibration(0); };
+            g_rows.push_back(calibrate);
+        }
+    }
 
     Row music{"Music", std::to_string(g_settings.music_volume) + "%"};
     music.section = "II \u00b7 Sound";
@@ -662,23 +734,41 @@ void build_options() {
     };
     g_rows.push_back(effects);
 
-    Row layout = layout_row();
-    layout.section = "III \u00b7 Controls";
-    layout.page = 1;
-    g_rows.push_back(layout);
+    // Graphics: the enhancements, most visible first (HDR is with Display).
+    {
+        using namespace enhancement;
+        static const int kOrder[] = {kHdTextures, kShadows, kOcclusion, kGlow};
+        for (int which : kOrder) {
+            Row r{kNames[which], value(which)};
+            if (which == kHdTextures)
+                r.section = "III \u00b7 Graphics";
+            r.page = 1;
+            r.enabled = available(which);
+            r.note = kNotes[which];
+            if (which == kHdTextures)
+                r.note = available(which) ? "The texture pack in your textures folder (" +
+                                                std::to_string(texpack_count()) + " images)."
+                                          : "Put a Dolphin-format texture pack (tex1_*.png) in the textures folder.";
+            if (available(which))
+                r.note += " " + controls::enhancement_shortcut(which) + " in the game to compare.";
+            r.change = [which](int dir) { change(which, dir); };
+            g_rows.push_back(r);
+        }
+    }
 
-    Row vibration = vibration_row();
-    vibration.page = 1;
-    g_rows.push_back(vibration);
-
-    Row more{"More controls"};
-    more.note = "Hold or toggle, stick deadzone and button mapping.";
-    more.page = 1;
-    more.activate = [] {
+    // Controls: the layout here, everything else (vibration, hold or toggle,
+    // deadzone, mapping) a page of its own.
+    Row controls_row = layout_row();
+    controls_row.label = "Controls";
+    controls_row.section = "IV \u00b7 Controls";
+    controls_row.page = 1;
+    controls_row.note = "Left and right: the button layout. A: vibration, hold or toggle, "
+                        "stick deadzone and button mapping.";
+    controls_row.activate = [] {
         g_screen = Screen::Controls;
         g_selected = 0;
     };
-    g_rows.push_back(more);
+    g_rows.push_back(controls_row);
 
     static const char* const kCameraNotes[] = {
         "The game's own fixed cameras.",
@@ -688,7 +778,7 @@ void build_options() {
         "Through Alex's eyes: the right stick looks around, and up on the left stick walks where you look. "
         "It holds still while you aim."};
     Row camera{"Camera", camera_mode_name(g_settings.camera)};
-    camera.section = "IV \u00b7 Game";
+    camera.section = "V \u00b7 Game";
     camera.page = 1;
     camera.note = kCameraNotes[g_settings.camera];
     camera.change = [](int dir) {
@@ -710,14 +800,11 @@ void build_options() {
     font.change = [](int dir) { cycle(g_settings.game_font, 3, dir); };
     g_rows.push_back(font);
 
-    Row enhancements{"Graphics enhancements"};
-    enhancements.page = 1;
-    enhancements.note = "HD textures, baked shadows, glow, ambient occlusion and HDR.";
-    enhancements.activate = [] {
-        g_screen = Screen::Enhancements;
-        g_selected = 0;
-    };
-    g_rows.push_back(enhancements);
+    Row fps{"FPS counter", on_off(g_settings.fps_counter)};
+    fps.page = 1;
+    fps.note = "Frames per second in the corner of the screen.";
+    fps.change = [](int) { g_settings.fps_counter = !g_settings.fps_counter; };
+    g_rows.push_back(fps);
 
     if (g_options_return == Screen::Launcher && !g_disc_on_main) {
         Row disc = disc_row();
@@ -731,101 +818,6 @@ void build_options() {
     back.activate = [] {
         settings_save();
         g_screen = g_options_return;
-        g_selected = 0;
-    };
-    g_rows.push_back(back);
-}
-
-// Graphics enhancements: the menu's rows and the in-game shortcuts (hold R3
-// and press a button, frontend_cycle_enhancement) change the same values,
-// applied at once so they can be compared.
-namespace enhancement {
-enum { kGlow, kOcclusion, kHdr, kShadows, kHdTextures, kCount };
-const char* const kNames[kCount] = {"Glow", "Ambient occlusion", "HDR", "Baked shadows", "HD textures"};
-const char* const kLevels[] = {"Off", "Soft", "Strong"};
-
-bool available(int which) {
-    if (which == kHdr)
-        return dol_aurora_hdr_available();
-    if (which == kHdTextures)
-        return texpack_count() != 0;
-    return true;
-}
-
-std::string value(int which) {
-    switch (which) {
-    case kGlow: return kLevels[g_settings.glow];
-    case kOcclusion: return kLevels[g_settings.ssao];
-    case kHdr: return available(which) ? on_off(g_settings.hdr) : "Not on this display";
-    case kShadows: return g_settings.sharp_shadows ? "Sharp" : "Original";
-    case kHdTextures: return available(which) ? on_off(g_settings.hd_textures) : "No pack";
-    default: return "";
-    }
-}
-
-void change(int which, int dir) {
-    switch (which) {
-    case kGlow: cycle(g_settings.glow, 3, dir); break;
-    case kOcclusion: cycle(g_settings.ssao, 3, dir); break;
-    case kHdr: g_settings.hdr = !g_settings.hdr; break;
-    case kShadows: g_settings.sharp_shadows = !g_settings.sharp_shadows; break;
-    case kHdTextures: g_settings.hd_textures = !g_settings.hd_textures; break;
-    default: return;
-    }
-    settings_apply_graphics();
-}
-
-const char* const kNotes[kCount] = {
-    "Lamps, flames, magick and glowing runes give off a soft haze of light.",
-    "Corners, creases and the ground round feet darken where light can't reach, worked out from depth each frame.",
-    "On an HDR display, glowing light shines brighter than white.",
-    "The rooms' light and shadow: Sharp upscales it as each room loads, Original keeps the disc's soft, blocky maps.",
-    "The texture pack in your textures folder.",
-};
-
-// What changed, shown over the game for a moment (update_enhancement_notice).
-std::mutex g_notice_mutex;
-std::string g_notice;
-Uint64 g_notice_at = 0;
-}  // namespace enhancement
-
-void run_hdr_calibration(int first_step);
-
-void build_enhancements() {
-    using namespace enhancement;
-    for (int which = 0; which < kCount; which++) {
-        Row r{kNames[which], value(which)};
-        r.enabled = available(which);
-        r.note = kNotes[which];
-        if (which == kHdTextures && available(which))
-            r.note = "The texture pack in your textures folder (" + std::to_string(texpack_count()) + " images).";
-        if (which == kHdTextures && !available(which))
-            r.note = "Put a Dolphin-format texture pack (tex1_*.png) in the textures folder.";
-        if (which == kHdr && !available(which))
-            r.note = "Needs an HDR display (on a Mac, its XDR screen or an HDR monitor).";
-        r.change = [which](int dir) { change(which, dir); };
-        g_rows.push_back(r);
-    }
-    Row calibrate{"Calibrate HDR"};
-    calibrate.enabled = dol_aurora_hdr_available() && g_settings.hdr;
-    calibrate.value = std::to_string(g_settings.hdr_peak) + " nits peak";
-    calibrate.note = calibrate.enabled
-                         ? "Three steps for your display: the brightest it shows, how bright the picture is, "
-                           "and where black begins."
-                         : "Turn HDR on (on an HDR display) to calibrate it.";
-    calibrate.activate = [] { run_hdr_calibration(0); };
-    g_rows.push_back(calibrate);
-
-    Row keys{"In the game"};
-    keys.enabled = false;
-    keys.gap = true;
-    keys.note = controls::enhancement_legend() + ", to compare.";
-    keys.value = "Hold R3";
-    g_rows.push_back(keys);
-    Row back{"Back"};
-    back.activate = [] {
-        settings_save();
-        g_screen = Screen::Options;
         g_selected = 0;
     };
     g_rows.push_back(back);
@@ -1018,7 +1010,6 @@ void render() {
                           : g_screen == Screen::Play     ? "Load Game"
                           : g_screen == Screen::Options  ? "Options"
                           : g_screen == Screen::Controls ? "Controls"
-                          : g_screen == Screen::Enhancements ? "Graphics Enhancements"
                           : g_screen == Screen::Mapping  ? "Button Mapping"
                           : g_screen == Screen::Problem  ? g_problem_heading.c_str()
                                                          : "Paused";
@@ -1071,7 +1062,6 @@ void render() {
     g_doc->SetClass("overlay", g_screen == Screen::InGame || g_screen == Screen::Problem ||
                                    ((g_screen == Screen::Options ||
                                      g_screen == Screen::Controls ||
-                                     g_screen == Screen::Enhancements ||
                                      g_screen == Screen::Mapping) &&
                                     g_options_return == Screen::InGame));
 }
@@ -1083,7 +1073,6 @@ void build_rows() {
     case Screen::Play: build_play(); break;
     case Screen::Options: build_options(); break;
     case Screen::Controls: build_controls(); break;
-    case Screen::Enhancements: build_enhancements(); break;
     case Screen::Mapping: build_mapping(); break;
     case Screen::InGame: build_in_game(); break;
     case Screen::Problem: build_problem(); break;
@@ -1121,11 +1110,6 @@ void go_back() {
         g_selected = 0;
         break;
     case Screen::Controls:
-        g_screen = Screen::Options;
-        g_selected = 0;
-        break;
-    case Screen::Enhancements:
-        settings_save();
         g_screen = Screen::Options;
         g_selected = 0;
         break;
@@ -1407,6 +1391,14 @@ extern "C" bool frontend_run_launcher(const char* default_iso, char* iso_out,
                        g_discs[g_disc].path == g_settings.disc);
     g_screen = Screen::Launcher;
     g_selected = g_disc_on_main && disc_playable() ? 1 : 0;
+    // ED_MENU_OPEN=options or controls[,row] (testing): the launcher opens on
+    // that page, at that row.
+    if (const char* page = std::getenv("ED_MENU_OPEN"); page != nullptr) {
+        g_options_return = Screen::Launcher;
+        g_screen = std::strncmp(page, "controls", 8) == 0 ? Screen::Controls : Screen::Options;
+        const char* comma = std::strchr(page, ',');
+        g_selected = comma != nullptr ? std::atoi(comma + 1) : 0;
+    }
     g_play = false;
     g_load_slot = 0;
     if (!run_menu() || !g_play)
@@ -1563,6 +1555,23 @@ void update_enhancement_notice() {
 
 namespace {
 
+// A button's picture for the controller in hand (or the key's), as an ImGui
+// texture (0 when the file did not load).
+ImTextureID glyph(const std::string& set, const std::string& name) {
+    static std::map<std::string, ImTextureID> icons;
+    const std::string file = set + "/" + name + ".png";
+    auto it = icons.find(file);
+    if (it == icons.end()) {
+        std::vector<uint8_t> rgba;
+        uint32_t w = 0, h = 0;
+        ImTextureID id = 0;
+        if (load_png_rgba(res_dir() + "/ui/glyphs/" + file, &rgba, &w, &h))
+            id = aurora_imgui_add_texture(w, h, rgba.data());
+        it = icons.emplace(file, id).first;
+    }
+    return it->second;
+}
+
 // HDR calibration: the menu steps aside and the renderer draws each step's
 // test pattern in place of the picture (dol_aurora_set_hdr_pattern), with
 // this caption under it. 1 peak: the ring (the most a signal asks for) in a
@@ -1586,14 +1595,30 @@ void draw_hdr_calibration_caption(int step) {
     else
         std::snprintf(value, sizeof value, "%+d", g_settings.hdr_black);
     const std::string head = std::string(kTitles[step]) + ":  " + value;
-    const char* const hint = "Left / Right adjust  \u00b7  A next  \u00b7  B back";
+    // The buttons, as pictures for the controller in hand (or the keys).
+    struct Hint {
+        std::vector<std::string> names;
+        const char* text;
+    };
+    const std::string set = controls::glyph_set();
+    const bool kb = set == "kb";
+    const std::vector<Hint> hints = {
+        {kb ? std::vector<std::string>{"arrow_up", "arrow_down"} : std::vector<std::string>{"dup", "ddown"}, "Adjust"},
+        {{kb ? "enter" : "south"}, "Next"},
+        {{kb ? "escape" : "east"}, "Back"},
+    };
     const float dp = overlay_dp();
     ImFont* font = g_fps_font != nullptr ? g_fps_font : ImGui::GetFont();
-    const float big = 28.f * dp, small = 17.f * dp;
+    const float big = 28.f * dp, small = 17.f * dp, icon = 28.f * dp, hint_gap = 22.f * dp;
     const ImVec2 a = font->CalcTextSizeA(big, FLT_MAX, 0.f, head.c_str());
     const ImVec2 b = font->CalcTextSizeA(small, FLT_MAX, 0.f, kHelp[step]);
-    const ImVec2 c = font->CalcTextSizeA(small, FLT_MAX, 0.f, hint);
-    const float pad = 16.f * dp, gap = 6.f * dp;
+    float hints_w = 0.f;
+    for (const Hint& h : hints)
+        hints_w += static_cast<float>(h.names.size()) * (icon + 2.f * dp) + 6.f * dp +
+                   font->CalcTextSizeA(small, FLT_MAX, 0.f, h.text).x;
+    hints_w += hint_gap * static_cast<float>(hints.size() - 1);
+    const ImVec2 c{hints_w, icon};
+    const float pad = 16.f * dp, gap = 8.f * dp;
     const float width = std::max({a.x, b.x, c.x}) + 2.f * pad;
     const float height = a.y + b.y + c.y + 2.f * gap + 2.f * pad;
     const ImVec2 screen = ImGui::GetMainViewport()->Size;
@@ -1605,7 +1630,17 @@ void draw_hdr_calibration_caption(int step) {
     y += a.y + gap;
     draw->AddText(font, small, ImVec2{at.x + (width - b.x) / 2.f, y}, IM_COL32(0xd8, 0xd0, 0xb8, 0xff), kHelp[step]);
     y += b.y + gap;
-    draw->AddText(font, small, ImVec2{at.x + (width - c.x) / 2.f, y}, IM_COL32(0xa0, 0x98, 0x88, 0xff), hint);
+    float x = at.x + (width - c.x) / 2.f;
+    for (const Hint& h : hints) {
+        for (const std::string& name : h.names) {
+            if (ImTextureID id = glyph(set, name); id != 0)
+                draw->AddImage(id, ImVec2{x, y}, ImVec2{x + icon, y + icon});
+            x += icon + 2.f * dp;
+        }
+        const ImVec2 t = font->CalcTextSizeA(small, FLT_MAX, 0.f, h.text);
+        draw->AddText(font, small, ImVec2{x + 6.f * dp, y + (icon - t.y) / 2.f}, IM_COL32(0xa0, 0x98, 0x88, 0xff), h.text);
+        x += 6.f * dp + t.x + hint_gap;
+    }
 }
 
 // ED_HDR_CALIBRATION_TEST=seconds,step (testing): calibration opens on its
@@ -1626,10 +1661,10 @@ void run_hdr_calibration(int first_step = 0) {
         }
         dol_aurora_set_hdr_pattern(kPatterns[step]);
         g_input.poll(pressed);
-        const int dir = pressed[kRight] ? 1 : pressed[kLeft] ? -1 : 0;
+        const int dir = pressed[kUp] ? 1 : pressed[kDown] ? -1 : 0;
         if (dir != 0) {
             if (step == 0)
-                g_settings.hdr_peak = std::clamp(g_settings.hdr_peak + dir * 50, 200, 4000);
+                g_settings.hdr_peak = std::clamp(g_settings.hdr_peak + dir * 50, 100, 4000);
             else if (step == 1)
                 g_settings.hdr_paper = std::clamp(g_settings.hdr_paper + dir * 10, 60, 400);
             else
@@ -1721,6 +1756,11 @@ struct Saved {
     int glow, ssao;
 };
 Saved g_before{};
+// HD textures were turned on or off: the pack reads its images on threads,
+// the originals showing until they are ready, so the game draws until it is
+// done (up to g_textures_until).
+bool g_wait_textures = false;
+Uint64 g_textures_until = 0;
 
 constexpr int kLines[] = {720, 1080, 1440, 2160};
 constexpr const char* kLineNames[] = {"720p", "1080p", "1440p", "4K"};
@@ -1798,23 +1838,6 @@ Frame level_frame() {
 int current_lines() {
     static const int kRenderLines[] = {0, 720, 1080, 1440, 2160};
     return kRenderLines[std::clamp(g_settings.render_scale, 0, 4)];
-}
-
-// A button's picture for the controller in hand (or the key's), as an ImGui
-// texture (0 when the file did not load).
-ImTextureID glyph(const std::string& set, const std::string& name) {
-    static std::map<std::string, ImTextureID> icons;
-    const std::string file = set + "/" + name + ".png";
-    auto it = icons.find(file);
-    if (it == icons.end()) {
-        std::vector<uint8_t> rgba;
-        uint32_t w = 0, h = 0;
-        ImTextureID id = 0;
-        if (load_png_rgba(res_dir() + "/ui/glyphs/" + file, &rgba, &w, &h))
-            id = aurora_imgui_add_texture(w, h, rgba.data());
-        it = icons.emplace(file, id).first;
-    }
-    return it->second;
 }
 
 struct Row {
@@ -1948,7 +1971,8 @@ void end() {
 }
 
 // ED_PHOTO_TEST=<seconds>: photo mode by itself after that long (glow, move,
-// look, a photo, 21:9, a photo, leave), for tests with no input.
+// look, a photo, 21:9, HD textures off and on, a photo, leave), for tests
+// with no input.
 struct Test {
     bool on = false;
     Uint64 enter_at = 0, began = 0;
@@ -2071,12 +2095,18 @@ Exit run() {
             } else if (step == 4 && t > 5000) {
                 ratio_to = 3;  // 21:9
                 g_test.step++;
-            } else if (step == 5 && t > 7000) {
+            } else if (step == 5 && t > 6500) {
+                textures = true;  // off
+                shadows = true;
+                g_test.step++;
+            } else if (step == 6 && t > 8000) {
+                textures = true;  // on again: read back from the pack
+                shadows = true;   // the sharp light maps made again
+                g_test.step++;
+            } else if (step == 7 && t > 9500) {
                 take = true;
                 g_test.step++;
-            } else if (step == 6 && t > 8500) {
-                g_test.step++;
-            } else if (step == 7 && t > 9000) {
+            } else if (step == 8 && t > 10500) {
                 leave = true;
                 g_test.step++;
             }
@@ -2100,10 +2130,14 @@ Exit run() {
             toggle(kOcclusion);
         if (textures) {
             toggle(kHdTextures);
+            g_wait_textures = true;
+            g_textures_until = 0;
             step = true;
         }
         if (shadows) {
             toggle(kShadows);
+            g_wait_textures = true;  // the sharp light maps are made on a worker
+            g_textures_until = 0;
             step = true;
         }
         if (reset) {
@@ -2208,6 +2242,27 @@ void frame(bool start) {
         SDL_Delay(2);
     if (!aurora_photo_ready())
         return;
+    if (g_wait_textures) {
+        static int frames = 0;
+        if (g_textures_until == 0) {
+            g_textures_until = SDL_GetTicks() + 3000;
+            frames = 0;
+            std::fprintf(stderr, "[photo] textures: %u waiting to upload, %u light maps being made%s\n",
+                         aurora_texture_pack_pending(), aurora_texture_override_pending(),
+                         texpack_busy() ? ", the pack still reading" : "");
+        }
+        const bool busy =
+            texpack_busy() || aurora_texture_pack_pending() != 0 || aurora_texture_override_pending() != 0;
+        if (busy && SDL_GetTicks() < g_textures_until) {
+            frames++;
+            aurora_photo_rehold(0);  // another frame, still black and silent
+            return;
+        }
+        std::fprintf(stderr, "[photo] textures %s after %d more frame(s) (%u to upload, %u light maps%s)\n",
+                     busy ? "still loading" : "loaded", frames, aurora_texture_pack_pending(),
+                     aurora_texture_override_pending(), texpack_busy() ? ", the pack reading" : "");
+        g_wait_textures = false;
+    }
     if (g_test.on && g_test.began == 0)
         g_test.began = SDL_GetTicks();
     g_state = State::On;

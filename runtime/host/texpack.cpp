@@ -405,6 +405,11 @@ extern "C" void texpack_init(void) {
 
 size_t texpack_count() { return g.files.size(); }
 
+bool texpack_busy() {
+    std::lock_guard<std::mutex> lock(g.mutex);
+    return !g.queued.empty() || !g.ready.empty();
+}
+
 bool texpack_read_rgba(uint32_t format, uint32_t width, uint32_t height, uint64_t hash,
                        std::vector<uint8_t>* rgba, uint32_t* out_width, uint32_t* out_height) {
     if (generation() == 0)

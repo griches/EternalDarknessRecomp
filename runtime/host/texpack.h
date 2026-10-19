@@ -14,6 +14,9 @@ void texpack_init(void);
 #include <vector>
 // Textures the pack offers (0: no pack).
 size_t texpack_count();
+// Images being read, or read and not yet taken by the renderer (photo mode
+// lets the game draw until there are none).
+bool texpack_busy();
 // The pack's image of a texture as RGBA8, its base level only (a DDS file's
 // BC blocks decoded), for a host redraw that starts from it. False with the
 // pack off or without that texture. Reads the file: call it off the renderer's

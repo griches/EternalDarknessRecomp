@@ -864,6 +864,12 @@ std::string enhancement_legend() {
     return out;
 }
 
+std::string enhancement_shortcut(int which) {
+    if (which < 0 || which >= kEnhancementCount)
+        return "";
+    return std::string("Hold ") + native_name(kR3) + " and press " + native_name(kEnhancementButtons[which]);
+}
+
 std::string fast_forward_glyph() {
     if (!g_cutscene.load(std::memory_order_relaxed))
         return "";

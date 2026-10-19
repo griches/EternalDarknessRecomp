@@ -26,6 +26,7 @@
 #include "host/settings.h"
 #ifdef ED_AURORA
 #include "gxruntime/aurora_backend.h"
+#include <aurora/gfx.h>
 #include "host/camera.h"
 #include "host/controls.h"
 #include "host/frontend.h"
@@ -4578,6 +4579,7 @@ static bool continue_book_reload(CPUState* cpu);
 // widescreen option, and the in-game menu.
 void hle_frame_boundary(void) {
     report_frame();  // the hang watchdog's sign of life
+    aurora_hdr_set_movie(g_movie_file != 0u);
     static int fps_env = -1;
     static unsigned frames;
     static struct timespec mark;
@@ -5811,6 +5813,93 @@ static void find_letterbox(CPUState* cpu) {
 }
 #endif
 
+// PAL: 60 Hz from the start, without the game's 50/60 Hz question. Booting in
+// 50 Hz, the game asks at the quote screen when the console's TV takes 60 Hz
+// (OSGetEuRgb60Mode, mislabelled OSGetProgressiveMode in the symbol map; the
+// SRAM mmio.c serves always says so) and no answer is kept (a flag the game
+// carries across its own resets). At that check (the call returning to
+// 0x8001C038) this answers 60 as the game does: it keeps the answer and runs
+// the game's switch to the 60 Hz render mode in the getter's place. The
+// switch waits for the VI, so it runs in the game's thread (a tail call), not
+// a host call.
+#define PAL_EURGB60_GET 0x8020325Cu
+#define PAL_SWITCH_TO_60HZ 0x801E3D6Cu
+#define PAL_REFRESH_CHECK 0x8001C034u
+static s16 g_refresh_chosen_offset;  // the kept answer, at r13 + this
+
+// At boot, the game's graphics set-up (0x801E41F4, called from its start-up
+// with the render mode) gets the 60 Hz mode and the values the start-up
+// gives it when the game comes back from its own reset in 60 Hz (0x800185DC:
+// the mode, two words and a float from the small data), and the answer is
+// kept: the game starts in 60 Hz, with no switch (a flash) at the quote screen.
+#define PAL_GRAPHICS_INIT 0x801E41F4u
+#define PAL_MODE_50HZ 0x80301248u
+#define PAL_MODE_60HZ 0x80301140u
+static s16 g_refresh_word_offsets[3];  // -> 0, -> 0x10000, -> the float (r13)
+static s16 g_refresh_float_source;     // the float, at r2 + this
+
+static void hle_graphics_init(CPUState* cpu) {
+    g_hle_passthrough = true;
+    if ((cpu->lr != 0x800186C0u && cpu->lr != 0x800186D8u) || cpu->gpr[3] != PAL_MODE_50HZ)
+        return;
+    const u32 r13 = cpu->gpr[13];
+    cpu->gpr[3] = PAL_MODE_60HZ;
+    mem_write32(cpu, r13 + (u32)(s32)g_refresh_word_offsets[0], 0u);
+    mem_write32(cpu, r13 + (u32)(s32)g_refresh_word_offsets[1], 0x10000u);
+    mem_write32(cpu, r13 + (u32)(s32)g_refresh_word_offsets[2],
+                mem_read32(cpu, cpu->gpr[2] + (u32)(s32)g_refresh_float_source));
+    mem_write32(cpu, r13 + (u32)(s32)g_refresh_chosen_offset, 1u);
+    fprintf(stderr, "[hle] starting in 60 Hz\n");
+}
+
+static void hle_eurgb60_get(CPUState* cpu) {
+    const u32 chosen = cpu->gpr[13] + (u32)(s32)g_refresh_chosen_offset;
+    if (cpu->lr != PAL_REFRESH_CHECK + 4u || mem_read32(cpu, chosen) != 0u) {
+        g_hle_passthrough = true;
+        return;
+    }
+    mem_write32(cpu, chosen, 1u);
+    fprintf(stderr, "[hle] 60 Hz chosen (the 50/60 Hz question skipped)\n");
+    cpu->pc = PAL_SWITCH_TO_60HZ;
+    g_hle_tail_call = true;
+}
+
+static void find_refresh_prompt(CPUState* cpu) {
+    if (strcmp(ED_GAME_ID, "GEDP01") != 0)
+        return;
+    // bl OSGetEuRgb60Mode at the check, the getter's lbz r0, 17(r31) (the
+    // SRAM byte), and the check's lwz r0, chosen(r13) three calls later.
+    const u32 call = 0x48000001u | ((PAL_EURGB60_GET - PAL_REFRESH_CHECK) & 0x03FFFFFCu);
+    const u32 load = mem_read32(cpu, 0x8001C074u);
+    HleDispatchEntry* entry = hle_dispatch_entry(PAL_EURGB60_GET);
+    if (mem_read32(cpu, PAL_REFRESH_CHECK) != call || mem_read32(cpu, PAL_EURGB60_GET + 0x44u) != 0x881F0011u ||
+        (load >> 16) != 0x800Du || mem_read32(cpu, PAL_SWITCH_TO_60HZ) != 0x9421FFD0u || entry == NULL ||
+        entry->intercept != NULL) {
+        fprintf(stderr, "[hle] the 50/60 Hz question not found: the game asks it\n");
+        return;
+    }
+    g_refresh_chosen_offset = (s16)(load & 0xFFFFu);
+    entry->intercept = hle_eurgb60_get;
+    // The return from a reset in 60 Hz: lfs f0, float(r2) ... addi r0, r3,
+    // mode ... stw r5, a(r13); stw r4, b(r13); stfs f0, c(r13).
+    const u32 lfs = mem_read32(cpu, 0x800185DCu);
+    const u32 a = mem_read32(cpu, 0x800185F0u), b = mem_read32(cpu, 0x800185F8u),
+              c = mem_read32(cpu, 0x800185FCu);
+    HleDispatchEntry* init = hle_dispatch_entry(PAL_GRAPHICS_INIT);
+    if ((lfs >> 16) != 0xC002u || mem_read32(cpu, 0x800185ECu) != 0x38031140u ||
+        (a >> 16) != 0x90ADu || (b >> 16) != 0x908Du || (c >> 16) != 0xD00Du ||
+        mem_read32(cpu, 0x800186BCu) != (0x48000001u | ((PAL_GRAPHICS_INIT - 0x800186BCu) & 0x03FFFFFCu)) ||
+        mem_read32(cpu, 0x80018440u) != 0x38A51248u || init == NULL || init->intercept != NULL) {
+        fprintf(stderr, "[hle] the game's start-up in 60 Hz not found: it switches at the quote screen\n");
+        return;
+    }
+    g_refresh_float_source = (s16)(lfs & 0xFFFFu);
+    g_refresh_word_offsets[0] = (s16)(a & 0xFFFFu);
+    g_refresh_word_offsets[1] = (s16)(b & 0xFFFFu);
+    g_refresh_word_offsets[2] = (s16)(c & 0xFFFFu);
+    init->intercept = hle_graphics_init;
+}
+
 static bool callback_pending(u32 address, s32 result) {
     if (g_callback_active && g_irq_callback.pending.address == address &&
         g_irq_callback.pending.result == result)
@@ -5963,6 +6052,7 @@ void hle_install(CPUState* cpu) {
     find_letterbox(cpu);
     find_camera(cpu);
 #endif
+    find_refresh_prompt(cpu);
     publish_codegen_options();
 }
 

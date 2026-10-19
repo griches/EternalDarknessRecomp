@@ -69,6 +69,9 @@ std::string fast_forward_glyph();
 bool fast_forwarding();
 // The graphics-enhancement shortcuts on this controller ("Hold RS: A glow...").
 std::string enhancement_legend();
+// One shortcut's buttons (0 glow, 1 occlusion, 2 HDR, 3 shadows, 4 HD
+// textures): "Hold RS and press Y".
+std::string enhancement_shortcut(int which);
 
 // Switch layout (Custom starts from the layout in use).
 void set_layout(int layout);

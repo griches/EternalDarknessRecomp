@@ -26,11 +26,14 @@
 #include "host/settings.h"
 #ifdef ED_AURORA
 #include "gxruntime/aurora_backend.h"
-#include <aurora/gfx.h>
 #include "host/camera.h"
 #include "host/controls.h"
 #include "host/frontend.h"
 #include "host/report.h"
+// Aurora (aurora/gfx.h): a movie is playing (HDR shows it at video white).
+// Declared here: the Mac app and the Linux package build this file on the
+// player's machine with only the host and GXRuntime headers.
+void aurora_hdr_set_movie(bool playing);
 #endif
 #include "game_data.h"
 #include "host/dtk.h"

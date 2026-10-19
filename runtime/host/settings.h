@@ -17,6 +17,7 @@ typedef struct {
     bool hd_textures;     // use the texture pack in textures/ when there is one
     bool sharp_shadows;   // upscale the rooms' light maps as they load (lightmaps.cpp)
     int glow;             // light glows round lamps, flames, magick: 0 off, 1 soft, 2 strong
+    bool hdr;             // HDR output where the display has it (light past SDR white)
     bool fullscreen;
     bool fps_counter;     // frames per second in the window title
     int music_volume;     // disc-streamed music, 0-100

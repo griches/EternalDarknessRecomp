@@ -1,5 +1,5 @@
 diff --git a/backends/aurora/aurora_backend.cpp b/backends/aurora/aurora_backend.cpp
-index d94f811..4bffea0 100644
+index d94f811..a668f1e 100644
 --- a/backends/aurora/aurora_backend.cpp
 +++ b/backends/aurora/aurora_backend.cpp
 @@ -19,9 +19,25 @@
@@ -28,7 +28,7 @@ index d94f811..4bffea0 100644
  
  #include <gx/fifo.hpp>
  #include <gx/gx.hpp>
-@@ -30,25 +46,82 @@
+@@ -30,25 +46,86 @@
  #include <cstdio>
  #include <cstdlib>
  #include <cstring>
@@ -58,6 +58,10 @@ index d94f811..4bffea0 100644
  // (that path is reserved for the dolgx_replay tool target).
 +namespace aurora::gfx::glow {
 +void set_strength(float strength) noexcept;
++}
++namespace aurora::webgpu {
++void set_hdr(bool on) noexcept;
++bool hdr_available() noexcept;
 +}
  namespace aurora::gfx::gxcore {
  bool submit_draw_plan(const gxruntime::gxcore::DrawPlan& plan);
@@ -111,7 +115,7 @@ index d94f811..4bffea0 100644
  // Forward for continuous EFB readback attach (fork-internal).
  namespace aurora::gfx::efb_readback {
  void set_continuous(bool enabled) noexcept;
-@@ -57,10 +130,24 @@ bool peek(const std::uint8_t** rgba, std::uint32_t* width,
+@@ -57,10 +134,24 @@ bool peek(const std::uint8_t** rgba, std::uint32_t* width,
            std::uint32_t* height) noexcept;
  } // namespace aurora::gfx::efb_readback
  
@@ -137,7 +141,7 @@ index d94f811..4bffea0 100644
  bool g_graphics_log = false;
  bool g_force_untextured = false;
  bool g_gx_core_enabled = true; // gxcore is the default renderer; DOL_GX_CORE=0 opts out
-@@ -79,9 +166,213 @@ SDL_AudioStream* g_audio_stream = nullptr;
+@@ -79,9 +170,213 @@ SDL_AudioStream* g_audio_stream = nullptr;
  bool g_audio_playing = false;
  int g_audio_prebuffer_ms = 40;
  int g_audio_max_queue_ms = 250;
@@ -351,7 +355,7 @@ index d94f811..4bffea0 100644
  struct PendingTextureMetadata {
      bool valid = false;
      const void* data = nullptr;
-@@ -112,6 +403,28 @@ std::array<PendingTlutMetadata, 20> g_pending_tluts{};
+@@ -112,6 +407,28 @@ std::array<PendingTlutMetadata, 20> g_pending_tluts{};
  // validating sink checked. The live Aurora path stays authoritative; this only
  // proves the consumer survives real FIFO traffic ahead of renderer cutover.
  gxruntime::aurora_recomp::RetailGxFrontend g_shadow_frontend;
@@ -380,7 +384,7 @@ index d94f811..4bffea0 100644
  gxruntime::aurora_recomp::ConsumingAuroraRenderSink g_shadow_packet_sink;
  bool g_shadow_frontend_enabled = false;
  bool g_shadow_frontend_failed = false;
-@@ -124,9 +437,17 @@ bool g_shadow_frontend_failed = false;
+@@ -124,9 +441,17 @@ bool g_shadow_frontend_failed = false;
  gxruntime::gxcore::GxCoreSink g_core_sink;
  unsigned long long g_core_submitted = 0;
  unsigned long long g_core_rejected = 0;
@@ -398,7 +402,7 @@ index d94f811..4bffea0 100644
      if (aurora::gfx::gxcore::submit_draw_plan(plan))
          ++g_core_submitted;
      else
-@@ -244,6 +565,7 @@ void log_callback(AuroraLogLevel level, const char* module, const char* message,
+@@ -244,6 +569,7 @@ void log_callback(AuroraLogLevel level, const char* module, const char* message,
  }
  
  void poll_events() {
@@ -406,7 +410,7 @@ index d94f811..4bffea0 100644
      const AuroraEvent* event = aurora_update();
      while (event != nullptr && event->type != AURORA_NONE) {
          if (event->type == AURORA_EXIT)
-@@ -379,13 +701,39 @@ unsigned long long g_trace_present_scope_frame = 0ull;
+@@ -379,13 +705,39 @@ unsigned long long g_trace_present_scope_frame = 0ull;
  bool g_trace_frame_begun = false;
  unsigned long long g_trace_frames_recorded = 0ull;
  gxruntime::aurora_recomp::trace::TraceWriter g_trace_writer;
@@ -453,7 +457,7 @@ index d94f811..4bffea0 100644
  
  unsigned long long trace_current_frame() {
      return g_trace_present_scope_frame != 0ull ? g_trace_present_scope_frame
-@@ -435,6 +783,17 @@ bool trace_should_record() {
+@@ -435,6 +787,17 @@ bool trace_should_record() {
          g_trace_writer.frame_begin(static_cast<u32>(frame));
          g_trace_frame_begun = true;
          ++g_trace_frames_recorded;
@@ -471,7 +475,7 @@ index d94f811..4bffea0 100644
      }
      return true;
  }
-@@ -442,18 +801,46 @@ bool trace_should_record() {
+@@ -442,18 +805,46 @@ bool trace_should_record() {
  void trace_record_mem_update(u32 address, u32 size, const void* data) {
      if (size == 0 || data == nullptr || !trace_should_record())
          return;
@@ -527,7 +531,7 @@ index d94f811..4bffea0 100644
  }
  
  void trace_close_and_log() {
-@@ -491,6 +878,10 @@ void trace_on_present() {
+@@ -491,6 +882,10 @@ void trace_on_present() {
          trace_close_and_log();
      g_trace_present_scope_frame = 0ull;
      g_trace_frame_begun = false;
@@ -538,7 +542,7 @@ index d94f811..4bffea0 100644
  }
  // ---------------------------------------------------------------------------
  
-@@ -514,11 +905,64 @@ void shadow_frontend_set_array(u32 attr, u32 guest_address, u8 stride) {
+@@ -514,11 +909,64 @@ void shadow_frontend_set_array(u32 attr, u32 guest_address, u8 stride) {
      }
  }
  
@@ -603,7 +607,7 @@ index d94f811..4bffea0 100644
      const void* data = nullptr;
      u32 available = 0;
      if (!g_guest_address_resolver(g_guest_address_resolver_user, address, size,
-@@ -587,6 +1031,45 @@ void shadow_frontend_call_display_list(const void* data, u32 size) {
+@@ -587,6 +1035,45 @@ void shadow_frontend_call_display_list(const void* data, u32 size) {
      }
  }
  
@@ -649,7 +653,7 @@ index d94f811..4bffea0 100644
  void shadow_frontend_write(u64 value, u8 size) {
      if (!g_shadow_frontend_enabled || g_shadow_frontend_failed)
          return;
-@@ -615,24 +1098,7 @@ void shadow_frontend_write(u64 value, u8 size) {
+@@ -615,24 +1102,7 @@ void shadow_frontend_write(u64 value, u8 size) {
      }
      const std::span<const std::uint8_t> fragment(bytes, size);
      if (g_gx_core_enabled) {
@@ -675,7 +679,7 @@ index d94f811..4bffea0 100644
          return;
      }
      if (!g_shadow_frontend.write_fifo(fragment) ||
-@@ -842,8 +1308,1318 @@ void shadow_transform_observer(
+@@ -842,8 +1312,1318 @@ void shadow_transform_observer(
      }
  }
  #endif
@@ -1994,7 +1998,7 @@ index d94f811..4bffea0 100644
  extern "C" {
  
  void aurora_backend_set_array_guest(u32 attr, u32 guest_address,
-@@ -882,6 +2658,7 @@ bool dol_aurora_initialize(int argc, char** argv,
+@@ -882,6 +2662,7 @@ bool dol_aurora_initialize(int argc, char** argv,
                                              : defaults.app_name;
      config.desiredBackend = BACKEND_AUTO;
      config.vsync = backend_config->vsync;
@@ -2002,7 +2006,7 @@ index d94f811..4bffea0 100644
      config.windowWidth = backend_config->window_width != 0
                               ? backend_config->window_width
                               : defaults.window_width;
-@@ -890,6 +2667,10 @@ bool dol_aurora_initialize(int argc, char** argv,
+@@ -890,6 +2671,10 @@ bool dol_aurora_initialize(int argc, char** argv,
                                : defaults.window_height;
      config.allowTextureDumps = backend_config->allow_texture_dumps;
      config.logCallback = log_callback;
@@ -2013,7 +2017,7 @@ index d94f811..4bffea0 100644
      config.logLevel = backend_config->info_logging ? LOG_INFO : LOG_ERROR;
      // The recomp runtime owns guest MEM1/ARAM. Aurora receives translated host
      // pointers for graphics resources and must not allocate duplicate memory.
-@@ -937,7 +2718,7 @@ bool dol_aurora_initialize(int argc, char** argv,
+@@ -937,7 +2722,7 @@ bool dol_aurora_initialize(int argc, char** argv,
      g_trace_present_scope_frame = 0ull;
      g_trace_frame_begun = false;
      g_trace_frames_recorded = 0ull;
@@ -2022,23 +2026,72 @@ index d94f811..4bffea0 100644
      const char* trace_out = std::getenv("DOL_AURORA_RECOMP_TRACE_OUT");
      if (trace_out != nullptr && trace_out[0] != '\0') {
          g_trace_path = trace_out;
-@@ -1069,7 +2850,11 @@ static void flush_gxcore_gap_counters() {
- #if GXRUNTIME_HAS_AURORA_RECOMP
-     if (!g_gx_core_enabled)
-         return;
--    const gxruntime::gxcore::GapCounters& c = g_core_sink.counters();
+@@ -1061,63 +2846,298 @@ bool dol_aurora_initialize(int argc, char** argv,
+     return true;
+ }
+ 
+-// C2: route nonzero gxcore GapCounters into the structured report. Mirrors
+-// dolgx_replay_core.cpp print_gap_counters (full residual taxonomy, including
+-// U1/U2 counters the replay table historically omitted). Counter value IS the
+-// fire-count — gap_report_add adds that many occurrences in one call.
+-static void flush_gxcore_gap_counters() {
++// C2: route nonzero gxcore GapCounters into the structured report. Mirrors
++// dolgx_replay_core.cpp print_gap_counters (full residual taxonomy, including
++// U1/U2 counters the replay table historically omitted). Counter value IS the
++// fire-count — gap_report_add adds that many occurrences in one call.
++static void flush_gxcore_gap_counters() {
++#if GXRUNTIME_HAS_AURORA_RECOMP
++    if (!g_gx_core_enabled)
++        return;
 +    // The sink's counts, plus the planning done by the GX threads.
 +    gxruntime::gxcore::GapCounters c = g_core_sink.counters();
 +    c += gxq::g_plan_counters;
 +    for (const auto& worker : gxq::g_worker_counters)
 +        c += worker;
-     struct {
-         const char* name;
-         unsigned long long value;
-@@ -1114,10 +2899,233 @@ void dol_aurora_flush_gap_report(void) {
-     flush_gxcore_gap_counters();
- }
- 
++    struct {
++        const char* name;
++        unsigned long long value;
++    } gaps[] = {
++        {"missing_vcd", c.missing_vcd},
++        {"vertex_decode_failures", c.vertex_decode_failures},
++        {"unsupported_texgen", c.unsupported_texgen},
++        {"per_vertex_tex_mtx", c.per_vertex_tex_mtx},
++        {"unresolved_tex_matrix", c.unresolved_tex_matrix},
++        {"normals_ignored", c.normals_ignored},
++        {"lighting_ignored", c.lighting_ignored},
++        {"tlut_texture", c.tlut_texture},
++        {"alpha_compare_ignored", c.alpha_compare_ignored},
++        {"tev_stages_over", c.tev_stages_over},
++        {"tev_multi_texmap", c.tev_multi_texmap},
++        {"efb_copy_ignored", c.efb_copy_ignored},
++        {"fog_ignored", c.fog_ignored},
++        {"indirect_ignored", c.indirect_ignored},
++        {"logic_op_ignored", c.logic_op_ignored},
++        {"postmtx_ignored", c.postmtx_ignored},
++        {"sampler_defaulted", c.sampler_defaulted},
++        {"scissor_defaulted", c.scissor_defaulted},
++        {"scissor_multi_rect", c.scissor_multi_rect},
++    };
++    for (const auto& gap : gaps) {
++        if (gap.value != 0)
++            gap_report_add("gxcore", gap.name, "", 0, "gxcore GapCounter",
++                           gap.value);
++    }
++    if (c.draws_skipped != 0)
++        gap_report_add("gxcore", "draws_skipped", "", 0, "plan.ok == false",
++                       c.draws_skipped);
++    if (g_core_rejected != 0)
++        gap_report_add("gxcore", "submit_rejected", "", 0,
++                       "draw rejected by the gxcore consumer", g_core_rejected);
++#else
++    (void)0;
++#endif
++}
++
++void dol_aurora_flush_gap_report(void) {
++    flush_gxcore_gap_counters();
++}
++
 +void dol_aurora_pump_events_if_idle(void) {
 +    if (!g_initialized || SDL_GetTicks() - g_last_present_ms < 100)
 +        return;
@@ -2166,11 +2219,60 @@ index d94f811..4bffea0 100644
 +}
 +
 +void dol_aurora_set_glow(float strength) {
-+#if GXRUNTIME_HAS_AURORA_RECOMP
+ #if GXRUNTIME_HAS_AURORA_RECOMP
+-    if (!g_gx_core_enabled)
+-        return;
+-    const gxruntime::gxcore::GapCounters& c = g_core_sink.counters();
+-    struct {
+-        const char* name;
+-        unsigned long long value;
+-    } gaps[] = {
+-        {"missing_vcd", c.missing_vcd},
+-        {"vertex_decode_failures", c.vertex_decode_failures},
+-        {"unsupported_texgen", c.unsupported_texgen},
+-        {"per_vertex_tex_mtx", c.per_vertex_tex_mtx},
+-        {"unresolved_tex_matrix", c.unresolved_tex_matrix},
+-        {"normals_ignored", c.normals_ignored},
+-        {"lighting_ignored", c.lighting_ignored},
+-        {"tlut_texture", c.tlut_texture},
+-        {"alpha_compare_ignored", c.alpha_compare_ignored},
+-        {"tev_stages_over", c.tev_stages_over},
+-        {"tev_multi_texmap", c.tev_multi_texmap},
+-        {"efb_copy_ignored", c.efb_copy_ignored},
+-        {"fog_ignored", c.fog_ignored},
+-        {"indirect_ignored", c.indirect_ignored},
+-        {"logic_op_ignored", c.logic_op_ignored},
+-        {"postmtx_ignored", c.postmtx_ignored},
+-        {"sampler_defaulted", c.sampler_defaulted},
+-        {"scissor_defaulted", c.scissor_defaulted},
+-        {"scissor_multi_rect", c.scissor_multi_rect},
+-    };
+-    for (const auto& gap : gaps) {
+-        if (gap.value != 0)
+-            gap_report_add("gxcore", gap.name, "", 0, "gxcore GapCounter",
+-                           gap.value);
+-    }
+-    if (c.draws_skipped != 0)
+-        gap_report_add("gxcore", "draws_skipped", "", 0, "plan.ok == false",
+-                       c.draws_skipped);
+-    if (g_core_rejected != 0)
+-        gap_report_add("gxcore", "submit_rejected", "", 0,
+-                       "draw rejected by the gxcore consumer", g_core_rejected);
 +    aurora::gfx::glow::set_strength(strength);
-+#else
+ #else
+-    (void)0;
 +    (void)strength;
-+#endif
+ #endif
+ }
+ 
+-void dol_aurora_flush_gap_report(void) {
+-    flush_gxcore_gap_counters();
++void dol_aurora_set_hdr(bool on) {
++    aurora::webgpu::set_hdr(on);
++}
++
++bool dol_aurora_hdr_available(void) {
++    return aurora::webgpu::hdr_available();
 +}
 +
 +void dol_aurora_set_aspect_mode(int mode) {
@@ -2249,8 +2351,8 @@ index d94f811..4bffea0 100644
 +    (void)ram;
 +    (void)size;
 +#endif
-+}
-+
+ }
+ 
  void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user) {
      g_efb_frame_fill = fn;
      g_efb_frame_fill_user = user;
@@ -2270,7 +2372,7 @@ index d94f811..4bffea0 100644
          aurora::gfx::efb_readback::set_continuous(true);
          aurora_request_framebuffer_readback();
      }
-@@ -1169,8 +3177,11 @@ void aurora_backend_present(void) {
+@@ -1169,8 +3189,11 @@ void aurora_backend_present(void) {
      // gxcore accumulates the frame's draws as their spans complete; the final
      // pending draw is only planned at the frame boundary. Submit it into the
      // still-open Aurora frame before end_frame flushes the command list.
@@ -2283,7 +2385,7 @@ index d94f811..4bffea0 100644
      // TEMP DIAG: per-frame gxcore gap-counter deltas so a live
      // goal celebration reveals which skip reason dominates (missing_vcd /
      // "projection never captured" vertex_decode_failures / cull_all_draws vs.
-@@ -1197,12 +3208,21 @@ void aurora_backend_present(void) {
+@@ -1197,12 +3220,21 @@ void aurora_backend_present(void) {
      }
  #endif
      if (g_frame_open) {
@@ -2307,7 +2409,7 @@ index d94f811..4bffea0 100644
          const std::uint8_t* rgba = nullptr;
          std::uint32_t w = 0;
          std::uint32_t h = 0;
-@@ -1212,6 +3232,109 @@ void aurora_backend_present(void) {
+@@ -1212,6 +3244,109 @@ void aurora_backend_present(void) {
          }
      }
      ++g_present_count;
@@ -2417,7 +2519,7 @@ index d94f811..4bffea0 100644
      if (g_frame_pacing_log &&
          (g_present_count <= 10 || (g_present_count % 60) == 0)) {
          const AuroraStats* stats = aurora_get_stats();
-@@ -1432,6 +3555,7 @@ void aurora_backend_present(void) {
+@@ -1432,6 +3567,7 @@ void aurora_backend_present(void) {
      const unsigned long long present_fifo = g_fifo_bytes;
      g_fifo_bytes = 0;
      poll_events();
@@ -2425,7 +2527,7 @@ index d94f811..4bffea0 100644
      if (!g_should_quit) {
          g_frame_open = aurora_begin_frame();
  #if GXRUNTIME_HAS_AURORA_RECOMP
-@@ -1482,7 +3606,13 @@ void aurora_backend_gx_write(u64 value, u8 size) {
+@@ -1482,7 +3618,13 @@ void aurora_backend_gx_write(u64 value, u8 size) {
          return;
      g_fifo_bytes += size;
  #if GXRUNTIME_HAS_AURORA_RECOMP
@@ -2440,7 +2542,7 @@ index d94f811..4bffea0 100644
      // Record AFTER the shadow write so MEM_UPDATEs its resolves emitted
      // precede this GX_WRITE in the trace (replay reads them first), and
      // BEFORE the live-Aurora forwarding below so the pristine value is
-@@ -1673,6 +3803,7 @@ void aurora_backend_set_guest_address_resolver(
+@@ -1673,6 +3815,7 @@ void aurora_backend_set_guest_address_resolver(
              &frontend_resolver, frontend_guest_address_resolver_bridge,
              nullptr);
          g_shadow_frontend.reset(&frontend_resolver);
@@ -2448,7 +2550,7 @@ index d94f811..4bffea0 100644
          g_shadow_frontend.set_packet_drain_enabled(g_shadow_frontend_enabled);
          g_shadow_packet_sink.reset();
          // Resolve packet guest addresses to host bytes through the frontend's
-@@ -1737,6 +3868,7 @@ void aurora_backend_set_xfb_black(bool black) {
+@@ -1737,6 +3880,7 @@ void aurora_backend_set_xfb_black(bool black) {
  }
  
  bool aurora_backend_pad_init(void) {
@@ -2456,7 +2558,7 @@ index d94f811..4bffea0 100644
      if (PADInit() == FALSE)
          return false;
  
-@@ -1780,6 +3912,7 @@ bool aurora_backend_pad_init(void) {
+@@ -1780,6 +3924,7 @@ bool aurora_backend_pad_init(void) {
  }
  
  u32 aurora_backend_pad_read(DolPadState state[4]) {
@@ -2464,7 +2566,7 @@ index d94f811..4bffea0 100644
      PADStatus status[4]{};
      const u32 motor_mask = PADRead(status);
      for (u32 i = 0; i < 4; i++) {
-@@ -1796,22 +3929,41 @@ u32 aurora_backend_pad_read(DolPadState state[4]) {
+@@ -1796,22 +3941,41 @@ u32 aurora_backend_pad_read(DolPadState state[4]) {
              .error = status[i].err,
          };
      }
@@ -2506,7 +2608,7 @@ index d94f811..4bffea0 100644
      PADSetSpec(spec);
  }
  
-@@ -1841,13 +3993,16 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1841,13 +4005,16 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
          return;
      const int bytes_per_second =
          static_cast<int>(g_audio_sample_rate) * 2 * static_cast<int>(sizeof(s16));
@@ -2525,7 +2627,7 @@ index d94f811..4bffea0 100644
      while (queued > max_queued_bytes && waited_ms < 20u) {
          g_audio_throttle_count++;
          if (g_audio_queue_log &&
-@@ -1860,11 +4015,51 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1860,11 +4027,51 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
                           max_queued_bytes);
          SDL_Delay(1);
          waited_ms++;
@@ -2577,7 +2679,7 @@ index d94f811..4bffea0 100644
      if (g_audio_queue_log &&
          (g_audio_push_count <= 16 || (g_audio_push_count % 4000) == 0 ||
           (low_queue && g_audio_push_count - g_audio_low_log_push >= 4000))) {
-@@ -1876,6 +4071,21 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1876,6 +4083,21 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
                       g_audio_push_count, queued, queued + bytes,
                       g_audio_playing ? 1u : 0u, g_audio_throttle_count);
      }
@@ -2599,7 +2701,7 @@ index d94f811..4bffea0 100644
      if (!SDL_PutAudioStreamData(g_audio_stream, samples, bytes))
          std::fprintf(stderr, "[audio] failed to queue samples: %s\n", SDL_GetError());
      else if (!g_audio_playing && queued + bytes >= prebuffer_bytes) {
-@@ -1886,10 +4096,455 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
+@@ -1886,10 +4108,455 @@ void aurora_backend_audio_push(const s16* samples, u32 frames) {
      }
  }
  
@@ -3055,7 +3157,7 @@ index d94f811..4bffea0 100644
      const DolPlatformOps ops = {
          .should_quit = aurora_backend_should_quit,
          .present = aurora_backend_present,
-@@ -1918,6 +4573,7 @@ void install_platform_ops() {
+@@ -1918,6 +4585,7 @@ void install_platform_ops() {
          .audio_set_sample_rate = aurora_backend_audio_set_sample_rate,
          .audio_push = aurora_backend_audio_push,
      };
@@ -3141,10 +3243,10 @@ index a13ce39..eb4d9fc 100644
   * EFB readback (GXRuntime recomp patch): arm a one-shot copy of the next
   * submitted frame's present source; take returns tightly packed RGBA8 rows
 diff --git a/graphics/aurora/lib/aurora.cpp b/graphics/aurora/lib/aurora.cpp
-index b09ef4d..1dd24f1 100644
+index b09ef4d..bcfa4c3 100644
 --- a/graphics/aurora/lib/aurora.cpp
 +++ b/graphics/aurora/lib/aurora.cpp
-@@ -1,5 +1,15 @@
+@@ -1,6 +1,17 @@
 +#include <chrono>
 +#include <algorithm>
 +#include <vector>
@@ -3158,9 +3260,11 @@ index b09ef4d..1dd24f1 100644
 +#include <cmath>
 +
  #ifdef AURORA_ENABLE_GX
++#include "gfx/glow.hpp"
  #include "gfx/common.hpp"
  #include "gfx/render_worker.hpp"
-@@ -22,6 +32,7 @@
+ #include "gfx/texture.hpp"
+@@ -22,6 +33,7 @@
  #include "window.hpp"
  
  #include <SDL3/SDL_filesystem.h>
@@ -3168,7 +3272,7 @@ index b09ef4d..1dd24f1 100644
  #include <magic_enum.hpp>
  
  #include "system_info.hpp"
-@@ -41,6 +52,238 @@ using webgpu::g_device;
+@@ -41,6 +53,268 @@ using webgpu::g_device;
  using webgpu::g_queue;
  using webgpu::g_surface;
  
@@ -3191,9 +3295,29 @@ index b09ef4d..1dd24f1 100644
 +  uint64_t size = 0;
 +  uint32_t width = 0, height = 0, bytesPerRow = 0, frame = 0;
 +  bool bgra = false;
++  bool half = false;
 +  std::atomic<bool> busy{false};
 +};
 +Slot g_slots[8];
++
++// A 16-bit float (linear, extended) value as an 8-bit sRGB one, divided by
++// AURORA_FRAME_DUMP_HDR_SCALE (1) first to see what goes past white.
++uint8_t half_to_srgb8(const uint8_t* p) {
++  const uint16_t h = static_cast<uint16_t>(p[0] | (p[1] << 8));
++  const uint32_t sign = (h >> 15) & 1u, exp = (h >> 10) & 0x1fu, mant = h & 0x3ffu;
++  float v = exp == 0 ? std::ldexp(static_cast<float>(mant), -24)
++          : exp == 31 ? 65504.f
++                      : std::ldexp(static_cast<float>(mant | 0x400u), static_cast<int>(exp) - 25);
++  if (sign != 0)
++    v = 0.f;
++  static const float scale = [] {
++    const char* e = std::getenv("AURORA_FRAME_DUMP_HDR_SCALE");
++    return e != nullptr && std::atof(e) > 0 ? static_cast<float>(std::atof(e)) : 1.f;
++  }();
++  v = std::min(v / scale, 1.f);
++  const float s = v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1.f / 2.4f) - 0.055f;
++  return static_cast<uint8_t>(std::lround(s * 255.f));
++}
 +uint32_t g_frame = 0;
 +
 +void write_ppm(std::string path, std::vector<uint8_t> rgb, uint32_t w, uint32_t h) {
@@ -3235,7 +3359,9 @@ index b09ef4d..1dd24f1 100644
 +    return nullptr;
 +  }
 +  const uint32_t width = texture.GetWidth(), height = texture.GetHeight();
-+  const uint32_t bytesPerRow = (width * 4u + 255u) & ~255u;
++  // An HDR surface is 16-bit float (8 bytes a pixel).
++  const bool half = texture.GetFormat() == wgpu::TextureFormat::RGBA16Float;
++  const uint32_t bytesPerRow = (width * (half ? 8u : 4u) + 255u) & ~255u;
 +  const uint64_t size = static_cast<uint64_t>(bytesPerRow) * height;
 +  if (!slot->buffer || slot->size != size) {
 +    const wgpu::BufferDescriptor desc{
@@ -3248,6 +3374,7 @@ index b09ef4d..1dd24f1 100644
 +  }
 +  const auto format = texture.GetFormat();
 +  slot->bgra = format == wgpu::TextureFormat::BGRA8Unorm || format == wgpu::TextureFormat::BGRA8UnormSrgb;
++  slot->half = half;
 +  slot->width = width;
 +  slot->height = height;
 +  slot->bytesPerRow = bytesPerRow;
@@ -3283,8 +3410,15 @@ index b09ef4d..1dd24f1 100644
 +          for (uint32_t y = 0; y < h; y++) {
 +            const uint8_t* row = data + static_cast<size_t>(y) * step * slot->bytesPerRow;
 +            for (uint32_t x = 0; x < w; x++) {
-+              const uint8_t* p = row + static_cast<size_t>(x) * step * 4u;
 +              uint8_t* o = &rgb[(static_cast<size_t>(y) * w + x) * 3u];
++              if (slot->half) {
++                const uint8_t* p = row + static_cast<size_t>(x) * step * 8u;
++                o[0] = half_to_srgb8(p);
++                o[1] = half_to_srgb8(p + 2);
++                o[2] = half_to_srgb8(p + 4);
++                continue;
++              }
++              const uint8_t* p = row + static_cast<size_t>(x) * step * 4u;
 +              o[0] = slot->bgra ? p[2] : p[0];
 +              o[1] = p[1];
 +              o[2] = slot->bgra ? p[0] : p[2];
@@ -3407,7 +3541,7 @@ index b09ef4d..1dd24f1 100644
  uint32_t clamp_scissor_coord(double value, uint32_t maximum) noexcept {
    if (!std::isfinite(value)) {
      return 0;
-@@ -106,7 +349,14 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
+@@ -106,7 +380,14 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
    } else {
      g_config.userPath = strdup(g_config.userPath);
    }
@@ -3423,7 +3557,7 @@ index b09ef4d..1dd24f1 100644
      g_config.cachePath = SDL_GetPrefPath(nullptr, g_config.appName);
    } else {
      g_config.cachePath = strdup(g_config.cachePath);
-@@ -248,6 +498,33 @@ bool begin_frame() noexcept {
+@@ -248,6 +529,33 @@ bool begin_frame() noexcept {
    return true;
  }
  
@@ -3457,7 +3591,7 @@ index b09ef4d..1dd24f1 100644
  void end_frame() noexcept {
    ZoneScoped;
  #ifdef AURORA_ENABLE_GX
-@@ -257,10 +534,38 @@ void end_frame() noexcept {
+@@ -257,10 +565,38 @@ void end_frame() noexcept {
  
    // E7 present-from-XFB: VI current → GPU Virtual-XFB, else YUYV-from-RAM
    // decode, else EFB-direct (Strikers when no RAM XFB / match fails).
@@ -3498,7 +3632,7 @@ index b09ef4d..1dd24f1 100644
    const uint32_t contentW =
        xfbTex && *xfbTex ? (*xfbTex)->size.width : efbSource.size.width;
    const uint32_t contentH =
-@@ -282,28 +587,37 @@ void end_frame() noexcept {
+@@ -282,28 +618,37 @@ void end_frame() noexcept {
    // Capture XFB handle by value for the worker lambda (shared_ptr).
    gfx::TextureHandle xfbHandle = (xfbTex && *xfbTex) ? *xfbTex : nullptr;
  
@@ -3551,7 +3685,7 @@ index b09ef4d..1dd24f1 100644
        wgpu::BindGroup presentBindGroup;
        if (rmlBindGroup && !rmlOverlay) {
          presentBindGroup = rmlBindGroup;
-@@ -318,7 +632,7 @@ void end_frame() noexcept {
+@@ -318,7 +663,7 @@ void end_frame() noexcept {
          };
          presentBindGroup = webgpu::create_copy_bind_group(xfbSrc);
        } else {
@@ -3560,7 +3694,7 @@ index b09ef4d..1dd24f1 100644
          presentBindGroup = webgpu::create_copy_bind_group(resampledSource);
        }
        {
-@@ -333,16 +647,20 @@ void end_frame() noexcept {
+@@ -333,20 +678,30 @@ void end_frame() noexcept {
              .label = xfbHandle ? "XFB present render pass" : "EFB copy render pass",
              .colorAttachmentCount = attachments.size(),
              .colorAttachments = attachments.data(),
@@ -3574,21 +3708,35 @@ index b09ef4d..1dd24f1 100644
 -        pass.SetBindGroup(0, presentBindGroup, 0, nullptr);
 -        set_present_viewport(pass, viewport, webgpu::g_graphicsConfig.surfaceConfiguration.width,
 -                             webgpu::g_graphicsConfig.surfaceConfiguration.height);
+-
+-        pass.Draw(3);
 +        // VI black: the clear alone (black), unless a full-screen UI page is
 +        // the source.
++        // GXRuntime recomp patch: HDR draws onto the float surface, the
++        // game's frame with its glow past white (gfx/glow.hpp).
 +        if (!viBlack || (rmlBindGroup && !rmlOverlay)) {
-+          pass.SetPipeline(webgpu::g_CopyPipeline);
-+          pass.SetBindGroup(0, presentBindGroup, 0, nullptr);
 +          set_present_viewport(pass, viewport, webgpu::g_graphicsConfig.surfaceConfiguration.width,
 +                               webgpu::g_graphicsConfig.surfaceConfiguration.height);
- 
--        pass.Draw(3);
-+          pass.Draw(3);
++          if (!webgpu::g_hdrActive ||
++              !gfx::glow::present_hdr(pass, presentBindGroup, !(rmlBindGroup && !rmlOverlay))) {
++            pass.SetPipeline(webgpu::g_CopyPipeline);
++            pass.SetBindGroup(0, presentBindGroup, 0, nullptr);
++            pass.Draw(3);
++          }
 +        }
          if (rmlBindGroup && rmlOverlay) {
-           pass.SetPipeline(webgpu::g_CopyPremultipliedAlphaPipeline);
-           pass.SetBindGroup(0, rmlBindGroup, 0, nullptr);
-@@ -362,67 +680,185 @@ void end_frame() noexcept {
+-          pass.SetPipeline(webgpu::g_CopyPremultipliedAlphaPipeline);
+-          pass.SetBindGroup(0, rmlBindGroup, 0, nullptr);
+-          pass.Draw(3);
++          if (!webgpu::g_hdrActive || !gfx::glow::present_hdr_overlay(pass, rmlBindGroup)) {
++            pass.SetPipeline(webgpu::g_CopyPremultipliedAlphaPipeline);
++            pass.SetBindGroup(0, rmlBindGroup, 0, nullptr);
++            pass.Draw(3);
++          }
+         }
+         pass.End();
+       }
+@@ -362,67 +717,187 @@ void end_frame() noexcept {
              .label = "ImGui render pass",
              .colorAttachmentCount = attachments.size(),
              .colorAttachments = attachments.data(),
@@ -3599,7 +3747,10 @@ index b09ef4d..1dd24f1 100644
 +        const auto pass = enc.BeginRenderPass(&renderPassDescriptor);
          pass.SetViewport(0.f, 0.f, static_cast<float>(webgpu::g_graphicsConfig.surfaceConfiguration.width),
                           static_cast<float>(webgpu::g_graphicsConfig.surfaceConfiguration.height), 0.f, 1.f);
-         imgui::render(pass, imguiDrawData);
+-        imgui::render(pass, imguiDrawData);
++        // (ImGui's pipelines are made for the internal format.)
++        if (!webgpu::g_hdrActive)
++          imgui::render(pass, imguiDrawData);
          pass.End();
        }
 -    } else {
@@ -3793,7 +3944,7 @@ index b09ef4d..1dd24f1 100644
      gfx::after_submit();
  
      TracyPlotConfig("aurora: lastVertSize", tracy::PlotFormatType::Memory, false, true, 0);
-@@ -440,7 +876,7 @@ void end_frame() noexcept {
+@@ -440,7 +915,7 @@ void end_frame() noexcept {
      TracyPlot("aurora: lastIndexSize", static_cast<int64_t>(gfx::g_stats.lastIndexSize));
      TracyPlot("aurora: lastStorageSize", static_cast<int64_t>(gfx::g_stats.lastStorageSize));
      TracyPlot("aurora: lastTextureUploadSize", static_cast<int64_t>(gfx::g_stats.lastTextureUploadSize));
@@ -3802,7 +3953,7 @@ index b09ef4d..1dd24f1 100644
  
  #endif
  }
-@@ -475,6 +911,38 @@ void aurora_set_resampler(AuroraSampler sampler) {
+@@ -475,6 +950,38 @@ void aurora_set_resampler(AuroraSampler sampler) {
    (void)sampler;
  #endif
  }
@@ -3841,6 +3992,73 @@ index b09ef4d..1dd24f1 100644
 +    }
 +  }
 +}
+diff --git a/graphics/aurora/lib/dawn/BackendBinding.cpp b/graphics/aurora/lib/dawn/BackendBinding.cpp
+index bb8fba4..cbc058c 100644
+--- a/graphics/aurora/lib/dawn/BackendBinding.cpp
++++ b/graphics/aurora/lib/dawn/BackendBinding.cpp
+@@ -43,4 +43,8 @@ std::shared_ptr<wgpu::ChainedStruct> SetupWindowAndGetSurfaceDescriptor(SDL_Wind
+ #endif
+ }
+ 
++#if !defined(SDL_PLATFORM_MACOS) && !defined(SDL_PLATFORM_IOS) && !defined(SDL_PLATFORM_TVOS)
++bool SetSurfaceExtendedRange(bool) { return false; }
++#endif
++
+ } // namespace aurora::webgpu::utils
+diff --git a/graphics/aurora/lib/dawn/BackendBinding.hpp b/graphics/aurora/lib/dawn/BackendBinding.hpp
+index ac49d5c..25be805 100644
+--- a/graphics/aurora/lib/dawn/BackendBinding.hpp
++++ b/graphics/aurora/lib/dawn/BackendBinding.hpp
+@@ -9,4 +9,10 @@ namespace aurora::webgpu::utils {
+ 
+ std::shared_ptr<wgpu::ChainedStruct> SetupWindowAndGetSurfaceDescriptor(SDL_Window* window);
+ 
++// GXRuntime recomp patch: HDR on macOS. Dawn leaves the CAMetalLayer's colour
++// space alone, so a 16-bit float surface shows clamped; this turns the
++// layer's extended dynamic range (extended linear sRGB) on or off. False
++// where there is no such layer (other platforms).
++bool SetSurfaceExtendedRange(bool on);
++
+ } // namespace aurora::webgpu::utils
+diff --git a/graphics/aurora/lib/dawn/MetalBinding.mm b/graphics/aurora/lib/dawn/MetalBinding.mm
+index 421bd9e..0cbf52d 100644
+--- a/graphics/aurora/lib/dawn/MetalBinding.mm
++++ b/graphics/aurora/lib/dawn/MetalBinding.mm
+@@ -1,13 +1,34 @@
+ #include "BackendBinding.hpp"
+ 
+ #import <Foundation/Foundation.h>
++#import <QuartzCore/CAMetalLayer.h>
+ #include <SDL3/SDL_metal.h>
+ 
+ namespace aurora::webgpu::utils {
++static CAMetalLayer* g_layer = nil;
++
+ std::shared_ptr<wgpu::ChainedStruct> SetupWindowAndGetSurfaceDescriptorCocoa(SDL_Window* window) {
+   SDL_MetalView view = SDL_Metal_CreateView(window);
+   std::shared_ptr<wgpu::SurfaceSourceMetalLayer> desc = std::make_shared<wgpu::SurfaceSourceMetalLayer>();
+   desc->layer = SDL_Metal_GetLayer(view);
++  g_layer = (__bridge CAMetalLayer*)desc->layer;
+   return std::move(desc);
+ }
++
++bool SetSurfaceExtendedRange(bool on) {
++  CAMetalLayer* layer = g_layer;
++  if (layer == nil)
++    return false;
++  void (^apply)(void) = ^{
++    layer.wantsExtendedDynamicRangeContent = on;
++    CGColorSpaceRef space = CGColorSpaceCreateWithName(on ? kCGColorSpaceExtendedLinearSRGB : kCGColorSpaceSRGB);
++    layer.colorspace = space;
++    CGColorSpaceRelease(space);
++  };
++  if ([NSThread isMainThread])
++    apply();
++  else
++    dispatch_sync(dispatch_get_main_queue(), apply);
++  return true;
++}
+ } // namespace aurora::webgpu::utils
 diff --git a/graphics/aurora/lib/gfx/common.cpp b/graphics/aurora/lib/gfx/common.cpp
 index a64dd2d..fa3a4df 100644
 --- a/graphics/aurora/lib/gfx/common.cpp
@@ -4405,10 +4623,10 @@ index 7af8fca..4c14e34 100644
    else
 diff --git a/graphics/aurora/lib/gfx/glow.cpp b/graphics/aurora/lib/gfx/glow.cpp
 new file mode 100644
-index 0000000..64246c9
+index 0000000..76e7b4c
 --- /dev/null
 +++ b/graphics/aurora/lib/gfx/glow.cpp
-@@ -0,0 +1,370 @@
+@@ -0,0 +1,499 @@
 +#include "glow.hpp"
 +
 +#include "../webgpu/gpu_prof.hpp"
@@ -4439,7 +4657,7 @@ index 0000000..64246c9
 +}
 +@group(0) @binding(0) var src: texture_2d<f32>;
 +@group(0) @binding(1) var samp: sampler;
-+struct Params { a: vec4f, b: vec4f };
++struct Params { a: vec4f, b: vec4f, c: vec4f };
 +@group(0) @binding(2) var<uniform> params: Params;
 +fn tap(uv: vec2f, t: vec2f, x: f32, y: f32) -> vec3f {
 +  return textureSampleLevel(src, samp, uv + t * vec2f(x, y), 0.0).rgb;
@@ -4498,6 +4716,52 @@ index 0000000..64246c9
 +}
 +)";
 +
++// HDR present (the window's 16-bit extended linear sRGB surface): the frame
++// and its glow added in the game's own (sRGB) values, then made linear with
++// the curve carried on past 1.0, so all that reached white in SDR now goes
++// brighter. c = (paper white, glow gain, peak, 0).
++constexpr const char* kPresentShader = R"(
++@group(0) @binding(0) var efb_sampler: sampler;
++@group(0) @binding(1) var efb_texture: texture_2d<f32>;
++struct Params { a: vec4f, b: vec4f, c: vec4f };
++@group(1) @binding(0) var src: texture_2d<f32>;
++@group(1) @binding(1) var samp: sampler;
++@group(1) @binding(2) var<uniform> params: Params;
++struct VOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
++@vertex fn vs(@builtin(vertex_index) i: u32) -> VOut {
++  let p = vec2f(f32((i << 1u) & 2u), f32(i & 2u));
++  var o: VOut;
++  o.pos = vec4f(p.x * 2.0 - 1.0, 1.0 - p.y * 2.0, 0.0, 1.0);
++  o.uv = p;
++  return o;
++}
++fn to_linear(c: vec3f) -> vec3f {
++  let v = max(c, vec3f(0.0));
++  return select(pow((v + 0.055) / 1.055, vec3f(2.4)), v / 12.92, v <= vec3f(0.04045));
++}
++fn tap(uv: vec2f, t: vec2f, x: f32, y: f32) -> vec3f {
++  return textureSampleLevel(src, samp, uv + t * vec2f(x, y), 0.0).rgb;
++}
++fn tent(uv: vec2f) -> vec3f {
++  let t = 1.0 / vec2f(textureDimensions(src));
++  return (tap(uv, t, -1.0, -1.0) + tap(uv, t, 1.0, -1.0) + tap(uv, t, -1.0, 1.0) + tap(uv, t, 1.0, 1.0)
++        + 2.0 * (tap(uv, t, 0.0, -1.0) + tap(uv, t, -1.0, 0.0) + tap(uv, t, 1.0, 0.0) + tap(uv, t, 0.0, 1.0))
++        + 4.0 * tap(uv, t, 0.0, 0.0)) / 16.0;
++}
++@fragment fn present(in: VOut) -> @location(0) vec4f {
++  let c = textureSample(efb_texture, efb_sampler, in.uv).rgb;
++  let g = tent(in.uv) * params.a.x * params.c.y;
++  let lin = min(to_linear(c + g) * params.c.x, vec3f(params.c.z));
++  return vec4f(lin, 1.0);
++}
++// A page drawn over the picture (premultiplied alpha).
++@fragment fn overlay(in: VOut) -> @location(0) vec4f {
++  let c = textureSample(efb_texture, efb_sampler, in.uv);
++  let rgb = select(vec3f(0.0), to_linear(c.rgb / c.a) * c.a, c.a > 0.0) * params.c.x;
++  return vec4f(rgb, c.a);
++}
++)";
++
 +float env_float(const char* name, float fallback) {
 +  const char* e = std::getenv(name);
 +  return e != nullptr ? static_cast<float>(std::atof(e)) : fallback;
@@ -4511,6 +4775,11 @@ index 0000000..64246c9
 +const float g_saturation = env_float("AURORA_GLOW_SATURATION", 1.5f);
 +const float g_spread = env_float("AURORA_GLOW_SPREAD", 0.85f);
 +const float g_cap = env_float("AURORA_GLOW_CAP", 0.3f);
++// HDR (AURORA_HDR_* for testing): SDR white's level on the surface (1.0 =
++// the system's own SDR white), the glow's gain over SDR, the brightest output.
++const float g_paper = env_float("AURORA_HDR_PAPER", 1.0f);
++const float g_hdrGain = env_float("AURORA_HDR_GLOW", 1.0f);
++const float g_peak = env_float("AURORA_HDR_PEAK", 8.0f);
 +// AURORA_GLOW_SHOW=1 (testing): the frame shows the glow buffer (what glows)
 +// instead of the game.
 +const bool g_show = std::getenv("AURORA_GLOW_SHOW") != nullptr;
@@ -4532,6 +4801,7 @@ index 0000000..64246c9
 +wgpu::Extent3D g_size{};
 +uint32_t g_samples = 0;
 +bool g_drawn = false;      // glow drawn since the last compose
++bool g_presentGlow = false; // level 0 holds the shown frame's glow (HDR present)
 +bool g_needClear = true;   // next glow pass starts from black
 +
 +wgpu::ShaderModule g_module;
@@ -4598,7 +4868,7 @@ index 0000000..64246c9
 +      wgpu::BindGroupLayoutEntry{
 +          .binding = 2,
 +          .visibility = wgpu::ShaderStage::Fragment,
-+          .buffer = {.type = wgpu::BufferBindingType::Uniform, .minBindingSize = 32},
++          .buffer = {.type = wgpu::BufferBindingType::Uniform, .minBindingSize = 48},
 +      },
 +  };
 +  const wgpu::BindGroupLayoutDescriptor layoutDesc{
@@ -4616,7 +4886,7 @@ index 0000000..64246c9
 +  };
 +  g_sampler = g_device.CreateSampler(&samplerDesc);
 +  const wgpu::BufferDescriptor bufferDesc{
-+      .label = "Glow", .usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst, .size = 32};
++      .label = "Glow", .usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst, .size = 48};
 +  g_uniform = g_device.CreateBuffer(&bufferDesc);
 +  g_down = make_pipeline("down", kFormat, false, false);
 +  g_up = make_pipeline("up", kFormat, true, false);
@@ -4628,7 +4898,7 @@ index 0000000..64246c9
 +  const std::array entries{
 +      wgpu::BindGroupEntry{.binding = 0, .textureView = view},
 +      wgpu::BindGroupEntry{.binding = 1, .sampler = g_sampler},
-+      wgpu::BindGroupEntry{.binding = 2, .buffer = g_uniform, .size = 32},
++      wgpu::BindGroupEntry{.binding = 2, .buffer = g_uniform, .size = 48},
 +  };
 +  const wgpu::BindGroupDescriptor groupDesc{
 +      .label = label, .layout = g_layout, .entryCount = entries.size(), .entries = entries.data()};
@@ -4707,7 +4977,8 @@ index 0000000..64246c9
 +  const float s = g_strength.load(std::memory_order_relaxed);
 +  if (s == g_uniformValue)
 +    return;
-+  const float value[8]{s, g_threshold, g_knee, g_scene, g_saturation, g_spread, g_cap, 0.f};
++  const float value[12]{s, g_threshold, g_knee, g_scene, g_saturation, g_spread, g_cap, 0.f,
++                        g_paper, g_hdrGain, g_peak, 0.f};
 +  g_queue.WriteBuffer(g_uniform, 0, value, sizeof value);
 +  g_uniformValue = s;
 +}
@@ -4775,16 +5046,92 @@ index 0000000..64246c9
 +    draw(cmd, g_down, g_levels[i - 1].source, g_levels[i].view, false, "Glow down");
 +  for (size_t i = g_levels.size() - 1; i-- > 0;)
 +    draw(cmd, g_up, g_levels[i + 1].source, g_levels[i].view, true, "Glow up");
++  g_presentGlow = true;
++  // HDR: the present adds it, past white.
++  if (webgpu::g_hdrActive && !g_show)
++    return;
 +  draw(cmd, compose, g_levels[0].source, dst, true, "Glow compose");
++}
++
++namespace {
++wgpu::RenderPipeline g_presentPipeline, g_overlayPipeline;
++wgpu::TextureFormat g_presentPipelineFormat = wgpu::TextureFormat::Undefined;
++Level g_black; // no glow (1x1, zeroed)
++
++wgpu::RenderPipeline make_present_pipeline(const wgpu::ShaderModule& module, const char* entry, bool overlay) {
++  const std::array layouts{webgpu::g_CopyBindGroupLayout, g_layout};
++  const wgpu::PipelineLayoutDescriptor layoutDesc{
++      .label = "HDR present", .bindGroupLayoutCount = layouts.size(), .bindGroupLayouts = layouts.data()};
++  const auto layout = g_device.CreatePipelineLayout(&layoutDesc);
++  const wgpu::BlendState premultiplied{
++      .color = {.operation = wgpu::BlendOperation::Add,
++                .srcFactor = wgpu::BlendFactor::One,
++                .dstFactor = wgpu::BlendFactor::OneMinusSrcAlpha},
++      .alpha = {.operation = wgpu::BlendOperation::Add,
++                .srcFactor = wgpu::BlendFactor::One,
++                .dstFactor = wgpu::BlendFactor::OneMinusSrcAlpha},
++  };
++  const wgpu::ColorTargetState target{
++      .format = webgpu::g_presentFormat,
++      .blend = overlay ? &premultiplied : nullptr,
++  };
++  const wgpu::FragmentState fragment{.module = module, .entryPoint = entry, .targetCount = 1, .targets = &target};
++  const wgpu::RenderPipelineDescriptor desc{
++      .label = "HDR present",
++      .layout = layout,
++      .vertex = {.module = module, .entryPoint = "vs"},
++      .primitive = {.topology = wgpu::PrimitiveTopology::TriangleList},
++      .fragment = &fragment,
++  };
++  return g_device.CreateRenderPipeline(&desc);
++}
++
++bool ready_present() {
++  init_shared();
++  if (!g_black.texture)
++    g_black = make_level(1, 1, "No glow");
++  if (g_presentPipelineFormat != webgpu::g_presentFormat) {
++    wgpu::ShaderSourceWGSL source{};
++    source.code = kPresentShader;
++    const wgpu::ShaderModuleDescriptor moduleDesc{.nextInChain = &source, .label = "HDR present"};
++    const auto module = g_device.CreateShaderModule(&moduleDesc);
++    g_presentPipeline = make_present_pipeline(module, "present", false);
++    g_overlayPipeline = make_present_pipeline(module, "overlay", true);
++    g_presentPipelineFormat = webgpu::g_presentFormat;
++  }
++  write_params();
++  return g_presentPipeline != nullptr;
++}
++} // namespace
++
++bool present_hdr(const wgpu::RenderPassEncoder& pass, const wgpu::BindGroup& source, bool withGlow) {
++  if (!ready_present())
++    return false;
++  const bool glow = withGlow && g_presentGlow && !g_levels.empty() && strength() > 0.f;
++  pass.SetPipeline(g_presentPipeline);
++  pass.SetBindGroup(0, source, 0, nullptr);
++  pass.SetBindGroup(1, glow ? g_levels[0].source : g_black.source, 0, nullptr);
++  pass.Draw(3);
++  return true;
++}
++
++bool present_hdr_overlay(const wgpu::RenderPassEncoder& pass, const wgpu::BindGroup& source) {
++  if (!ready_present())
++    return false;
++  pass.SetPipeline(g_overlayPipeline);
++  pass.SetBindGroup(0, source, 0, nullptr);
++  pass.SetBindGroup(1, g_black.source, 0, nullptr);
++  pass.Draw(3);
++  return true;
 +}
 +
 +} // namespace aurora::gfx::glow
 diff --git a/graphics/aurora/lib/gfx/glow.hpp b/graphics/aurora/lib/gfx/glow.hpp
 new file mode 100644
-index 0000000..67256c2
+index 0000000..1a9ddd9
 --- /dev/null
 +++ b/graphics/aurora/lib/gfx/glow.hpp
-@@ -0,0 +1,36 @@
+@@ -0,0 +1,42 @@
 +#pragma once
 +
 +// GXRuntime recomp patch: glow (bloom). A draw that adds light to the screen
@@ -4819,6 +5166,12 @@ index 0000000..67256c2
 +// rect of the EFB's size), then clear the glow for the next frame. Nothing
 +// when no glow was drawn since the last display.
 +void compose(const wgpu::CommandEncoder& cmd, const wgpu::TextureView& dst, wgpu::TextureFormat format);
++
++// HDR (webgpu::g_hdrActive): draw the picture (a copy bind group) onto the
++// window's float surface, with the shown frame's glow added past white when
++// withGlow; and a premultiplied page over it. False if it can't.
++bool present_hdr(const wgpu::RenderPassEncoder& pass, const wgpu::BindGroup& source, bool withGlow);
++bool present_hdr_overlay(const wgpu::RenderPassEncoder& pass, const wgpu::BindGroup& source);
 +
 +} // namespace aurora::gfx::glow
 diff --git a/graphics/aurora/lib/gfx/gxcore_draw.cpp b/graphics/aurora/lib/gfx/gxcore_draw.cpp
@@ -7706,7 +8059,7 @@ index 02adbe1..bcc38f3 100644
  }
  
 diff --git a/graphics/aurora/lib/webgpu/gpu.cpp b/graphics/aurora/lib/webgpu/gpu.cpp
-index 7aff76e..7c19543 100644
+index 7aff76e..7f1ea96 100644
 --- a/graphics/aurora/lib/webgpu/gpu.cpp
 +++ b/graphics/aurora/lib/webgpu/gpu.cpp
 @@ -1,3 +1,4 @@
@@ -7714,7 +8067,26 @@ index 7aff76e..7c19543 100644
  #include "gpu.hpp"
  
  #include <algorithm>
-@@ -932,6 +933,11 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+@@ -46,7 +47,7 @@ TextureWithSampler g_frameBufferResolved;
+ TextureWithSampler g_depthBuffer;
+ 
+ // EFB -> XFB copy pipeline
+-static wgpu::BindGroupLayout g_CopyBindGroupLayout;
++wgpu::BindGroupLayout g_CopyBindGroupLayout;
+ wgpu::RenderPipeline g_CopyPipeline;
+ wgpu::RenderPipeline g_CopyPremultipliedAlphaPipeline;
+ wgpu::BindGroup g_CopyBindGroup;
+@@ -60,6 +61,9 @@ static wgpu::Adapter g_adapter;
+ wgpu::Instance g_instance;
+ wgpu::AdapterInfo g_adapterInfo;
+ static wgpu::SurfaceCapabilities g_surfaceCapabilities;
++bool g_hdrActive = false;
++wgpu::TextureFormat g_presentFormat = wgpu::TextureFormat::Undefined;
++static bool g_hdrWanted = std::getenv("AURORA_HDR") != nullptr;  // AURORA_HDR=1 (testing)
+ bool g_hasCoreFeatures = false;
+ bool g_bcTexturesSupported = false;
+ bool g_astcTexturesSupported = false;
+@@ -932,6 +936,11 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
        if (feature == wgpu::FeatureName::TimestampQuery) {
          requiredFeatures.push_back(feature);
        }
@@ -7726,7 +8098,7 @@ index 7aff76e..7c19543 100644
  #endif
      }
      // Stash for GraphicsConfig fill after device create (device request below).
-@@ -1051,7 +1057,11 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+@@ -1051,7 +1060,11 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
        .surfaceConfiguration =
            wgpu::SurfaceConfiguration{
                .format = surfaceFormat,
@@ -7739,6 +8111,72 @@ index 7aff76e..7c19543 100644
                .width = size.native_fb_width,
                .height = size.native_fb_height,
                .presentMode = presentMode,
+@@ -1123,9 +1136,19 @@ static void resize_swapchain_internal(uint32_t width, uint32_t height, uint32_t
+   g_graphicsConfig.surfaceConfiguration.height = nativeHeight;
+   auto surfaceConfiguration = g_graphicsConfig.surfaceConfiguration;
+   surfaceConfiguration.device = g_device;
++  // HDR: the surface alone goes 16-bit float; its layer is told it holds
++  // extended linear sRGB once configured (this Dawn takes no colour space).
++  g_hdrActive = g_hdrWanted && hdr_available();
++  if (g_hdrActive)
++    surfaceConfiguration.format = wgpu::TextureFormat::RGBA16Float;
++  if (g_presentFormat != surfaceConfiguration.format)
++    Log.info("Present format {} (HDR {})", magic_enum::enum_name(surfaceConfiguration.format),
++             g_hdrActive ? "on" : "off");
++  g_presentFormat = surfaceConfiguration.format;
+   {
+     window::SurfaceLock surfaceLock;
+     g_surface.Configure(&surfaceConfiguration);
++    utils::SetSurfaceExtendedRange(g_hdrActive);
+   }
+   g_frameBuffer = create_render_texture(width, height, true);
+   g_frameBufferResolved = create_render_texture(width, height, false);
+@@ -1133,6 +1156,24 @@ static void resize_swapchain_internal(uint32_t width, uint32_t height, uint32_t
+   g_CopyBindGroup = create_copy_bind_group(present_source());
+ }
+ 
++bool hdr_available() noexcept {
++#if !defined(__APPLE__)
++  return false;  // the extended-range layer is macOS's (MetalBinding.mm) so far
++#endif
++  for (size_t i = 0; i < g_surfaceCapabilities.formatCount; ++i)
++    if (g_surfaceCapabilities.formats[i] == wgpu::TextureFormat::RGBA16Float)
++      return true;
++  return false;
++}
++
++void set_hdr(bool on) noexcept {
++  if (on == g_hdrWanted)
++    return;
++  g_hdrWanted = on;
++  if (g_device)  // else the first configure picks it up
++    window::push_custom_event(window::CustomEvent::RefreshSurface);
++}
++
+ bool refresh_surface(bool recreate) {
+   gfx::gpu_synchronize();
+   if (!g_instance || !g_device) {
+diff --git a/graphics/aurora/lib/webgpu/gpu.hpp b/graphics/aurora/lib/webgpu/gpu.hpp
+index cd65d98..057fcf0 100644
+--- a/graphics/aurora/lib/webgpu/gpu.hpp
++++ b/graphics/aurora/lib/webgpu/gpu.hpp
+@@ -60,6 +60,16 @@ extern bool g_bcTexturesSupported;
+ extern bool g_astcTexturesSupported;
+ extern bool g_textureComponentSwizzleSupported;
+ 
++// GXRuntime recomp patch: HDR. While on (and the surface offers it) the
++// window's surface is 16-bit float in extended linear sRGB: the picture keeps
++// its SDR white at 1.0 and light (glow.hpp) can go past it. Everything drawn
++// before the present keeps the internal format (surfaceConfiguration.format).
++extern bool g_hdrActive;
++extern wgpu::TextureFormat g_presentFormat;
++extern wgpu::BindGroupLayout g_CopyBindGroupLayout;
++void set_hdr(bool on) noexcept;
++bool hdr_available() noexcept;
++
+ bool initialize(AuroraBackend backend, bool allowCpu);
+ void shutdown();
+ void release_surface() noexcept;
 diff --git a/graphics/aurora/lib/webgpu/gpu_cache.cpp b/graphics/aurora/lib/webgpu/gpu_cache.cpp
 index acfa041..053f821 100644
 --- a/graphics/aurora/lib/webgpu/gpu_cache.cpp
@@ -12106,7 +12544,7 @@ index 9c2f7bb..6dd6411 100644
 +
  #endif
 diff --git a/include/gxruntime/aurora_backend.h b/include/gxruntime/aurora_backend.h
-index 6ef4cf4..4d3bc64 100644
+index 6ef4cf4..bd6e2ea 100644
 --- a/include/gxruntime/aurora_backend.h
 +++ b/include/gxruntime/aurora_backend.h
 @@ -5,6 +5,7 @@
@@ -12150,7 +12588,7 @@ index 6ef4cf4..4d3bc64 100644
  
  // C2: walk nonzero gxcore GapCounters into the process-global gap_report.
  // Call once before gap_report_write_json on the live Strikers path so
-@@ -40,6 +55,172 @@ void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user);
+@@ -40,6 +55,175 @@ void dol_aurora_set_efb_frame_fill(DolAuroraEfbFrameFillFn fn, void* user);
  // from shutdown (second call only bumps if counters grew).
  void dol_aurora_flush_gap_report(void);
  
@@ -12295,6 +12733,9 @@ index 6ef4cf4..4d3bc64 100644
 +void dol_aurora_set_widescreen_hud(bool edges);
 +// Glow round what adds light (lamps, flames, magick): 0 = off, about 1-2 on.
 +void dol_aurora_set_glow(float strength);
++// HDR output (a 16-bit extended-range surface) when the display offers it.
++void dol_aurora_set_hdr(bool on);
++bool dol_aurora_hdr_available(void);
 +// Audio queued ahead of the output before playback starts (latency vs. gaps).
 +void dol_aurora_set_audio_buffer_ms(int ms);
 +// Frame rate (frames in between, blended from the last two game frames, on a

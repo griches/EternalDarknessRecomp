@@ -731,6 +731,14 @@ void build_options() {
     glow.change = [](int dir) { cycle(g_settings.glow, 3, dir); };
     g_rows.push_back(glow);
 
+    Row hdr{"HDR", on_off(g_settings.hdr)};
+    hdr.page = 1;
+    hdr.note = dol_aurora_hdr_available()
+                   ? "On an HDR display, glowing light shines brighter than white."
+                   : "Needs an HDR display (on a Mac, its XDR screen or an HDR monitor).";
+    hdr.change = [](int) { g_settings.hdr = !g_settings.hdr; };
+    g_rows.push_back(hdr);
+
     if (g_options_return == Screen::Launcher && !g_disc_on_main) {
         Row disc = disc_row();
         disc.page = 1;

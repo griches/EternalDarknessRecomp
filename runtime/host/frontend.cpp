@@ -1532,8 +1532,10 @@ ImTextureID glyph(const std::string& set, const std::string& name) {
 // test pattern in place of the picture (dol_aurora_set_hdr_pattern), with
 // this caption under it. 1 peak: the ring (the most a signal asks for) in a
 // box at the chosen peak disappears once the box reaches what the display
-// shows. 2 brightness: the game picture, SDR white to taste. 3 black: a ring
-// a shade above black, set to only just visible.
+// shows. 2 brightness: the game picture, SDR white to taste. 3 black: the
+// game picture again, its blacks as deep as looks right (a ring a shade above
+// black stayed visible well past too dark). Before the game starts there is
+// no picture: grey steps instead, the darkest ones for the black level.
 void draw_hdr_calibration_caption(int step) {
     if (ImGui::GetCurrentContext() == nullptr)
         return;
@@ -1541,12 +1543,15 @@ void draw_hdr_calibration_caption(int step) {
     static const char* const kHelp[3] = {
         "Raise it until the ring in the box disappears, then go back one step.",
         "How bright the picture is: set it so the game looks right to you.",
-        "Set it so the ring is only just visible against the black.",
+        "How deep the blacks are: lower it until black looks black, before the shadows lose their detail.",
     };
     // Before the game starts there is no picture: grey steps instead.
-    const char* const help = step == 1 && !g_in_game
-                                 ? "How bright the picture is: set the grey steps' white to a comfortable brightness."
-                                 : kHelp[step];
+    static const char* const kHelpSteps[3] = {
+        kHelp[0],
+        "How bright the picture is: set the grey steps' white to a comfortable brightness.",
+        "How deep the blacks are: lower it until black looks black, before the darkest steps disappear.",
+    };
+    const char* const help = g_in_game ? kHelp[step] : kHelpSteps[step];
     char value[48];
     if (step == 0)
         std::snprintf(value, sizeof value, "%d nits", g_settings.hdr_peak);
@@ -1608,7 +1613,10 @@ void draw_hdr_calibration_caption(int step) {
 Uint64 g_calibration_test_until = 0;
 
 void run_hdr_calibration(int first_step = 0) {
-    static const int kPatterns[3] = {1, 2, 3};
+    // The renderer's test patterns: 1 peak box, 2 the game picture, 3 dark
+    // grey steps, 4 grey steps black to white.
+    static const int kPatterns[3] = {1, 2, 2};
+    static const int kPatternsBeforeGame[3] = {1, 4, 3};
     g_doc->Hide();
     bool pressed[kButtonCount];
     g_input.poll(pressed);
@@ -1619,7 +1627,7 @@ void run_hdr_calibration(int first_step = 0) {
             g_calibration_test_until = 0;
             break;
         }
-        dol_aurora_set_hdr_pattern(step == 1 && !g_in_game ? 4 : kPatterns[step]);
+        dol_aurora_set_hdr_pattern(g_in_game ? kPatterns[step] : kPatternsBeforeGame[step]);
         g_input.poll(pressed);
         const int dir = pressed[kUp] ? 1 : pressed[kDown] ? -1 : 0;
         if (dir != 0) {
@@ -1628,7 +1636,7 @@ void run_hdr_calibration(int first_step = 0) {
             else if (step == 1)
                 g_settings.hdr_paper = std::clamp(g_settings.hdr_paper + dir * 10, 60, 400);
             else
-                g_settings.hdr_black = std::clamp(g_settings.hdr_black + dir, -5, 10);
+                g_settings.hdr_black = std::clamp(g_settings.hdr_black + dir, -10, 10);
             settings_apply_graphics();
         }
         if (pressed[kAccept] && ++step == 3)

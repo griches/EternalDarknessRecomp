@@ -115,7 +115,7 @@ void settings_load(void) {
         else if (strcmp(key, "hdr_paper") == 0)
             g_settings.hdr_paper = clamp_int(n, 60, 400);
         else if (strcmp(key, "hdr_black") == 0)
-            g_settings.hdr_black = clamp_int(n, -5, 10);
+            g_settings.hdr_black = clamp_int(n, -10, 10);
         else if (strcmp(key, "fullscreen") == 0)
             g_settings.fullscreen = n != 0;
         else if (strcmp(key, "fps_counter") == 0)
@@ -214,8 +214,10 @@ void settings_apply_graphics(void) {
     dol_aurora_set_hdr(g_settings.hdr);
     static const float kSsao[] = {0.f, 1.3f, 2.4f};
     dol_aurora_set_ssao(kSsao[g_settings.ssao]);
+    // Black level in steps of 0.0002 linear: -10 sinks the darkest 0.002
+    // (about 7/255 of SDR) to black, the most that looked right on an OLED.
     dol_aurora_set_hdr_levels((float)g_settings.hdr_paper, (float)g_settings.hdr_peak,
-                              (float)g_settings.hdr_black * 0.002f);
+                              (float)g_settings.hdr_black * 0.0002f);
     // Highlights up to 3.5x SDR white, 4x with ambient occlusion (which
     // darkens the room round them). The PS5 (HDR10, SDR white at 140 nits to
     // match the console's own SDR picture) goes to 5x and 6x: about 700 and

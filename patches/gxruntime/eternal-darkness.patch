@@ -5647,10 +5647,10 @@ index 7af8fca..4c14e34 100644
    else
 diff --git a/graphics/aurora/lib/gfx/glow.cpp b/graphics/aurora/lib/gfx/glow.cpp
 new file mode 100644
-index 0000000..84c4cf1
+index 0000000..4b56de3
 --- /dev/null
 +++ b/graphics/aurora/lib/gfx/glow.cpp
-@@ -0,0 +1,724 @@
+@@ -0,0 +1,740 @@
 +#include "glow.hpp"
 +
 +#include "../webgpu/gpu_prof.hpp"
@@ -5763,9 +5763,17 @@ index 0000000..84c4cf1
 +  o.uv = p;
 +  return o;
 +}
++// The game's values as light: as an SDR screen (or the TV the game was made
++// for) shows them, a plain 2.2 power curve. The sRGB curve's straight foot
++// lifts the darkest shades (7/255 four times as bright) and a dark game
++// looked washed out next to SDR. AURORA_HDR_SRGB_CURVE=1: the sRGB curve.
++const SRGB_CURVE: bool = false;
 +fn to_linear(c: vec3f) -> vec3f {
 +  let v = max(c, vec3f(0.0));
-+  return select(pow((v + 0.055) / 1.055, vec3f(2.4)), v / 12.92, v <= vec3f(0.04045));
++  if (SRGB_CURVE) {
++    return select(pow((v + 0.055) / 1.055, vec3f(2.4)), v / 12.92, v <= vec3f(0.04045));
++  }
++  return pow(v, vec3f(2.2));
 +}
 +// d = (SDR white in nits, the display's peak in nits, black level, test
 +// pattern). The surface's encoding of light in nits: extended linear sRGB
@@ -5842,9 +5850,15 @@ index 0000000..84c4cf1
 +    return vec4f(encode_out(black_level(to_linear(vec3f(v))) * params.d.x), 1.0);
 +  }
 +  if (pattern == 3) {
-+    // Black: a ring a shade above black, through the black level.
-+    let lin = black_level(vec3f(select(0.0, 0.006, ring(in.uv) && in_box(in.uv))));
-+    return vec4f(encode_out(lin * params.d.x), 1.0);
++    // Black level with no game picture yet: eleven dark grey steps, black to
++    // 20/255, shown as the game's picture is.
++    let dims = vec2f(textureDimensions(efb_texture));
++    let p = (in.uv - 0.5) * vec2f(dims.x / max(dims.y, 1.0), 1.0);
++    var v = 0.0;
++    if (abs(p.y) < 0.09 && abs(p.x) < 0.55) {
++      v = min(floor((p.x + 0.55) / 0.1), 10.0) * 2.0 / 255.0;
++    }
++    return vec4f(encode_out(black_level(to_linear(vec3f(v))) * params.d.x), 1.0);
 +  }
 +  let c = textureSample(efb_texture, efb_sampler, in.uv).rgb;
 +  let g = tent(in.uv) * params.a.x * params.c.y;
@@ -6332,6 +6346,8 @@ index 0000000..84c4cf1
 +      code.replace(code.find("const PQ_OUT: bool = false;"), 27, "const PQ_OUT: bool = true; ");
 +    const std::string nits = "const LINEAR_NITS: f32 = " + std::to_string(webgpu::hdr_linear_nits()) + ";";
 +    code.replace(code.find("const LINEAR_NITS: f32 = 100.0;"), 31, nits);
++    if (std::getenv("AURORA_HDR_SRGB_CURVE") != nullptr)
++      code.replace(code.find("const SRGB_CURVE: bool = false;"), 31, "const SRGB_CURVE: bool = true; ");
 +    wgpu::ShaderSourceWGSL source{};
 +    source.code = code.c_str();
 +    const wgpu::ShaderModuleDescriptor moduleDesc{.nextInChain = &source, .label = "HDR present"};

@@ -3255,7 +3255,7 @@ index a13ce39..eb4d9fc 100644
   * EFB readback (GXRuntime recomp patch): arm a one-shot copy of the next
   * submitted frame's present source; take returns tightly packed RGBA8 rows
 diff --git a/graphics/aurora/lib/aurora.cpp b/graphics/aurora/lib/aurora.cpp
-index b09ef4d..bcfa4c3 100644
+index b09ef4d..53c0861 100644
 --- a/graphics/aurora/lib/aurora.cpp
 +++ b/graphics/aurora/lib/aurora.cpp
 @@ -1,6 +1,17 @@
@@ -3748,7 +3748,7 @@ index b09ef4d..bcfa4c3 100644
          }
          pass.End();
        }
-@@ -362,67 +717,187 @@ void end_frame() noexcept {
+@@ -362,67 +717,185 @@ void end_frame() noexcept {
              .label = "ImGui render pass",
              .colorAttachmentCount = attachments.size(),
              .colorAttachments = attachments.data(),
@@ -3759,10 +3759,7 @@ index b09ef4d..bcfa4c3 100644
 +        const auto pass = enc.BeginRenderPass(&renderPassDescriptor);
          pass.SetViewport(0.f, 0.f, static_cast<float>(webgpu::g_graphicsConfig.surfaceConfiguration.width),
                           static_cast<float>(webgpu::g_graphicsConfig.surfaceConfiguration.height), 0.f, 1.f);
--        imgui::render(pass, imguiDrawData);
-+        // (ImGui's pipelines are made for the internal format.)
-+        if (!webgpu::g_hdrActive)
-+          imgui::render(pass, imguiDrawData);
+         imgui::render(pass, imguiDrawData);
          pass.End();
        }
 -    } else {
@@ -3956,7 +3953,7 @@ index b09ef4d..bcfa4c3 100644
      gfx::after_submit();
  
      TracyPlotConfig("aurora: lastVertSize", tracy::PlotFormatType::Memory, false, true, 0);
-@@ -440,7 +915,7 @@ void end_frame() noexcept {
+@@ -440,7 +913,7 @@ void end_frame() noexcept {
      TracyPlot("aurora: lastIndexSize", static_cast<int64_t>(gfx::g_stats.lastIndexSize));
      TracyPlot("aurora: lastStorageSize", static_cast<int64_t>(gfx::g_stats.lastStorageSize));
      TracyPlot("aurora: lastTextureUploadSize", static_cast<int64_t>(gfx::g_stats.lastTextureUploadSize));
@@ -3965,7 +3962,7 @@ index b09ef4d..bcfa4c3 100644
  
  #endif
  }
-@@ -475,6 +950,38 @@ void aurora_set_resampler(AuroraSampler sampler) {
+@@ -475,6 +948,38 @@ void aurora_set_resampler(AuroraSampler sampler) {
    (void)sampler;
  #endif
  }
@@ -8518,10 +8515,28 @@ index b205cfa..499bd0f 100644
  
  } // namespace aurora::gfx::gxcore
 diff --git a/graphics/aurora/lib/imgui.cpp b/graphics/aurora/lib/imgui.cpp
-index 02adbe1..bcc38f3 100644
+index 02adbe1..83e0df2 100644
 --- a/graphics/aurora/lib/imgui.cpp
 +++ b/graphics/aurora/lib/imgui.cpp
-@@ -44,6 +44,10 @@ void create_context() noexcept {
+@@ -13,6 +13,7 @@
+ #include <SDL3/SDL_render.h>
+ 
+ #include "internal.hpp"
++#include "gfx/common.hpp"
+ #include "gfx/render_worker.hpp"
+ #include "webgpu/gpu.hpp"
+ #include "window.hpp"
+@@ -28,6 +29,9 @@ static float g_scale;
+ static std::string g_imguiSettings{};
+ static std::string g_imguiLog{};
+ static bool g_useSdlRenderer = false;
++// GXRuntime recomp patch: the format the WGPU backend draws into, which
++// follows the window's (16-bit float while HDR is on).
++static WGPUTextureFormat g_targetFormat = WGPUTextureFormat_Undefined;
+ 
+ static std::vector<SDL_Texture*> g_sdlTextures;
+ static std::vector<wgpu::Texture> g_wgpuTextures;
+@@ -44,6 +48,10 @@ void create_context() noexcept {
    g_imguiSettings = std::string{g_config.userPath} + "/imgui.ini";
    g_imguiLog = std::string{g_config.cachePath} + "/imgui.log";
    io.IniFilename = g_imguiSettings.c_str();
@@ -8532,6 +8547,33 @@ index 02adbe1..bcc38f3 100644
    io.LogFilename = g_imguiLog.c_str();
  }
  
+@@ -59,6 +67,7 @@ void initialize() noexcept {
+     info.Device = webgpu::g_device.Get();
+     info.RenderTargetFormat = static_cast<WGPUTextureFormat>(webgpu::g_graphicsConfig.surfaceConfiguration.format);
+     ImGui_ImplWGPU_Init(&info);
++    g_targetFormat = info.RenderTargetFormat;
+   }
+ }
+ 
+@@ -147,6 +156,18 @@ void new_frame(const AuroraWindowSize& size) noexcept {
+       }
+       g_scale = size.scale;
+     }
++    // HDR switched the window's format: remake the backend for it (once
++    // the render worker is done with the old one).
++    const auto presentFormat = static_cast<WGPUTextureFormat>(webgpu::g_presentFormat);
++    if (presentFormat != WGPUTextureFormat_Undefined && presentFormat != g_targetFormat) {
++      gfx::gpu_synchronize();
++      ImGui_ImplWGPU_Shutdown();
++      ImGui_ImplWGPU_InitInfo info;
++      info.Device = webgpu::g_device.Get();
++      info.RenderTargetFormat = presentFormat;
++      ImGui_ImplWGPU_Init(&info);
++      g_targetFormat = presentFormat;
++    }
+     if (!ImGui::GetIO().Fonts->IsBuilt()) {
+       ImGui_ImplWGPU_CreateDeviceObjects();
+     }
 diff --git a/graphics/aurora/lib/webgpu/gpu.cpp b/graphics/aurora/lib/webgpu/gpu.cpp
 index 7aff76e..7f1ea96 100644
 --- a/graphics/aurora/lib/webgpu/gpu.cpp

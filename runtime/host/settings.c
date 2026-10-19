@@ -191,7 +191,7 @@ void settings_apply_graphics(void) {
     static const float kGlow[] = {0.f, 0.6f, 1.0f};
     dol_aurora_set_glow(kGlow[g_settings.glow]);
     dol_aurora_set_hdr(g_settings.hdr);
-    static const float kSsao[] = {0.f, 3.0f, 4.4f};
+    static const float kSsao[] = {0.f, 1.5f, 2.8f};
     dol_aurora_set_ssao(kSsao[g_settings.ssao]);
 #endif
 }

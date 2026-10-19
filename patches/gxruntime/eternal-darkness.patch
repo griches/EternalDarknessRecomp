@@ -3166,15 +3166,16 @@ index d94f811..a668f1e 100644
  }
  } // namespace
 diff --git a/graphics/aurora/cmake/aurora_gx.cmake b/graphics/aurora/cmake/aurora_gx.cmake
-index 349237d..2c9c374 100644
+index 349237d..c8cf9dc 100644
 --- a/graphics/aurora/cmake/aurora_gx.cmake
 +++ b/graphics/aurora/cmake/aurora_gx.cmake
-@@ -67,6 +67,9 @@ if (TARGET GXRuntime::gxcore)
+@@ -67,6 +67,10 @@ if (TARGET GXRuntime::gxcore)
      target_sources(aurora_gx PRIVATE
          lib/gfx/gxcore_draw.cpp
          lib/gfx/gxcore_draw.hpp
 +        lib/gfx/interp.cpp
 +        lib/gfx/glow.cpp
++        lib/gfx/bake_capture.cpp
 +        lib/gfx/interp.hpp
      )
      # gxcore + gxruntime (E7 YUYV encode symbols used by display-copy RAM path).
@@ -4059,6 +4060,225 @@ index 421bd9e..0cbf52d 100644
 +  return true;
 +}
  } // namespace aurora::webgpu::utils
+diff --git a/graphics/aurora/lib/gfx/bake_capture.cpp b/graphics/aurora/lib/gfx/bake_capture.cpp
+new file mode 100644
+index 0000000..1a9169b
+--- /dev/null
++++ b/graphics/aurora/lib/gfx/bake_capture.cpp
+@@ -0,0 +1,213 @@
++// GXRuntime recomp patch (tools): light map bake capture. DOL_BAKE_CAPTURE=<dir>
++// writes, for frames DOL_BAKE_FIRST (0) + k * DOL_BAKE_EVERY (60), k <
++// DOL_BAKE_COUNT (1), every 3D draw's triangles in view space to
++// <dir>/frame-<n>.txt, and each light map (a texture sampled through the
++// second UV set, tex1_WxH_<XXH64>_<fmt> as Dolphin names it) once to
++// <dir>/lm/<name>.rgba (RGBA8). An offline baker (tools/bake) ray-traces the
++// rooms from these. Text lines:
++//   F <frame>
++//   D <light map name or -> <posmtx 12 floats> <triangles>  then per vertex
++//   V x y z nx ny nz u v   (normal 0 0 0 when the draw has none; u v = the
++//                           light map coordinates, 0 0 without one)
++//   L <index> r g b a cosatt(3) distatt(3) pos(3) dir(3)  (lights the draws use)
++
++#include "gxcore_draw.hpp"
++
++#include "gxruntime/gxcore/shader.hpp"
++#include "gxruntime/gxcore/texture_decode.hpp"
++
++#include <xxhash.h>
++
++#include <cmath>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <filesystem>
++#include <set>
++#include <string>
++
++namespace aurora::gfx::gxcore {
++namespace gxc = gxruntime::gxcore;
++namespace {
++
++const char* capture_dir() {
++  static const char* d = [] {
++    const char* e = std::getenv("DOL_BAKE_CAPTURE");
++    return e != nullptr && e[0] != '\0' ? e : nullptr;
++  }();
++  return d;
++}
++
++uint32_t env_u32(const char* name, uint32_t fallback) {
++  const char* e = std::getenv(name);
++  return e != nullptr ? static_cast<uint32_t>(std::atoi(e)) : fallback;
++}
++
++// The texgen a light-mapped draw samples texmap t through (TEX1 source), or -1.
++int uv2_texgen(const gxc::ShaderKey& key, uint32_t texmap) {
++  for (uint32_t n = 0; n < key.num_tev_stages; ++n) {
++    const gxc::TevStageKey& s = key.tev_stages[n];
++    if (s.tevorders_enable == 0u || (s.tevorders_texmap & 7u) != texmap)
++      continue;
++    const uint32_t tc = s.tevorders_texcoord & 7u;
++    if (tc < key.num_tex_gens &&
++        static_cast<gxc::TexGenType>(key.tex_gens[tc].texgentype) == gxc::TexGenType::Regular &&
++        key.tex_gens[tc].sourcerow == static_cast<uint8_t>(gxc::TexSourceRow::Tex0) + 1u)
++      return static_cast<int>(tc);
++  }
++  return -1;
++}
++
++float dot4(const float* row, float x, float y, float z, float w) { return row[0] * x + row[1] * y + row[2] * z + row[3] * w; }
++
++struct Frame {
++  FILE* file = nullptr;
++  uint32_t frame = UINT32_MAX;
++  std::set<int> lights;
++};
++Frame g_frame;
++std::set<std::string> g_savedMaps;
++} // namespace
++
++void bake_capture(const gxc::DrawPlan& plan, uint32_t frame) {
++  const char* dir = capture_dir();
++  if (dir == nullptr)
++    return;
++  static const uint32_t first = env_u32("DOL_BAKE_FIRST", 0), every = std::max(1u, env_u32("DOL_BAKE_EVERY", 60)),
++                        count = env_u32("DOL_BAKE_COUNT", 1);
++  if (frame < first || (frame - first) % every != 0 || (frame - first) / every >= count) {
++    if (g_frame.file != nullptr) {
++      std::fclose(g_frame.file);
++      g_frame.file = nullptr;
++    }
++    return;
++  }
++  const auto& P = plan.constants.projection;
++  if (P[3][2] != -1.f)
++    return;  // 3D draws only
++  if (g_frame.frame != frame) {
++    if (g_frame.file != nullptr)
++      std::fclose(g_frame.file);
++    std::filesystem::create_directories(std::string(dir) + "/lm");
++    char name[64];
++    std::snprintf(name, sizeof name, "/frame-%05u.txt", frame);
++    g_frame.file = std::fopen((std::string(dir) + name).c_str(), "w");
++    g_frame.frame = frame;
++    g_frame.lights.clear();
++    if (g_frame.file == nullptr)
++      return;
++    std::fprintf(g_frame.file, "F %u\n", frame);
++  }
++  FILE* f = g_frame.file;
++  if (f == nullptr)
++    return;
++  const gxc::ShaderKey& key = plan.pipeline.shader;
++
++  // The light map, if any.
++  int tc = -1;
++  std::string mapName = "-";
++  for (uint32_t t = 0; t < 8 && tc < 0; ++t) {
++    const int g = uv2_texgen(key, t);
++    const gxc::PlanTexture& pt = plan.textures[t];
++    if (g < 0 || !pt.valid || pt.data == nullptr)
++      continue;
++    const uint32_t base = gxc::texture_base_level_size(pt.format, pt.width, pt.height);
++    if (base == 0u || base > std::min(pt.size, pt.available))
++      continue;
++    char name[96];
++    std::snprintf(name, sizeof name, "tex1_%ux%u_%016llx_%u", pt.width, pt.height,
++                  static_cast<unsigned long long>(XXH64(pt.data, base, 0)), pt.format);
++    mapName = name;
++    tc = g;
++    if (g_savedMaps.insert(mapName).second) {
++      const auto rgba = gxc::decode_texture(pt.format, pt.width, pt.height, static_cast<const uint8_t*>(pt.data), base);
++      if (!rgba.empty())
++        if (FILE* m = std::fopen((std::string(dir) + "/lm/" + mapName + ".rgba").c_str(), "wb")) {
++          std::fwrite(rgba.data(), 1, rgba.size(), m);
++          std::fclose(m);
++        }
++    }
++  }
++
++  // Lights the draw's lit channels use (view space).
++  if (plan.shared_constants != nullptr && plan.pipeline.shader.lit_valid != 0) {
++    for (int j = 0; j < 4; ++j) {
++      const auto& ch = key.litchan[j];
++      if (ch.enablelighting == 0)
++        continue;
++      for (int i = 0; i < 8; ++i) {
++        if ((ch.light_mask & (1u << i)) == 0u || !g_frame.lights.insert(i).second)
++          continue;
++        const auto& l = plan.shared_constants->lights[i];
++        std::fprintf(f, "L %d %d %d %d %d %g %g %g %g %g %g %g %g %g %g %g %g\n", i, l.color[0], l.color[1],
++                     l.color[2], l.color[3], l.cosatt[0], l.cosatt[1], l.cosatt[2], l.distatt[0], l.distatt[1],
++                     l.distatt[2], l.pos[0], l.pos[1], l.pos[2], l.dir[0], l.dir[1], l.dir[2]);
++      }
++    }
++  }
++
++  const auto& C = plan.constants;
++  const float* mtx = &C.posnormalmatrix[0][0];
++  std::fprintf(f, "D %s", mapName.c_str());
++  for (int i = 0; i < 12; ++i)
++    std::fprintf(f, " %g", mtx[i]);
++  std::fprintf(f, " %zu\n", plan.indices.size() / 3);
++  const bool normals = key.has_vertex_normal != 0;
++  for (const uint16_t idx : plan.indices) {
++    const float* v = plan.vertices.data() + static_cast<size_t>(idx) * gxc::kVertexFloats;
++    const float x = v[0], y = v[1], z = v[2];
++    const float* p0 = C.posnormalmatrix[0];
++    const float* p1 = C.posnormalmatrix[1];
++    const float* p2 = C.posnormalmatrix[2];
++    if (key.has_pos_mtx_idx != 0 && plan.shared_constants != nullptr) {
++      uint32_t row;
++      std::memcpy(&row, reinterpret_cast<const uint8_t*>(v) + gxc::kVertexPosMtxOffset, 4);
++      row = std::min(row, 61u);
++      p0 = plan.shared_constants->transformmatrices[row];
++      p1 = plan.shared_constants->transformmatrices[row + 1];
++      p2 = plan.shared_constants->transformmatrices[row + 2];
++    }
++    const float vx = dot4(p0, x, y, z, 1.f), vy = dot4(p1, x, y, z, 1.f), vz = dot4(p2, x, y, z, 1.f);
++    float nx = 0.f, ny = 0.f, nz = 0.f;
++    if (normals) {
++      const float* n = v + gxc::kVertexNormalOffset / 4;
++      nx = C.posnormalmatrix[3][0] * n[0] + C.posnormalmatrix[3][1] * n[1] + C.posnormalmatrix[3][2] * n[2];
++      ny = C.posnormalmatrix[4][0] * n[0] + C.posnormalmatrix[4][1] * n[1] + C.posnormalmatrix[4][2] * n[2];
++      nz = C.posnormalmatrix[5][0] * n[0] + C.posnormalmatrix[5][1] * n[1] + C.posnormalmatrix[5][2] * n[2];
++      const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
++      if (len > 0.f) {
++        nx /= len;
++        ny /= len;
++        nz /= len;
++      }
++    }
++    float u = 0.f, w = 0.f;
++    if (tc >= 0) {
++      const float* uv = v + (gxc::kVertexUvOffset + 8u) / 4;  // raw texcoord 1
++      const gxc::TexGenKey& tg = key.tex_gens[tc];
++      const float* r0 = C.texmatrices[3 * tc];
++      const float* r1 = C.texmatrices[3 * tc + 1];
++      const float* r2 = C.texmatrices[3 * tc + 2];
++      if (key.has_tex_mtx_idx != 0 && (key.tex_mtx_idx_mask & (1u << tc)) != 0u && plan.shared_constants != nullptr) {
++        uint32_t words[2];
++        std::memcpy(words, reinterpret_cast<const uint8_t*>(v) + gxc::kVertexTexMtxIdxOffset, 8);
++        const uint32_t ti = std::min((words[tc < 4 ? 0 : 1] >> (8u * (tc % 4u))) & 0xFFu, 61u);
++        r0 = plan.shared_constants->transformmatrices[ti];
++        r1 = plan.shared_constants->transformmatrices[ti + 1];
++        r2 = plan.shared_constants->transformmatrices[ti + 2];
++      }
++      u = dot4(r0, uv[0], uv[1], 1.f, 1.f);
++      w = dot4(r1, uv[0], uv[1], 1.f, 1.f);
++      if (tg.projection != 0u) {
++        const float q = dot4(r2, uv[0], uv[1], 1.f, 1.f);
++        if (q != 0.f) {
++          u /= q;
++          w /= q;
++        }
++      }
++    }
++    std::fprintf(f, "V %g %g %g %.4f %.4f %.4f %g %g\n", vx, vy, vz, nx, ny, nz, u, w);
++  }
++}
++
++} // namespace aurora::gfx::gxcore
 diff --git a/graphics/aurora/lib/gfx/common.cpp b/graphics/aurora/lib/gfx/common.cpp
 index a64dd2d..fa3a4df 100644
 --- a/graphics/aurora/lib/gfx/common.cpp
@@ -5175,7 +5395,7 @@ index 0000000..1a9ddd9
 +
 +} // namespace aurora::gfx::glow
 diff --git a/graphics/aurora/lib/gfx/gxcore_draw.cpp b/graphics/aurora/lib/gfx/gxcore_draw.cpp
-index 71136b9..cfd9ac8 100644
+index 71136b9..1e8a390 100644
 --- a/graphics/aurora/lib/gfx/gxcore_draw.cpp
 +++ b/graphics/aurora/lib/gfx/gxcore_draw.cpp
 @@ -1,4 +1,11 @@
@@ -5822,7 +6042,7 @@ index 71136b9..cfd9ac8 100644
    gfx::resolve_pass(it->second, srcRect, do_clear && cmd.color_update,
                      do_clear && cmd.alpha_update,
                      do_clear && cmd.depth_update,
-@@ -723,73 +1129,427 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
+@@ -723,73 +1129,431 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
                                  static_cast<float>(cmd.clear_a) / 255.f},
                      clearDepthValue, fmt, &filter);
  
@@ -6078,10 +6298,14 @@ index 71136b9..cfd9ac8 100644
 +}
 +}  // namespace
 +
++// bake_capture.cpp (DOL_BAKE_CAPTURE).
++void bake_capture(const gxc::DrawPlan& plan, uint32_t frame);
++
  bool submit_draw_plan(const gxc::DrawPlan& plan) {
    if (!plan.ok || plan.vertex_count == 0 || plan.indices.empty()) {
      return false;
    }
++  bake_capture(plan, current_frame());
 +  {
 +    const auto& P = plan.constants.projection;
 +    // GXRuntime recomp patch: the glow keeps the frame's 3D scene where the
@@ -6307,7 +6531,7 @@ index 71136b9..cfd9ac8 100644
      const float sx = plan.viewport[0];
      const float sy = plan.viewport[1];
      const float sz = plan.viewport[2];
-@@ -799,8 +1559,8 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -799,8 +1563,8 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      const float width = sx * 2.0f;
      const float height = -sy * 2.0f;
      gx::set_logical_viewport({
@@ -6318,7 +6542,7 @@ index 71136b9..cfd9ac8 100644
          .width = width,
          .height = height,
          .znear = (oz - sz) / 1.6777215e7f,
-@@ -827,7 +1587,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -827,7 +1591,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
        [&](uint32_t address, uint32_t tsize, uint32_t format, uint32_t width,
            uint32_t height, const void* data, uint32_t available, bool has_tlut,
            uint32_t tlut_address, uint32_t tlut_format, uint32_t tlut_entries,
@@ -6327,7 +6551,7 @@ index 71136b9..cfd9ac8 100644
      auto efbIt = g_efbCopyTextures.find(address);
      if (efbIt != g_efbCopyTextures.end() && efbIt->second) {
        ++g_textureCacheStats.hits;
-@@ -839,23 +1599,262 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -839,23 +1603,262 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      const uint32_t size = std::min(tsize, available);
      // Hash the actual source texels (+ TLUT for CI) so a content change under an
      // unchanged guest identity is a distinct cache entry — see TextureKey.
@@ -6597,7 +6821,7 @@ index 71136b9..cfd9ac8 100644
      // gxcore owns the decode for every format: produce tightly-packed RGBA8 and
      // upload it as a pre-decoded PC texture (no substrate re-conversion).
      std::vector<uint8_t> decoded;
-@@ -868,8 +1867,48 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -868,8 +1871,48 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      } else {
        decoded = gxc::decode_texture(format, width, height, bytes, size);
      }
@@ -6647,7 +6871,7 @@ index 71136b9..cfd9ac8 100644
        handle = new_static_texture_2d(
            width, height, 1, GX_TF_RGBA8_PC,
            ArrayRef<uint8_t>{decoded.data(), decoded.size()}, false,
-@@ -892,7 +1931,98 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -892,7 +1935,98 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    };
  
    BindGroupRef textureBindGroup = 0;
@@ -6746,7 +6970,7 @@ index 71136b9..cfd9ac8 100644
      if (plan.texmap_mask == 0u) {
        // Single-texmap fast path: primary texture + plan.sampler at binding 0/1.
        if (plan.has_texture) {
-@@ -903,7 +2033,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -903,7 +2037,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
              plan.tlut_data, plan.tlut_available);
          if (bound) {
            const auto sampler =
@@ -6755,7 +6979,7 @@ index 71136b9..cfd9ac8 100644
            const std::array entries{
                WGPUBindGroupEntry{.binding = 0,
                                   .textureView =
-@@ -919,6 +2049,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -919,6 +2053,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            textureBindGroup = bind_group_ref(descriptor);
          }
        }
@@ -6763,7 +6987,7 @@ index 71136b9..cfd9ac8 100644
      } else {
        // Multi-texmap: bind each used texmap at 2t (texture) / 2t+1 (sampler),
        // matching the WGSL declarations. Per-texmap PlanSampler from
-@@ -932,12 +2063,15 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -932,12 +2067,15 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
          if ((plan.texmap_mask & (1u << t)) == 0u)
            continue;
          const gxc::PlanTexture& pt = plan.textures[t];
@@ -6780,7 +7004,7 @@ index 71136b9..cfd9ac8 100644
          if (!bound) {
            complete = false;
            break;
-@@ -945,14 +2079,16 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -945,14 +2083,16 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
          held.push_back(bound);
          const gxc::PlanSampler& ps =
              pt.sampler.valid ? pt.sampler : plan.samplers[t];
@@ -6799,7 +7023,7 @@ index 71136b9..cfd9ac8 100644
        const WGPUBindGroupDescriptor descriptor{
            .label = {"GXCore Texture Bind Group", WGPU_STRLEN},
            .layout = texture_bind_group_layout(plan.texmap_mask).Get(),
-@@ -960,6 +2096,280 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -960,6 +2100,280 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
            .entries = entries.data(),
        };
        textureBindGroup = bind_group_ref(descriptor);
@@ -7080,7 +7304,7 @@ index 71136b9..cfd9ac8 100644
      }
    }
  
-@@ -969,31 +2379,18 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -969,31 +2383,18 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
    const auto idxRange = push_indices(
        reinterpret_cast<const uint8_t*>(plan.indices.data()),
        plan.indices.size() * sizeof(uint16_t), 4);
@@ -7115,7 +7339,7 @@ index 71136b9..cfd9ac8 100644
      });
    };
  
-@@ -1006,6 +2403,8 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
+@@ -1006,6 +2407,8 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
      }
    } else {
      issue_draw();

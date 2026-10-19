@@ -468,11 +468,12 @@ bool g_tome_was = false;
 bool g_held_over[kNativeCount];
 
 // Graphics-enhancement shortcuts: hold R3 and press one of these (glow,
-// ambient occlusion, HDR, baked shadows, HD textures; frontend.h). The game
-// sees neither button, and a toggle R3 made as it went down (Modern's creep)
-// is put back.
-const int kEnhancementButtons[5] = {kSouth, kEast, kWest, kNorth, kDUp};
-bool g_enh_was[5];
+// ambient occlusion, HDR, baked shadows, HD textures, all off, all on;
+// frontend.h). The game sees neither button, and a toggle R3 made as it went
+// down (Modern's creep) is put back.
+constexpr int kEnhancementCount = 7;
+const int kEnhancementButtons[kEnhancementCount] = {kSouth, kEast, kWest, kNorth, kDUp, kLT, kRT};
+bool g_enh_was[kEnhancementCount];
 bool g_r3_was = false;
 bool g_r3_used = false;
 bool g_toggled_at_r3[kActionCount];
@@ -484,7 +485,7 @@ void enhancement_shortcuts(SDL_Gamepad* pad) {
         g_r3_used = false;
     }
     g_r3_was = r3;
-    for (int k = 0; k < 5; k++) {
+    for (int k = 0; k < kEnhancementCount; k++) {
         const bool down = native_value(pad, kEnhancementButtons[k]) >= 128;
         if (r3 && down && !g_enh_was[k]) {
             if (!g_r3_used)
@@ -844,9 +845,10 @@ std::string glyph_set() {
 }
 
 std::string enhancement_legend() {
-    static const char* const kNames[5] = {"glow", "occlusion", "HDR", "shadows", "HD textures"};
+    static const char* const kNames[kEnhancementCount] = {"glow", "occlusion", "HDR", "shadows", "HD textures",
+                                                           "all off", "all on"};
     std::string out = std::string("Hold ") + native_name(kR3) + ":";
-    for (int k = 0; k < 5; k++)
+    for (int k = 0; k < kEnhancementCount; k++)
         out += std::string(k == 0 ? " " : " \u00b7 ") + native_name(kEnhancementButtons[k]) + " " + kNames[k];
     return out;
 }

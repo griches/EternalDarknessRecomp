@@ -33,7 +33,9 @@ void frontend_imgui_init(void);
 
 // Graphics enhancements (Options > Graphics enhancements), cycled in the game
 // by holding R3 and pressing a button: 0 glow, 1 ambient occlusion, 2 HDR,
-// 3 baked shadows, 4 HD textures. Shows what changed on screen.
+// 3 baked shadows, 4 HD textures; 5 all off and 6 all on (HDR, glow and
+// occlusion Soft, HD textures: Gary's set, for before/after). Shows what
+// changed on screen.
 void frontend_cycle_enhancement(int which);
 
 #ifdef __cplusplus

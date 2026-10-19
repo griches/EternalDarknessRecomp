@@ -1538,7 +1538,9 @@ void update_enhancement_notice() {
     const ImVec2 at0{(screen.x - width) / 2.f, 28.f * dp};
     ImDrawList* draw = ImGui::GetForegroundDrawList(ImGui::GetMainViewport());
     const auto a = [&](int v) { return static_cast<ImU32>(v * fade); };
-    draw->AddRectFilled(at0, ImVec2{at0.x + width, at0.y + height}, IM_COL32(0, 0, 0, a(0xb0)), 6.f * dp);
+    // Solid: with HDR on, a lamp behind it can be up to eight times
+    // brighter than white and shone through even a nearly solid box.
+    draw->AddRectFilled(at0, ImVec2{at0.x + width, at0.y + height}, IM_COL32(0, 0, 0, a(0xff)), 6.f * dp);
     draw->AddText(font, size, ImVec2{at0.x + (width - big.x) / 2.f, at0.y + pad.y}, IM_COL32(0xf0, 0xe6, 0xc8, a(0xff)),
                   text.c_str());
     draw->AddText(font, small, ImVec2{at0.x + (width - line.x) / 2.f, at0.y + pad.y + big.y + 4.f * dp},
@@ -1547,6 +1549,21 @@ void update_enhancement_notice() {
 
 extern "C" void frontend_cycle_enhancement(int which) {
     using namespace enhancement;
+    if (which == kCount || which == kCount + 1) {
+        // The set, all off or all on (baked shadows left as they are).
+        const bool on = which == kCount + 1;
+        g_settings.hdr = on;
+        g_settings.glow = on ? 1 : 0;
+        g_settings.ssao = on ? 1 : 0;
+        g_settings.hd_textures = on;
+        settings_apply_graphics();
+        settings_save();
+        std::fprintf(stderr, "[frontend] enhancements %s\n", on ? "on" : "off");
+        std::lock_guard<std::mutex> lock(g_notice_mutex);
+        g_notice = on ? "Enhancements on: HDR, soft glow, soft occlusion, HD textures" : "Enhancements off";
+        g_notice_at = SDL_GetTicks();
+        return;
+    }
     if (which < 0 || which >= kCount)
         return;
     if (available(which)) {

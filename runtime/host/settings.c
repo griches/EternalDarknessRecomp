@@ -191,7 +191,10 @@ void settings_apply_graphics(void) {
     static const float kGlow[] = {0.f, 0.6f, 1.0f};
     dol_aurora_set_glow(kGlow[g_settings.glow]);
     dol_aurora_set_hdr(g_settings.hdr);
-    static const float kSsao[] = {0.f, 1.5f, 2.8f};
+    static const float kSsao[] = {0.f, 1.3f, 2.4f};
     dol_aurora_set_ssao(kSsao[g_settings.ssao]);
+    // Highlights up to 3.5x SDR white, 4x with ambient occlusion (which
+    // darkens the room round them).
+    dol_aurora_set_hdr_highlight(g_settings.ssao != 0 ? 3.0f : 2.5f);
 #endif
 }

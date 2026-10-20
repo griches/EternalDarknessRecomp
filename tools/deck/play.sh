@@ -10,7 +10,18 @@ cd "$(dirname "$(readlink -f "$0")")" || exit 1
 HERE=$PWD
 export LD_LIBRARY_PATH="$HERE/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 ZIG="$HERE/toolchain/zig/zig"
-export ZIG_GLOBAL_CACHE_DIR="$HERE/.cache/zig" ZIG_LOCAL_CACHE_DIR="$HERE/.cache/zig"
+# Zig's cache writes Makefile-style dependency files, which a ":" in the
+# cache's path breaks: every file failed with InvalidDepFile in a folder named
+# "Eternal Darkness: Sanity's Requiem". There the cache is a temporary folder,
+# deleted when the build is done, so nothing from the disc stays outside.
+cache="$HERE/.cache/zig"
+case "$HERE" in
+*:*)
+  cache=$(mktemp -d "${TMPDIR:-/tmp}/ed-zig.XXXXXX") || exit 1
+  trap 'rm -rf "$cache"' EXIT
+  ;;
+esac
+export ZIG_GLOBAL_CACHE_DIR="$cache" ZIG_LOCAL_CACHE_DIR="$cache"
 JOBS=$(nproc 2>/dev/null || echo 4)
 mkdir -p logs
 # Three GX plan workers on 4-core / 8-thread CPUs like the Deck's (the best there
@@ -100,6 +111,8 @@ if [ ! -x EternalDarkness ] || [ "$(cat build.stamp 2>/dev/null)" != "$stamp" ];
   fi
 fi
 
+# exec skips the EXIT trap: the temporary cache goes now.
+[ "$cache" = "$HERE/.cache/zig" ] || rm -rf "$cache"
 # The disc as the launcher's own folder scan names it ("x.iso", "dump/x.iso"),
 # so it isn't listed twice.
 exec ./EternalDarkness generated/main.dol --iso "${disc#"$HERE"/}" --max-blocks 1000000000000000 "$@" \

@@ -8,7 +8,7 @@
 Windows and Linux / Steam Deck, built from **your own disc**. Nothing from the game
 is in this repository. The PlayStation 5 version is
 [PS5_EternalDarkness](https://github.com/griches/PS5_EternalDarkness).
-Version 0.9.5.
+Version 0.9.6.
 
 > **European disc only.** You need your own image (`.iso` or `.gcm`) of the
 > **European GameCube disc, `GEDP01`**. The USA disc (`GEDE01`) is not supported:
@@ -49,8 +49,9 @@ Version 0.9.5.
   2. Put your disc image in that folder.
   3. Run `play.sh`. On a Deck: Desktop Mode, Steam > Add a Non-Steam Game >
      Browse > `play.sh`, then play it from Game Mode. The first start
-     translates your disc and builds the game from it (about a minute on a
-     Deck); after that it starts straight away.
+     translates your disc and builds the game from it (a few minutes, about
+     4 on a Deck; a window shows the time left); after that it starts
+     straight away.
 
 ### 2. The HD textures (recommended)
 

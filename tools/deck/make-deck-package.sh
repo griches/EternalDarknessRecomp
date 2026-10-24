@@ -83,7 +83,6 @@ ninja -C /tmp/pkg-dolrecomp dolrecomp > /dev/null
 cp /tmp/pkg-dolrecomp/dolrecomp "$OUT/.deps/DolRecomp/build/dolrecomp"
 for t in generate.py fix_generated.py symbols.py gamedata.py; do cp "$SRC/tools/$t" "$OUT/tools/"; done
 cp "$SRC/config/GEDE01/symbols.txt" "$OUT/config/GEDE01/"
-cp "$HERE"/hot-*.txt "$OUT/tools/" 2>/dev/null || true
 
 # 6. Compiler, UI files, launcher script, licences.
 cp -r "$ZIGDIR" "$OUT/toolchain/zig"

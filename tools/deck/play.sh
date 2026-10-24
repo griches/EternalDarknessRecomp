@@ -3,8 +3,8 @@
 #
 # Put your own Eternal Darkness disc image (.iso or .gcm of the European disc,
 # GEDP01; the USA disc is not supported) in this folder, then run this script, or add it to Steam. The first run
-# translates the disc and builds the game from it (about a minute on a
-# Steam Deck). After that the game starts straight away. Nothing from your disc
+# translates the disc and builds the game from it (a few minutes: about 4 on
+# a Steam Deck). After that the game starts straight away. Nothing from your disc
 # leaves this folder.
 cd "$(dirname "$(readlink -f "$0")")" || exit 1
 HERE=$PWD
@@ -54,36 +54,54 @@ stamp="$(stat -c '%n %s %Y' "$disc") $(cat VERSION 2>/dev/null)"
 # Translate the disc and build the game: prints zenity progress lines.
 build() {
   rm -f build.ok
-  echo "5"; echo "# Reading your disc..."
+  echo "5"; echo "# Reading your disc (only on the first start)..."
   python3 tools/generate.py "$disc" --out generated --jobs "$JOBS" >> logs/build.log 2>&1 || return 1
   id=$(cat generated/game_id.txt)
 
-  # Game code: the chunks hot in gameplay and in the movie decoder (profiled on a
-  # Deck) get -O1, the rest -O0: a fraction of the compile time, and the rest is
-  # a small share of a frame. Movies need the decoder at -O1 to keep up.
+  # Game code: every chunk at -O1. 0.9.5 built only the 25 chunks hottest in a
+  # few profiled scenes at -O1 and the rest at -O0, which ran two to three times
+  # slower: busy rooms elsewhere fell to 23-42 fps on a Deck (the chapter 9
+  # cathedral, issue #8). -O1 runs the game code as fast as -O3 for a fraction
+  # of its compile time: about 4 minutes on a Deck, once. Biggest files
+  # first, so the last ones to finish are short.
   rm -rf build; mkdir -p build/obj
   : > build/jobs
-  for f in generated/chunks/*.c; do
-    a=$(basename "$f" .c); a=${a##*_}
-    if grep -qx "$a" "tools/hot-$id.txt" 2>/dev/null; then echo "1 $f" >> build/jobs.hot
-    else echo "0 $f" >> build/jobs.cold; fi
+  for f in runtime/host/main.c runtime/host/hle.c runtime/host/audio.c runtime/host/sdk_map.c \
+           runtime/host/quickstate.c; do
+    echo "2 $(stat -c %s "$f") $f" >> build/jobs
   done
-  echo "1 generated/generated.c" >> build/jobs.hot
-  for f in main.c hle.c audio.c sdk_map.c quickstate.c; do echo "2 runtime/host/$f" >> build/jobs.hot; done
-  cat build/jobs.hot build/jobs.cold > build/jobs 2>/dev/null; rm -f build/jobs.hot build/jobs.cold
-  total=$(wc -l < build/jobs)
+  ls -S generated/chunks/*.c generated/generated.c | while read -r f; do
+    echo "1 $(stat -c %s "$f") $f" >> build/jobs
+  done
+  total=$(awk '{ s += $2 } END { print s }' build/jobs)
 
-  echo "15"; echo "# Building the game from your disc (only the first time)..."
+  echo "15"; echo "# Building the game from your disc. Only on the first start: a few minutes (about 4 on a Steam Deck)."
   # DOLRECOMP_STATIC_CPU and the CodeGenPrepare limit: see CMakeLists.txt.
   CFLAGS="-target x86_64-linux-gnu.2.41 -g0 -w -fno-sanitize=all $(cat lib/host-cflags.txt) -DED_GAME_ID=\"$id\" -DDOLRECOMP_STATIC_CPU=dolrecomp_cpu -mllvm -cgp-max-address-users-to-scan=100000 -Iruntime -Igenerated -Iinclude"
   export ZIG CFLAGS
-  xargs -P "$JOBS" -L1 sh -c '"$ZIG" cc $CFLAGS -O$0 -Xclang -O$0 -c "$1" -o "build/obj/$(basename "$1").o" || echo "$1" >> build/failed' \
+  xargs -P "$JOBS" -L1 sh -c '"$ZIG" cc $CFLAGS -O$0 -Xclang -O$0 -c "$2" -o "build/obj/$(basename "$2").o" || echo "$2" >> build/failed' \
     < build/jobs >> logs/build.log 2>&1 &
   pid=$!
+  # Progress by the size of the sources built, every 2 s (no subprocess per
+  # file: the compiles have every core). The time left comes from the pace so
+  # far, once a tenth is built, and is shown again only when it changes.
+  start=$(date +%s); said=""
   while kill -0 $pid 2>/dev/null; do
-    n=$(ls build/obj | wc -l)
-    echo $((15 + n * 75 / total))
-    sleep 1
+    built=0
+    while read -r o size f; do
+      [ -f "build/obj/${f##*/}.o" ] && built=$((built + size))
+    done < build/jobs
+    echo $((15 + built * 75 / total))
+    elapsed=$(($(date +%s) - start))
+    if [ $((built * 10)) -ge "$total" ] && [ "$elapsed" -ge 10 ]; then
+      left=$((elapsed * (total - built) / built))
+      if [ "$left" -lt 60 ]; then text="less than a minute left"
+      elif [ "$left" -lt 120 ]; then text="about a minute left"
+      else text="about $(((left + 59) / 60)) minutes left"; fi
+      [ "$text" != "$said" ] && echo "# Building the game from your disc (only on the first start): $text."
+      said=$text
+    fi
+    sleep 2
   done
   wait $pid
   [ -f build/failed ] && return 1

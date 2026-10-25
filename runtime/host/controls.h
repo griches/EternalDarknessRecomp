@@ -67,6 +67,8 @@ uint64_t glyph_signature();
 // cutscene plays; and whether RB or Tab is fast-forwarding now.
 std::string fast_forward_glyph();
 bool fast_forwarding();
+// When a button or key last went down (SDL ticks, ms; 0 never).
+uint64_t last_press_ms();
 
 // Switch layout (Custom starts from the layout in use).
 void set_layout(int layout);

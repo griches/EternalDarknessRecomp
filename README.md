@@ -130,8 +130,8 @@ folder, or the Mac app's
   between the game's 60 (Options > Frame rate).
 - **Fast-forward the cutscenes**: while a movie or a scene in the black bars
   plays, hold RB (Tab on the keyboard) to run it at up to four times speed. The
-  prompt shows for the first two seconds of each scene, then fades away until
-  you hold the button.
+  prompt stays hidden until you press any button, then fades in and fades away
+  again a few seconds later.
 - **Camera options** (Options > Game > Camera): the game's own fixed cameras,
   *Third person (beta)* (behind the character you play, turned with the right stick, up and down
   for closer or further, and kept inside the room by the game's own collision)

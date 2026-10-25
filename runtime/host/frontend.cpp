@@ -1727,15 +1727,16 @@ void update_fps_counter() {
 
 // While a cutscene plays, the fast-forward prompt at the screen's bottom right
 // (in the letterbox bar): RB's icon (Tab's on the keyboard) and a
-// fast-forward sign. It shows for the first two seconds of each cutscene, then
-// fades away; holding the button brings it back, bright, and it fades again a
-// second after the button is let go. Through ImGui, as the FPS counter.
+// fast-forward sign. Each cutscene starts without it; any button or key
+// pressed while one plays fades it in, and it fades out again three seconds
+// after the last press. Fast-forwarding, it is bright, and the three seconds
+// count from letting go. Through ImGui, as the FPS counter.
 void update_fast_forward_prompt() {
-    constexpr Uint64 kShowMs = 2000, kAfterMs = 1000;
-    constexpr float kIdle = 0.6f, kFadeInS = 0.15f, kFadeOutS = 0.6f;
+    constexpr Uint64 kShowMs = 3000;
+    constexpr float kIdle = 0.6f, kFadeInS = 0.3f, kFadeOutS = 0.6f;
     static bool shown = false;
-    static Uint64 idle_until = 0, bright_until = 0, last = 0;
-    static float level = 0.f;  // 0 gone, kIdle as it first shows, 1 while held
+    static Uint64 since = 0, until = 0, last = 0;
+    static float level = 0.f;  // 0 gone, kIdle after a press, 1 while held
     const std::string file = controls::fast_forward_glyph();
     if (file.empty() || ImGui::GetCurrentContext() == nullptr) {
         shown = false;
@@ -1744,12 +1745,15 @@ void update_fast_forward_prompt() {
     }
     const Uint64 now = SDL_GetTicks();
     if (!shown)
-        idle_until = now + kShowMs, last = now;
+        since = now, until = 0, last = now;  // presses before the cutscene do not count
     shown = true;
+    const Uint64 press = controls::last_press_ms();
+    if (press > since)
+        until = std::max(until, press + kShowMs);
     const bool fast = controls::fast_forwarding();
     if (fast)
-        bright_until = now + kAfterMs;
-    const float target = now < bright_until ? 1.f : now < idle_until ? kIdle : 0.f;
+        until = now + kShowMs;
+    const float target = fast ? 1.f : now < until ? kIdle : 0.f;
     const float dt = static_cast<float>(now - last) / 1000.f;
     last = now;
     level = target > level ? std::min(target, level + dt / kFadeInS) : std::max(target, level - dt / kFadeOutS);

@@ -113,6 +113,9 @@ std::atomic<bool> g_game_menu{false};
 // from one scene, they go on into the next).
 std::atomic<bool> g_cutscene{false};
 std::atomic<bool> g_fast_forward{false};
+// When a button or key last went down (SDL ticks, ms), for the fast-forward
+// prompt: it shows only after a press.
+std::atomic<Uint64> g_last_press{0};
 bool g_ff_was = false;
 bool g_ff_from_play = false;
 SDL_Gamepad* g_pad = nullptr;
@@ -277,6 +280,29 @@ bool key_down(int scancode) {
     int count = 0;
     const bool* keys = SDL_GetKeyboardState(&count);
     return keys != nullptr && scancode > 0 && scancode < count && keys[scancode];
+}
+
+// A button (or trigger, or Back) or key newly down: g_last_press. One held
+// from before does not count again.
+void note_press(SDL_Gamepad* pad) {
+    static bool pad_was[kNativeCount + 1];
+    static std::vector<bool> keys_was;
+    bool pressed = false;
+    for (int n = 0; n <= kNativeCount; n++) {
+        const bool down = n < kNativeCount ? native_value(pad, n) >= 64
+                                           : pad != nullptr && SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_BACK);
+        pressed = pressed || (down && !pad_was[n]);
+        pad_was[n] = down;
+    }
+    int count = 0;
+    const bool* keys = SDL_GetKeyboardState(&count);
+    keys_was.resize(static_cast<size_t>(std::max(count, 0)));
+    for (int k = 1; keys != nullptr && k < count; k++) {
+        pressed = pressed || (keys[k] && !keys_was[k]);
+        keys_was[k] = keys[k];
+    }
+    if (pressed)
+        g_last_press.store(SDL_GetTicks(), std::memory_order_relaxed);
 }
 
 // SDL stick axis (-32768..32767) to the GameCube's -127..127, with a deadzone.
@@ -626,6 +652,7 @@ bool read_pad(DolPadState* state) {
     drive_virtual_pad();
     SDL_Gamepad* pad = gamepad();
     note_last_device(pad);
+    note_press(pad);
     const bool tome = tome_buttons();
     if (tome != g_tome_was) {
         for (int n = 0; n < kNativeCount; n++)
@@ -866,6 +893,10 @@ std::string fast_forward_glyph() {
 
 bool fast_forwarding() {
     return g_fast_forward.load(std::memory_order_relaxed);
+}
+
+uint64_t last_press_ms() {
+    return g_last_press.load(std::memory_order_relaxed);
 }
 
 std::string glyph_for(int action, int preference, bool tome) {

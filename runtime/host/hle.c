@@ -5960,7 +5960,7 @@ static void hle_part_damage(CPUState* cpu) {
 // sets its channels (fn(color0 lights, color1 lights) at 0x801E58C8) light 7
 // joins COLOR0, the lights models are lit by.
 #define PLAYER_LIGHT 0x8060546Cu
-#define PLAYER_LIGHT_REACH 700u  // the distance its light falls off over
+#define PLAYER_LIGHT_REACH 350u  // the distance its light falls off over
 static u32 g_player_light_colour;  // RGBA, 0 = the game's own (black)
 static bool g_player_light_found;
 

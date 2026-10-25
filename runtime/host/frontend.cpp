@@ -537,8 +537,9 @@ Row vibration_row() {
 // Graphics enhancements: the options' rows and photo mode change the same
 // values, applied at once.
 namespace enhancement {
-enum { kGlow, kOcclusion, kHdr, kShadows, kHdTextures, kCount };
-const char* const kNames[kCount] = {"Glow", "Ambient occlusion", "HDR", "Baked shadows", "HD textures"};
+enum { kGlow, kOcclusion, kHdr, kShadows, kHdTextures, kFiltering, kCount };
+const char* const kNames[kCount] = {"Glow", "Ambient occlusion", "HDR", "Baked shadows", "HD textures",
+                                    "Texture filtering"};
 const char* const kLevels[] = {"Off", "Soft", "Strong"};
 
 bool available(int which) {
@@ -556,6 +557,7 @@ std::string value(int which) {
     case kHdr: return available(which) ? on_off(g_settings.hdr) : "Not on this display";
     case kShadows: return g_settings.sharp_shadows ? "Sharp" : "Original";
     case kHdTextures: return available(which) ? on_off(g_settings.hd_textures) : "No pack";
+    case kFiltering: return g_settings.anisotropy <= 1 ? "Off" : std::to_string(g_settings.anisotropy) + "x";
     default: return "";
     }
 }
@@ -567,6 +569,16 @@ void change(int which, int dir) {
     case kHdr: g_settings.hdr = !g_settings.hdr; break;
     case kShadows: g_settings.sharp_shadows = !g_settings.sharp_shadows; break;
     case kHdTextures: g_settings.hd_textures = !g_settings.hd_textures; break;
+    case kFiltering: {
+        static const int kSamples[] = {1, 2, 4, 8, 16};
+        int at = 4;
+        for (int i = 0; i < 5; i++)
+            if (kSamples[i] == g_settings.anisotropy)
+                at = i;
+        cycle(at, 5, dir);
+        g_settings.anisotropy = kSamples[at];
+        break;
+    }
     default: return;
     }
     settings_apply_graphics();
@@ -578,6 +590,8 @@ const char* const kNotes[kCount] = {
     "On an HDR display, glowing light shines brighter than white.",
     "The rooms' light and shadow: Sharp upscales it as each room loads, Original keeps the disc's soft, blocky maps.",
     "The texture pack in your textures folder.",
+    "Anisotropic filtering: with the HD textures, floors and walls seen at a slant stay sharp into the distance "
+    "instead of blurring. 16x is the sharpest.",
 };
 
 }  // namespace enhancement
@@ -742,7 +756,7 @@ void build_options() {
     // Graphics: the enhancements, most visible first (HDR is with Display).
     {
         using namespace enhancement;
-        static const int kOrder[] = {kHdTextures, kShadows, kOcclusion, kGlow};
+        static const int kOrder[] = {kHdTextures, kShadows, kFiltering, kOcclusion, kGlow};
         for (int which : kOrder) {
             Row r{kNames[which], value(which)};
             if (which == kHdTextures)

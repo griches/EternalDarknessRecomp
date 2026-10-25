@@ -18,6 +18,7 @@ Settings g_settings = {
     .game_font = 1,  // Tome
     .hd_textures = true,
     .sharp_shadows = true,
+    .anisotropy = 16,
     .glow = 0,
     .hdr = true,  // only where the display has it
     .ssao = 1,
@@ -104,6 +105,8 @@ void settings_load(void) {
             g_settings.hd_textures = n != 0;
         else if (strcmp(key, "sharp_shadows") == 0)
             g_settings.sharp_shadows = n != 0;
+        else if (strcmp(key, "texture_filtering") == 0)
+            g_settings.anisotropy = n >= 16 ? 16 : n >= 8 ? 8 : n >= 4 ? 4 : n >= 2 ? 2 : 1;
         else if (strcmp(key, "glow") == 0)
             g_settings.glow = clamp_int(n, 0, 2);
         else if (strcmp(key, "hdr") == 0)
@@ -160,6 +163,7 @@ void settings_save(void) {
     fprintf(f, "game_font = %d\n", g_settings.game_font);
     fprintf(f, "hd_textures = %d\n", g_settings.hd_textures ? 1 : 0);
     fprintf(f, "sharp_shadows = %d\n", g_settings.sharp_shadows ? 1 : 0);
+    fprintf(f, "texture_filtering = %d\n", g_settings.anisotropy);
     fprintf(f, "glow = %d\n", g_settings.glow);
     fprintf(f, "hdr = %d\n", g_settings.hdr ? 1 : 0);
     fprintf(f, "ssao = %d\n", g_settings.ssao);
@@ -203,6 +207,7 @@ void settings_apply_graphics(void) {
 #ifdef ED_AURORA
     static const float kGlow[] = {0.f, 0.6f, 1.0f};
     dol_aurora_set_glow(kGlow[g_settings.glow]);
+    dol_aurora_set_anisotropy(g_settings.anisotropy);
     /* The living energy in the temples (the red doorways, the yellow floors):
      * a 256x256 C8 texture whose palette the game cycles every frame. With
      * HDR on it glows, at Soft when the glow setting is off. */

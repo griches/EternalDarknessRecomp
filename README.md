@@ -124,11 +124,14 @@ folder, or the Mac app's
 - **Sharp picture at any resolution**: drawn at your screen's own resolution, up
   to 4K, or a fixed 720p, 1080p, 1440p or 4K, with full colour (no 6-bit banding).
 - **Widescreen**: the game's own 16:9 mode (more of the room at the sides, not
-  stretched) with the HUD and prompts at the screen's edges; 4:3 too.
+  stretched) with the HUD and prompts at the screen's edges, widened further
+  for 21:9 and 32:9 ultrawide screens; 4:3 too.
 - **Smoother on a fast screen**: on a 90, 120 Hz or faster screen, frames in
   between the game's 60 (Options > Frame rate).
 - **Fast-forward the cutscenes**: while a movie or a scene in the black bars
-  plays, hold RB (Tab on the keyboard) to run it at up to four times speed.
+  plays, hold RB (Tab on the keyboard) to run it at up to four times speed. The
+  prompt shows for the first two seconds of each scene, then fades away until
+  you hold the button.
 - **Camera options** (Options > Game > Camera): the game's own fixed cameras,
   *Third person (beta)* (behind the character you play, turned with the right stick, up and down
   for closer or further, and kept inside the room by the game's own collision)
@@ -136,7 +139,8 @@ folder, or the Mac app's
 - **New baked shadows** (below): the rooms' light and shadow redrawn sharp.
 - **Crisp game text**: the game's lettering redrawn in two styles, *Sharp* or
   *Tome* (old typefaces), or *Original* as on the disc.
-- **HD texture packs** in Dolphin's format.
+- **HD texture packs** in Dolphin's format, with anisotropic filtering (Options >
+  Texture filtering, up to 16x) to keep floors and walls sharp at a slant.
 - **Modern controls**, remapping, and button prompts that match your controller
   (Xbox, PlayStation or Switch icons), the game's own prompts included.
 - **Save anywhere**: the pause menu has four save slots that hold the whole moment,
@@ -145,6 +149,12 @@ folder, or the Mac app's
   and Options for everything here.
 - **Problem reports**: if the game stops responding, stops or crashes, it says
   so on screen and writes a report to `saves/reports/` to send.
+- **Debug menu**: hold LT, RT and both stick clicks together in play (L2, R2,
+  L3 and R3 on a PlayStation controller). Invincible; sanity always full or
+  always empty; infinite magick and stamina; unlimited ammo; one-hit kills; the
+  early stamina meter the finished game never shows; the developers' own debug
+  views (safe frame, regions, lighting, AI objects and more); and another of
+  any enemy in the room. Its settings last until you close the game.
 
 ## Controls
 
@@ -238,7 +248,8 @@ launcher. Menus work with the keyboard (arrows, Enter, Esc), a controller
 (d-pad or stick, A, B) or the mouse.
 
 Options (kept in `settings.ini`): aspect ratio (4:3 or 16:9, the
-game's own two; it sets the game's widescreen option), widescreen HUD, resolution (each
+game's own two, which sets the game's widescreen option; 21:9 and 32:9 widen 16:9),
+texture filtering (anisotropic, off to 16x), resolution (each
 choice shows its size), fullscreen, on-screen FPS counter (off by default), camera
 (Original, Third person (beta) or First person (beta); the right stick, or T F G H, turns it), baked shadows
 (Sharp: each room's light maps are upscaled 4x as it loads, with CMPR's blocks

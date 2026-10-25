@@ -3599,7 +3599,8 @@ static bool game_menu_open(CPUState* cpu) {
 static u32 g_letterbox_height;
 static s32 g_scene_flag_offset;
 static bool sda_ready(const CPUState* cpu);
-static void hold_zero_sanity(CPUState* cpu);
+static void hold_stats(CPUState* cpu);
+static void apply_debug_views(CPUState* cpu);
 static void spawn_requested(CPUState* cpu);
 
 static bool cutscene_playing(CPUState* cpu) {
@@ -3617,7 +3618,8 @@ static void hle_PADRead(CPUState* cpu) {
     controls_set_game_menu(game_menu_open(cpu));
     controls_set_cutscene(cutscene_playing(cpu));
     controls_note_frame(cpu->timebase / 675000ull);
-    hold_zero_sanity(cpu);
+    hold_stats(cpu);
+    apply_debug_views(cpu);
     spawn_requested(cpu);
     u32 motor_mask = dol_platform_pad_read(state);
     if (camera_pad_buttons(cpu, state[0].button))
@@ -5831,7 +5833,9 @@ static void find_letterbox(CPUState* cpu) {
 // the health it has, so hits and the drain at zero sanity do nothing and
 // healing still works.
 static bool g_invincible;
-static bool g_health_found;
+static bool g_one_hit_kills;  // any other character's lower health becomes 0
+static bool g_health_found, g_inner_health_found;
+static u32 player_character(CPUState* cpu);
 static s16 g_health_stats_offset, g_health_offset;
 static unsigned g_health_blocked;
 
@@ -5845,13 +5849,15 @@ static void hle_set_health(CPUState* cpu) {
         return;
     const u32 character = cpu->gpr[3];
     const u32 player = mem_read32(cpu, cpu->gpr[13] + (u32)(s32)g_camera_player_offset);
-    if (!guest_ram_range_valid(cpu, character, 56u) || player == 0u || mem_read32(cpu, character + 52u) != player)
+    if (!guest_ram_range_valid(cpu, character, 56u) || player == 0u)
         return;
     const u32 stats = mem_read32(cpu, character + (u32)(s32)g_health_stats_offset);
     if (!guest_ram_range_valid(cpu, stats + (u32)(s32)g_health_offset, 2u))
         return;
     const s16 health = (s16)mem_read16(cpu, stats + (u32)(s32)g_health_offset);
     const s16 wanted = (s16)cpu->gpr[4];
+    if (mem_read32(cpu, character + 52u) != player)
+        return;
     if (log)
         fprintf(stderr, "[debug] player health %d -> %d (from 0x%08X)%s\n", health, wanted, cpu->lr,
                 g_invincible && wanted < health ? ", kept" : "");
@@ -5861,6 +5867,32 @@ static void hle_set_health(CPUState* cpu) {
     if (g_health_blocked++ % 100u == 0u)
         fprintf(stderr, "[debug] invincible: health stays at %d (the game set %d; %u so far)\n", health, wanted,
                 g_health_blocked);
+}
+
+// The debug menu's One-hit kills, in the setter's inner part, fn(stats,
+// health): the outer one (above) passes the player's changes through it, and
+// the game's hits on enemies call it directly. A lower health for anyone's
+// stats but the player's becomes 0. ED_HEALTH_LOG=1: each such change.
+static void hle_set_health_inner(CPUState* cpu) {
+    static int log = -1;
+    if (log < 0)
+        log = getenv("ED_HEALTH_LOG") != NULL;
+    g_hle_passthrough = true;
+    if (!g_one_hit_kills && !log)
+        return;
+    const u32 stats = cpu->gpr[3];
+    const u32 character = player_character(cpu);
+    if (!guest_ram_range_valid(cpu, stats + (u32)(s32)g_health_offset, 2u) || character == 0u ||
+        mem_read32(cpu, character + (u32)(s32)g_health_stats_offset) == stats)
+        return;
+    const s16 health = (s16)mem_read16(cpu, stats + (u32)(s32)g_health_offset);
+    const s16 wanted = (s16)cpu->gpr[4];
+    if (log)
+        fprintf(stderr, "[debug] stats 0x%08X health %d -> %d (from 0x%08X)\n", stats, health, wanted, cpu->lr);
+    if (!g_one_hit_kills || wanted >= health || wanted <= 0)
+        return;
+    cpu->gpr[4] = 0u;
+    fprintf(stderr, "[debug] one-hit kill: stats 0x%08X health %d -> 0 (the game set %d)\n", stats, health, wanted);
 }
 
 // The setter (PAL, USA): stwu r1,-16(r1) ... lwz r3, stats(r3) ... bl set;
@@ -5888,6 +5920,11 @@ static void find_health_setter(CPUState* cpu) {
     g_health_offset = (s16)(read & 0xFFFFu);
     entry->intercept = hle_set_health;
     g_health_found = true;
+    HleDispatchEntry* inner = hle_dispatch_entry(set);
+    if (mem_read32(cpu, set) == 0x9421FFF0u && inner != NULL && inner->intercept == NULL && inner->notify == NULL) {
+        inner->intercept = hle_set_health_inner;
+        g_inner_health_found = true;
+    }
 }
 
 void hle_set_invincible(bool on) {
@@ -5897,21 +5934,37 @@ void hle_set_invincible(bool on) {
 }
 
 bool hle_invincible(void) { return g_invincible; }
+
+void hle_set_one_hit_kills(bool on) {
+    if (on != g_one_hit_kills)
+        fprintf(stderr, "[debug] one-hit kills %s\n", on ? "on" : "off");
+    g_one_hit_kills = on && g_inner_health_found;
+}
+
+bool hle_one_hit_kills_available(void) { return g_inner_health_found; }
+
+bool hle_one_hit_kills(void) { return g_one_hit_kills; }
 bool hle_invincible_available(void) { return g_health_found; }
 
-// The debug menu's Zero sanity: the player's sanity is 0 at every pad read
-// while it is on, so it stays empty whatever would fill it; off, it fills
-// again the game's own way. The game's stat setter, fn(character, stat,
-// value, notify), keeps sanity (stat 1) as a halfword in a block its actor
-// points to: bl actor (lwz r3, actor(r3); blr) ... lwz r3, block(r31); sth
-// r28, sanity(r3). The player's character is found as the game finds it: the
-// list from its getter (lwz r3, list(r13)), the first and each next at +4,
-// the one whose +52 is the player object.
-static bool g_zero_sanity;
+// The debug menu's Sanity, Infinite magick and Infinite stamina: at every pad
+// read the player's stat is set, to its most (the game's own maximum for it,
+// from fn(character, stat, &most)) or, for Sanity's Always empty, to 0. The
+// game's stat setter, fn(character, stat, value, notify), keeps them as
+// halfwords in a block its actor points to: bl actor (lwz r3, actor(r3);
+// blr) ... lwz r3, block(r31); sth r28, sanity(r3) for stat 1, and the same
+// for magick (stat 2) and stamina (stat 3, which running drains; the game
+// never shows it but for the stamina meter below). The player's character is
+// found as the game finds it: the list from its getter (lwz r3, list(r13)),
+// the first and each next at +4, the one whose +52 is the player object.
+enum { STAT_SANITY = 1, STAT_MAGICK = 2, STAT_STAMINA = 3 };
+static int g_sanity_mode;  // 0 the game's own, 1 always full, 2 always empty
+static bool g_infinite_magick, g_infinite_stamina;
 static bool g_sanity_found;
 static s16 g_sanity_actor_offset, g_sanity_block_offset, g_sanity_offset, g_character_list_offset;
+static s16 g_magick_offset, g_stamina_offset;
+static u32 g_max_stat_fn;
 static u32 g_player_character;  // the last one found, while its +52 is still the player
-static unsigned g_sanity_emptied;
+static unsigned g_stat_holds;
 
 static u32 player_character(CPUState* cpu) {
     if (!sda_ready(cpu))
@@ -5930,29 +5983,59 @@ static u32 player_character(CPUState* cpu) {
     return 0u;
 }
 
-static void hold_zero_sanity(CPUState* cpu) {
-    if (!g_zero_sanity)
+// Hold one of the player's stats at value, or at its most when value < 0.
+static void hold_stat(CPUState* cpu, u32 character, int stat, s16 offset, int value) {
+    const u32 actor = mem_read32(cpu, character + (u32)(s32)g_sanity_actor_offset);
+    if (!guest_ram_range_valid(cpu, actor + (u32)(s32)g_sanity_block_offset, 4u))
+        return;
+    const u32 at = mem_read32(cpu, actor + (u32)(s32)g_sanity_block_offset) + (u32)(s32)offset;
+    if (!guest_ram_range_valid(cpu, at, 2u))
+        return;
+    if (value < 0) {
+        // Its most, by the game's own function, into scratch below the stack.
+        const u32 most = (cpu->gpr[1] - 0x200u) & ~15u;
+        const u32 args[] = {character, (u32)stat, most};
+        u32 found = 0;
+        mem_write16(cpu, most, 0u);
+        if (!hle_guest_call(cpu, g_max_stat_fn, args, 3, 0.0, &found) || found == 0u)
+            return;
+        value = (s16)mem_read16(cpu, most);
+        if (value <= 0)
+            return;
+    }
+    const s16 was = (s16)mem_read16(cpu, at);
+    if (was == value)
+        return;
+    mem_write16(cpu, at, (u16)value);
+    if (g_stat_holds++ % 100u == 0u)
+        fprintf(stderr, "[debug] stat %d held: %d -> %d (%u so far)\n", stat, was, value, g_stat_holds);
+}
+
+static void hold_stats(CPUState* cpu) {
+    if (g_sanity_mode == 0 && !g_infinite_magick && !g_infinite_stamina)
         return;
     const u32 character = player_character(cpu);
     if (character == 0u)
         return;
-    const u32 actor = mem_read32(cpu, character + (u32)(s32)g_sanity_actor_offset);
-    if (!guest_ram_range_valid(cpu, actor + (u32)(s32)g_sanity_block_offset, 4u))
-        return;
-    const u32 sanity = mem_read32(cpu, actor + (u32)(s32)g_sanity_block_offset) + (u32)(s32)g_sanity_offset;
-    if (!guest_ram_range_valid(cpu, sanity, 2u))
-        return;
-    const s16 was = (s16)mem_read16(cpu, sanity);
-    if (was == 0)
-        return;
-    mem_write16(cpu, sanity, 0u);
-    if (g_sanity_emptied++ % 100u == 0u)
-        fprintf(stderr, "[debug] zero sanity: sanity %d -> 0 (%u so far)\n", was, g_sanity_emptied);
+    if (g_sanity_mode != 0)
+        hold_stat(cpu, character, STAT_SANITY, g_sanity_offset, g_sanity_mode == 1 ? -1 : 0);
+    if (g_infinite_magick)
+        hold_stat(cpu, character, STAT_MAGICK, g_magick_offset, -1);
+    if (g_infinite_stamina)
+        hold_stat(cpu, character, STAT_STAMINA, g_stamina_offset, -1);
+}
+
+// ED_STAT_LOG=1 (testing): each call of the game's stat setter.
+static void log_set_stat(CPUState* cpu) {
+    fprintf(stderr, "[stat] 0x%08X stat %d = %d (from 0x%08X)\n", cpu->gpr[3], (int)cpu->gpr[4], (s16)cpu->gpr[5],
+            cpu->lr);
 }
 
 // The setter (PAL, USA) and the game's search for a character, beside the
 // health setter (find_health_setter): stwu ... lwz r3, 4(r3) (the first) ...
-// lwz r0, 52(r3); cmplw r0, r31 ... lwz r3, 4(r3) (the next).
+// lwz r0, 52(r3); cmplw r0, r31 ... lwz r3, 4(r3) (the next). In the setter,
+// each stat's store follows the block's load (lwz r3, block(r31); sth r28,
+// stat(r3)), and the clamp before them asks the game's maximum (bl most).
 static void find_sanity(CPUState* cpu) {
     const bool pal = strcmp(ED_GAME_ID, "GEDP01") == 0;
     const u32 fn = pal ? 0x800354F8u : 0x800389E0u;
@@ -5960,33 +6043,189 @@ static void find_sanity(CPUState* cpu) {
     const u32 actor_bl = mem_read32(cpu, fn + 0x30u);
     const u32 actor = fn + 0x30u + (u32)(((s32)(actor_bl << 6)) >> 6 & ~3);
     const u32 block = mem_read32(cpu, fn + 0x1FCu), store = mem_read32(cpu, fn + 0x200u);
+    const u32 magick_block = mem_read32(cpu, fn + 0x210u), magick = mem_read32(cpu, fn + 0x214u);
+    const u32 stamina_block = mem_read32(cpu, fn + 0x144u), stamina = mem_read32(cpu, fn + 0x148u);
+    const u32 most_bl = mem_read32(cpu, fn + 0x16Cu);
     const u32 list_bl = mem_read32(cpu, search + 0x14u);
     const u32 list = search + 0x14u + (u32)(((s32)(list_bl << 6)) >> 6 & ~3);
     const u32 head = mem_read32(cpu, list + 0x0Cu);
     if (!g_health_found || mem_read32(cpu, fn) != 0x9421FFD0u || (actor_bl & 0xFC000003u) != 0x48000001u ||
         (mem_read32(cpu, actor) >> 16) != 0x8063u || mem_read32(cpu, actor + 4u) != 0x4E800020u ||
-        (block >> 16) != 0x807Fu || (store >> 16) != 0xB383u || (list_bl & 0xFC000003u) != 0x48000001u ||
+        (block >> 16) != 0x807Fu || (store >> 16) != 0xB383u || magick_block != block ||
+        (magick >> 16) != 0xB383u || stamina_block != block || (stamina >> 16) != 0xB383u ||
+        (most_bl & 0xFC000003u) != 0x48000001u || (list_bl & 0xFC000003u) != 0x48000001u ||
         mem_read32(cpu, search + 0x18u) != 0x80630004u || mem_read32(cpu, search + 0x20u) != 0x80030034u ||
         mem_read32(cpu, search + 0x24u) != 0x7C00F840u || mem_read32(cpu, search + 0x30u) != 0x80630004u ||
         (head >> 16) != 0x806Du || mem_read32(cpu, list + 0x10u) != 0x4E800020u) {
-        fprintf(stderr, "[debug] the game's sanity not found: no Zero sanity\n");
+        fprintf(stderr, "[debug] the game's sanity not found: no Sanity, magick or stamina cheats\n");
         return;
     }
     g_sanity_actor_offset = (s16)(mem_read32(cpu, actor) & 0xFFFFu);
     g_sanity_block_offset = (s16)(block & 0xFFFFu);
     g_sanity_offset = (s16)(store & 0xFFFFu);
+    g_magick_offset = (s16)(magick & 0xFFFFu);
+    g_stamina_offset = (s16)(stamina & 0xFFFFu);
+    g_max_stat_fn = fn + 0x16Cu + (u32)(((s32)(most_bl << 6)) >> 6 & ~3);
     g_character_list_offset = (s16)(head & 0xFFFFu);
     g_sanity_found = true;
+    if (getenv("ED_STAT_LOG") != NULL) {
+        HleDispatchEntry* entry = hle_dispatch_entry(fn);
+        if (entry != NULL && entry->notify == NULL)
+            entry->notify = log_set_stat;
+    }
 }
 
-void hle_set_zero_sanity(bool on) {
-    if (on != g_zero_sanity)
-        fprintf(stderr, "[debug] zero sanity %s\n", on ? "on" : "off");
-    g_zero_sanity = on && g_sanity_found;
+void hle_set_sanity_mode(int mode) {
+    if (mode != g_sanity_mode)
+        fprintf(stderr, "[debug] sanity %s\n", mode == 1 ? "always full" : mode == 2 ? "always empty" : "the game's");
+    g_sanity_mode = g_sanity_found && mode >= 0 && mode <= 2 ? mode : 0;
 }
 
-bool hle_zero_sanity(void) { return g_zero_sanity; }
-bool hle_zero_sanity_available(void) { return g_sanity_found; }
+int hle_sanity_mode(void) { return g_sanity_mode; }
+bool hle_stats_available(void) { return g_sanity_found; }
+
+void hle_set_infinite_magick(bool on) {
+    if (on != g_infinite_magick)
+        fprintf(stderr, "[debug] infinite magick %s\n", on ? "on" : "off");
+    g_infinite_magick = on && g_sanity_found;
+}
+
+bool hle_infinite_magick(void) { return g_infinite_magick; }
+
+void hle_set_infinite_stamina(bool on) {
+    if (on != g_infinite_stamina)
+        fprintf(stderr, "[debug] infinite stamina %s\n", on ? "on" : "off");
+    g_infinite_stamina = on && g_sanity_found;
+}
+
+bool hle_infinite_stamina(void) { return g_infinite_stamina; }
+
+// The debug menu's Unlimited ammo: every count of a thing the player carries
+// (rounds, and anything else counted) is set by one function, fn(item,
+// count), as a halfword in the item's data (+68), or a byte (+74) for the
+// kind whose first word is 16 (bl kind; lwz r3, 4(r31); sth r31, 68(r3) ...
+// stb r31, 74(r3)). A lower count becomes the count it has; a higher one (a
+// pickup) still goes in.
+static bool g_unlimited_ammo;
+static bool g_count_found;
+static u32 g_count_fn;
+static unsigned g_count_kept;
+
+static void hle_set_count(CPUState* cpu) {
+    static int log = -1;
+    if (log < 0)
+        log = getenv("ED_STAT_LOG") != NULL;
+    g_hle_passthrough = true;
+    if (log)
+        fprintf(stderr, "[stat] item 0x%08X count = %u (from 0x%08X)\n", cpu->gpr[3], cpu->gpr[4], cpu->lr);
+    if (!g_unlimited_ammo)
+        return;
+    const u32 data = mem_read32(cpu, cpu->gpr[3] + 4u);
+    if (!guest_ram_range_valid(cpu, cpu->gpr[3], 8u) || !guest_ram_range_valid(cpu, data, 76u))
+        return;
+    const bool byte = mem_read32(cpu, data) == 16u;
+    const u32 has = byte ? mem_read8(cpu, data + 74u) : mem_read16(cpu, data + 68u);
+    const u32 wanted = byte ? (cpu->gpr[4] & 0xFFu) : (cpu->gpr[4] & 0xFFFFu);
+    if (wanted >= has)
+        return;
+    cpu->gpr[4] = has;
+    if (g_count_kept++ % 50u == 0u)
+        fprintf(stderr, "[debug] unlimited ammo: count stays at %u (the game set %u; %u so far)\n", has, wanted,
+                g_count_kept);
+}
+
+static void find_count_setter(CPUState* cpu) {
+    const u32 fn = 0x80150990u;
+    HleDispatchEntry* entry = hle_dispatch_entry(fn);
+    if (strcmp(ED_GAME_ID, "GEDP01") != 0 || mem_read32(cpu, fn) != 0x9421FFF0u ||
+        mem_read32(cpu, fn + 0x1Cu) != 0x4BFFFE75u || mem_read32(cpu, fn + 0x30u) != 0xB3E30044u ||
+        mem_read32(cpu, fn + 0x3Cu) != 0x9BE3004Au || mem_read32(cpu, 0x80150820u + 0x0Cu) != 0x4BFFFFE9u ||
+        mem_read32(cpu, 0x80150814u) != 0x80630004u || mem_read32(cpu, 0x80150818u) != 0x80630000u ||
+        entry == NULL || entry->intercept != NULL || entry->notify != NULL) {
+        fprintf(stderr, "[debug] the game's item counts not found: no Unlimited ammo\n");
+        return;
+    }
+    entry->intercept = hle_set_count;
+    g_count_fn = fn;
+    g_count_found = true;
+}
+
+void hle_set_unlimited_ammo(bool on) {
+    if (on != g_unlimited_ammo)
+        fprintf(stderr, "[debug] unlimited ammo %s\n", on ? "on" : "off");
+    g_unlimited_ammo = on && g_count_found;
+}
+
+bool hle_unlimited_ammo(void) { return g_unlimited_ammo; }
+bool hle_unlimited_ammo_available(void) { return g_count_found; }
+
+// The game's own debug displays, left in the European disc (The Cutting Room
+// Floor lists them): 32-bit words beside the widescreen word, each read every
+// frame, 1 = shown, all 0 at boot. One at a time: several together have
+// crashed the game. These drew in the foyer or the temples; the list's others
+// (collision, portals, sky, spawn points, force fields...) drew nothing there,
+// and its performance graph reads 0 for every time here. The stamina meter, a
+// word of the same block, has a row of its own. Found by the one read of the
+// meter's word (lwz r0, meter(r13), before its draw).
+typedef struct {
+    const char* name;
+    u32 address;
+} DebugView;
+static const DebugView kDebugViews[] = {
+    {"Safe frame", 0x8061F394u},        {"Regions", 0x8061F36Cu},         {"Geometry", 0x8061F3B4u},
+    {"Lighting", 0x8061F370u},          {"AI objects", 0x8061F37Cu},      {"Character vectors", 0x8061F3DCu},
+    {"Character radius", 0x8061F3D0u},  {"Object radius", 0x8061F3D4u},   {"Sound sources", 0x8061F358u},
+    {"Textures", 0x8061F35Cu},          {"Vertices", 0x8061F364u},
+};
+#define DEBUG_VIEW_COUNT ((int)(sizeof kDebugViews / sizeof kDebugViews[0]))
+#define STAMINA_METER 0x8061F3D8u
+static bool g_debug_flags_found;
+static int g_debug_view, g_debug_view_shown;  // 0 none, else 1 + the view
+static bool g_stamina_meter, g_stamina_meter_shown;
+
+// Each pad read: the chosen ones on (a state load clears them), and the one
+// just left off.
+static void apply_debug_views(CPUState* cpu) {
+    if (!g_debug_flags_found || !sda_ready(cpu))
+        return;
+    if (g_debug_view != g_debug_view_shown && g_debug_view_shown != 0)
+        mem_write32(cpu, kDebugViews[g_debug_view_shown - 1].address, 0u);
+    if (g_debug_view != 0 && mem_read32(cpu, kDebugViews[g_debug_view - 1].address) != 1u)
+        mem_write32(cpu, kDebugViews[g_debug_view - 1].address, 1u);
+    g_debug_view_shown = g_debug_view;
+    if (g_stamina_meter || g_stamina_meter_shown)
+        if (mem_read32(cpu, STAMINA_METER) != (g_stamina_meter ? 1u : 0u))
+            mem_write32(cpu, STAMINA_METER, g_stamina_meter ? 1u : 0u);
+    g_stamina_meter_shown = g_stamina_meter;
+}
+
+// The meter's draw (PAL): lwz r0, -24648(r13) (0x8061F3D8 with r13 at
+// 0x80625420); cmpwi r0, 0; beq; bl draw.
+static void find_debug_views(CPUState* cpu) {
+    if (strcmp(ED_GAME_ID, "GEDP01") != 0 || mem_read32(cpu, 0x80028314u) != 0x800D9FB8u ||
+        mem_read32(cpu, 0x80028318u) != 0x2C000000u || (mem_read32(cpu, 0x80028320u) & 0xFC000003u) != 0x48000001u) {
+        fprintf(stderr, "[debug] the game's debug displays not found: no Stamina meter or Debug view\n");
+        return;
+    }
+    g_debug_flags_found = true;
+}
+
+bool hle_debug_views_available(void) { return g_debug_flags_found; }
+int hle_debug_view_count(void) { return DEBUG_VIEW_COUNT; }
+const char* hle_debug_view_name(int view) {
+    return view >= 1 && view <= DEBUG_VIEW_COUNT ? kDebugViews[view - 1].name : "Off";
+}
+void hle_set_debug_view(int view) {
+    g_debug_view = g_debug_flags_found && view >= 1 && view <= DEBUG_VIEW_COUNT ? view : 0;
+    fprintf(stderr, "[debug] debug view: %s\n", hle_debug_view_name(g_debug_view));
+}
+int hle_debug_view(void) { return g_debug_view; }
+void hle_set_stamina_meter(bool on) {
+    if (on != g_stamina_meter)
+        fprintf(stderr, "[debug] stamina meter %s\n", on ? "on" : "off");
+    g_stamina_meter = on && g_debug_flags_found;
+}
+bool hle_stamina_meter(void) { return g_stamina_meter; }
 
 // The debug menu's Spawn enemy: one more of a creature already in the area,
 // beside the player, made as the area loader makes them (0x80041868): a
@@ -6068,7 +6307,12 @@ static void spawn_requested(CPUState* cpu) {
     const u32 like = creature_of_type(cpu, type);
     const u32 player = mem_read32(cpu, cpu->gpr[13] + (u32)(s32)g_camera_player_offset);
     if (like == 0u || !guest_ram_range_valid(cpu, player, 64u)) {
-        fprintf(stderr, "[debug] spawn: no type %d here to copy\n", type);
+        int types[16], counts[16];
+        const int n = hle_area_creatures(types, counts, 16);
+        fprintf(stderr, "[debug] spawn: no type %d here to copy (here:", type);
+        for (int i = 0; i < n; i++)
+            fprintf(stderr, " %d x%d", types[i], counts[i]);
+        fprintf(stderr, ")\n");
         return;
     }
     // The record below the stack, above the frames the calls make.
@@ -6391,6 +6635,8 @@ void hle_install(CPUState* cpu) {
     find_health_setter(cpu);
     find_sanity(cpu);
     find_spawn(cpu);
+    find_count_setter(cpu);
+    find_debug_views(cpu);
 #endif
     find_refresh_prompt(cpu);
     publish_codegen_options();

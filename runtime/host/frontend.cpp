@@ -57,9 +57,26 @@ void hle_set_skip_intro(bool on);
 void hle_set_invincible(bool on);
 bool hle_invincible(void);
 bool hle_invincible_available(void);
-void hle_set_zero_sanity(bool on);
-bool hle_zero_sanity(void);
-bool hle_zero_sanity_available(void);
+void hle_set_one_hit_kills(bool on);
+bool hle_one_hit_kills(void);
+bool hle_one_hit_kills_available(void);
+void hle_set_sanity_mode(int mode);
+int hle_sanity_mode(void);
+void hle_set_infinite_magick(bool on);
+bool hle_infinite_magick(void);
+void hle_set_infinite_stamina(bool on);
+bool hle_infinite_stamina(void);
+bool hle_stats_available(void);
+void hle_set_unlimited_ammo(bool on);
+bool hle_unlimited_ammo(void);
+bool hle_unlimited_ammo_available(void);
+bool hle_debug_views_available(void);
+int hle_debug_view_count(void);
+const char* hle_debug_view_name(int view);
+void hle_set_debug_view(int view);
+int hle_debug_view(void);
+void hle_set_stamina_meter(bool on);
+bool hle_stamina_meter(void);
 bool hle_spawn_available(void);
 void hle_spawn(int type);
 int hle_area_creatures(int* types, int* counts, int max);
@@ -590,8 +607,7 @@ const char* const kNotes[kCount] = {
     "On an HDR display, glowing light shines brighter than white.",
     "The rooms' light and shadow: Sharp upscales it as each room loads, Original keeps the disc's soft, blocky maps.",
     "The texture pack in your textures folder.",
-    "Anisotropic filtering: with the HD textures, floors and walls seen at a slant stay sharp into the distance "
-    "instead of blurring. 16x is the sharpest.",
+    "With the HD textures, floors and walls at a slant stay sharp into the distance. 16x is the sharpest.",
 };
 
 }  // namespace enhancement
@@ -702,8 +718,8 @@ void build_options() {
     g_rows.push_back(rate);
 
     Row aspect{"Aspect ratio", kAspect[g_settings.aspect]};
-    aspect.note = "16:9 is the game's own widescreen view: more at the sides, not stretched. 21:9 and 32:9 "
-                  "widen it for an ultrawide screen. The HUD keeps to the screen's edges.";
+    aspect.note = "16:9 is the game's own widescreen view, not stretched; 21:9 and 32:9 widen it for "
+                  "ultrawide screens.";
     aspect.change = [](int dir) {
         static const int kChoices[] = {1, 2, 4, 5};  // 4:3, 16:9, 21:9, 32:9
         int at = 1;
@@ -1006,13 +1022,62 @@ void build_debug() {
     invincible.change = [](int) { hle_set_invincible(!hle_invincible()); };
     g_rows.push_back(invincible);
 
-    Row zero_sanity{"Zero sanity", on_off(hle_zero_sanity())};
-    zero_sanity.enabled = hle_zero_sanity_available();
-    zero_sanity.note = zero_sanity.enabled
-                           ? "Sanity empties and stays empty while on. Off, it fills again the game's own way."
-                           : "Not found in this version of the game.";
-    zero_sanity.change = [](int) { hle_set_zero_sanity(!hle_zero_sanity()); };
-    g_rows.push_back(zero_sanity);
+    static const char* const kNotFound = "Not found in this version of the game.";
+    static const char* const kSanity[] = {"As the game has it", "Always full", "Always empty"};
+    Row sanity{"Sanity", kSanity[hle_sanity_mode()]};
+    sanity.enabled = hle_stats_available();
+    sanity.note = sanity.enabled ? "Always full: no sanity effects. Always empty: they come thick and fast, and "
+                                   "health drains (pair it with Invincible)."
+                                 : kNotFound;
+    sanity.change = [](int dir) {
+        int mode = hle_sanity_mode();
+        cycle(mode, 3, dir);
+        hle_set_sanity_mode(mode);
+    };
+    g_rows.push_back(sanity);
+
+    Row magick{"Infinite magick", on_off(hle_infinite_magick())};
+    magick.enabled = hle_stats_available();
+    magick.note = magick.enabled ? "Magick stays full: cast as much as you like." : kNotFound;
+    magick.change = [](int) { hle_set_infinite_magick(!hle_infinite_magick()); };
+    g_rows.push_back(magick);
+
+    Row ammo{"Unlimited ammo", on_off(hle_unlimited_ammo())};
+    ammo.enabled = hle_unlimited_ammo_available();
+    ammo.note = ammo.enabled ? "Rounds never run down (nor anything else you carry a number of). Pickups still add."
+                             : kNotFound;
+    ammo.change = [](int) { hle_set_unlimited_ammo(!hle_unlimited_ammo()); };
+    g_rows.push_back(ammo);
+
+    Row one_hit{"One-hit kills", on_off(hle_one_hit_kills())};
+    one_hit.enabled = hle_one_hit_kills_available();
+    one_hit.note = one_hit.enabled ? "Any hit on an enemy kills it." : kNotFound;
+    one_hit.change = [](int) { hle_set_one_hit_kills(!hle_one_hit_kills()); };
+    g_rows.push_back(one_hit);
+
+    Row meter{"Stamina meter", on_off(hle_stamina_meter())};
+    meter.enabled = hle_debug_views_available();
+    meter.note = meter.enabled ? "An early stamina meter the finished game never shows: running drains it." : kNotFound;
+    meter.change = [](int) { hle_set_stamina_meter(!hle_stamina_meter()); };
+    g_rows.push_back(meter);
+
+    Row stamina{"Infinite stamina", on_off(hle_infinite_stamina())};
+    stamina.enabled = hle_stats_available();
+    stamina.note = stamina.enabled ? "Stamina stays full: run as long as you like." : kNotFound;
+    stamina.change = [](int) { hle_set_infinite_stamina(!hle_infinite_stamina()); };
+    g_rows.push_back(stamina);
+
+    Row view{"Debug view", std::string("\u2039 ") + hle_debug_view_name(hle_debug_view()) + " \u203a"};
+    view.enabled = hle_debug_views_available();
+    view.note = view.enabled ? "The developers' own displays, left in the game: one at a time (more at once can "
+                               "crash it). Left/Right picks which."
+                             : kNotFound;
+    view.change = [](int dir) {
+        int at = hle_debug_view();
+        cycle(at, hle_debug_view_count() + 1, dir);
+        hle_set_debug_view(at);
+    };
+    g_rows.push_back(view);
 
     // The creature types alive here (the game's own numbers: it names none),
     // the choice kept while its type is still here.
@@ -2390,8 +2455,10 @@ extern "C" void frontend_frame(void) {
         return;
     }
     // LT, RT, L3 and R3 together: the debug menu. ED_DEBUG_MENU_TEST=hold_ms
-    // [,invincible][,zero_sanity]: when it opens (ED_PAD_SCRIPT can hold the
-    // four), the settings named go on and it closes hold_ms later.
+    // [,invincible][,zero_sanity][,full_sanity][,magick][,stamina][,meter]
+    // [,ammo][,one_hit][,view=N][,row=N]: when it opens (ED_PAD_SCRIPT can
+    // hold the four), the settings named go on (row: the one selected) and it
+    // closes hold_ms later.
     if (controls_take_debug_request() && ensure_ui()) {
         g_in_game = true;
         g_screen = Screen::Debug;
@@ -2400,7 +2467,23 @@ extern "C" void frontend_frame(void) {
             if (std::strstr(t, ",invincible") != nullptr)
                 hle_set_invincible(true);
             if (std::strstr(t, ",zero_sanity") != nullptr)
-                hle_set_zero_sanity(true);
+                hle_set_sanity_mode(2);
+            if (std::strstr(t, ",full_sanity") != nullptr)
+                hle_set_sanity_mode(1);
+            if (std::strstr(t, ",magick") != nullptr)
+                hle_set_infinite_magick(true);
+            if (std::strstr(t, ",stamina") != nullptr)
+                hle_set_infinite_stamina(true);
+            if (std::strstr(t, ",meter") != nullptr)
+                hle_set_stamina_meter(true);
+            if (std::strstr(t, ",ammo") != nullptr)
+                hle_set_unlimited_ammo(true);
+            if (std::strstr(t, ",one_hit") != nullptr)
+                hle_set_one_hit_kills(true);
+            if (const char* v = std::strstr(t, ",view="); v != nullptr)
+                hle_set_debug_view(std::atoi(v + 6));
+            if (const char* r = std::strstr(t, ",row="); r != nullptr)
+                g_selected = std::atoi(r + 5);
             g_test_close_at = SDL_GetTicks() + static_cast<Uint64>(std::atoi(t));
         }
         report_pause(true);

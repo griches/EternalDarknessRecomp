@@ -20,10 +20,32 @@ void hle_set_skip_intro(bool on);
 void hle_set_invincible(bool on);
 bool hle_invincible(void);
 bool hle_invincible_available(void);
-// Zero sanity: the player's sanity held at 0 while on.
-void hle_set_zero_sanity(bool on);
-bool hle_zero_sanity(void);
-bool hle_zero_sanity_available(void);
+// One-hit kills: any lower health for another character becomes 0.
+void hle_set_one_hit_kills(bool on);
+bool hle_one_hit_kills(void);
+bool hle_one_hit_kills_available(void);
+// Sanity (0 the game's own, 1 always full, 2 always empty), Infinite magick
+// and Infinite stamina: the player's stat held at each pad read.
+void hle_set_sanity_mode(int mode);
+int hle_sanity_mode(void);
+void hle_set_infinite_magick(bool on);
+bool hle_infinite_magick(void);
+void hle_set_infinite_stamina(bool on);
+bool hle_infinite_stamina(void);
+bool hle_stats_available(void);
+// Unlimited ammo: no count of a carried thing goes down.
+void hle_set_unlimited_ammo(bool on);
+bool hle_unlimited_ammo(void);
+bool hle_unlimited_ammo_available(void);
+// The game's own debug displays (PAL): one at a time (0 none, 1..count), and
+// the stamina meter the game never shows.
+bool hle_debug_views_available(void);
+int hle_debug_view_count(void);
+const char* hle_debug_view_name(int view);
+void hle_set_debug_view(int view);
+int hle_debug_view(void);
+void hle_set_stamina_meter(bool on);
+bool hle_stamina_meter(void);
 // Spawn enemy: another of a creature type alive in the area (the player's
 // thread makes it at its next pad read), and the types there with how many
 // of each (types/counts up to max; returns how many types).

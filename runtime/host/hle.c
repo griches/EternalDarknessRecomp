@@ -6051,7 +6051,36 @@ static void hold_invincible(CPUState* cpu) {
     fprintf(stderr, "[debug] invincible: the game's own flag set in stats 0x%08X\n", stats);
 }
 
+// ED_HEALTH_LOG=1 (testing): each pad read, any character whose health
+// changed since the last, however it changed (the setters log their own).
+static void watch_health(CPUState* cpu) {
+    static int log = -1;
+    static u32 seen[1024];  // by place in the list (it keeps its order)
+    static s16 had[1024];
+    if (log < 0)
+        log = getenv("ED_HEALTH_LOG") != NULL;
+    if (!log || !sda_ready(cpu))
+        return;
+    u32 node = mem_read32(cpu, cpu->gpr[13] + (u32)(s32)g_character_list_offset);
+    for (int i = 0; i < 1024 && guest_ram_range_valid(cpu, node, 8u); i++) {
+        node = mem_read32(cpu, node + 4u);
+        if (!guest_ram_range_valid(cpu, node, 56u))
+            break;
+        const u32 stats = mem_read32(cpu, node + (u32)(s32)g_health_stats_offset);
+        const u32 actor = mem_read32(cpu, node + (u32)(s32)g_sanity_actor_offset);
+        if (!guest_ram_range_valid(cpu, stats + (u32)(s32)g_health_offset, 2u) || !guest_ram_range_valid(cpu, actor, 160u))
+            continue;
+        const s16 health = (s16)mem_read16(cpu, stats + (u32)(s32)g_health_offset);
+        if (seen[i] == node && had[i] != health)
+            fprintf(stderr, "[watch] character 0x%08X (type %u, class %u, stats 0x%08X) health %d -> %d\n", node,
+                    mem_read16(cpu, actor + 152u), mem_read8(cpu, actor + 158u), stats, had[i], health);
+        seen[i] = node;
+        had[i] = health;
+    }
+}
+
 static void hold_stats(CPUState* cpu) {
+    watch_health(cpu);
     hold_invincible(cpu);
     if (g_sanity_mode == 0 && !g_infinite_magick && !g_infinite_stamina)
         return;

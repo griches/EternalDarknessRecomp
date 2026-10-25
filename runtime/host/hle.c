@@ -5949,6 +5949,73 @@ static void hle_part_damage(CPUState* cpu) {
     }
 }
 
+// The debug menu's Light around you: the game keeps a light of its own on the
+// player, every frame, a little above them (the object at 0x8060546C, GX
+// light 7, range 20000), always black, and only in the second colour channel
+// (COLOR1), which almost nothing draws with. While on, as the game loads it
+// (fn(light, pos, ..., slot, ..., spot) at 0x801E54BC) it takes the colour and
+// a point light's falloff with distance, as a cast spell's light has (the
+// spot argument: direction, distance at +12, cutoff +14, distance function
+// +15, spot function +16, here in scratch below the stack); and as the game
+// sets its channels (fn(color0 lights, color1 lights) at 0x801E58C8) light 7
+// joins COLOR0, the lights models are lit by.
+#define PLAYER_LIGHT 0x8060546Cu
+#define PLAYER_LIGHT_REACH 700u  // the distance its light falls off over
+static u32 g_player_light_colour;  // RGBA, 0 = the game's own (black)
+static bool g_player_light_found;
+
+static void hle_light_load(CPUState* cpu) {
+    g_hle_passthrough = true;
+    if (g_player_light_colour == 0u || cpu->gpr[3] != PLAYER_LIGHT)
+        return;
+    mem_write32(cpu, PLAYER_LIGHT + 12u, g_player_light_colour);
+    const u32 spot = (cpu->gpr[1] - 0x600u) & ~15u;
+    guest_write_f32(cpu, spot, 0.0f);
+    guest_write_f32(cpu, spot + 4u, 0.0f);
+    guest_write_f32(cpu, spot + 8u, -1.0f);
+    mem_write16(cpu, spot + 12u, (u16)PLAYER_LIGHT_REACH);
+    mem_write8(cpu, spot + 14u, 90u);
+    mem_write8(cpu, spot + 15u, 2u);  // GX_DA_MEDIUM
+    mem_write8(cpu, spot + 16u, 0u);  // GX_SP_OFF
+    cpu->gpr[9] = spot;
+}
+
+static void hle_light_channels(CPUState* cpu) {
+    g_hle_passthrough = true;
+    if (g_player_light_colour != 0u)
+        cpu->gpr[3] |= 0x80u;
+}
+
+void hle_set_player_light(u32 rgba) {
+    if (rgba != g_player_light_colour)
+        fprintf(stderr, "[debug] light around the player: 0x%08X\n", rgba);
+    g_player_light_colour = g_player_light_found ? rgba : 0u;
+}
+
+u32 hle_player_light(void) { return g_player_light_colour; }
+bool hle_player_light_available(void) { return g_player_light_found; }
+
+// ED_LIGHT_LOG=1 (testing): each light object the game loads into GX, once
+// per new object (fn(light, ...) at 0x801E54BC), with its colour and the
+// words after it, and each 120 frames how many it loaded.
+static void log_light_load(CPUState* cpu) {
+    static u32 seen[512];
+    static int n;
+    const u32 light = cpu->gpr[3];
+    for (int i = 0; i < n; i++)
+        if (seen[i] == light)
+            return;
+    if (n < 512)
+        seen[n++] = light;
+    if (!guest_ram_range_valid(cpu, light, 48u))
+        return;
+    fprintf(stderr, "[light] new 0x%08X from 0x%08X r4 0x%08X r5 0x%08X r7 %u r8 0x%08X r9 0x%08X:", light, cpu->lr,
+            cpu->gpr[4], cpu->gpr[5], cpu->gpr[7] & 0xFFu, cpu->gpr[8], cpu->gpr[9]);
+    for (u32 o = 0; o < 48u; o += 4u)
+        fprintf(stderr, " %08X", mem_read32(cpu, light + o));
+    fprintf(stderr, "\n");
+}
+
 // The setter (PAL, USA): stwu r1,-16(r1) ... lwz r3, stats(r3) ... bl set;
 // li r0, 1, where set reads and writes the health (lha r3, health(r30); sth
 // r31, health(r30)); and the search for the player's character: lwz r0,
@@ -5974,6 +6041,26 @@ static void find_health_setter(CPUState* cpu) {
     g_health_offset = (s16)(read & 0xFFFFu);
     entry->intercept = hle_set_health;
     g_health_found = true;
+    // The player's light: lis r3, 0x8060; addi r3, r3, 21612 (0x8060546C) ...
+    // li r6, 20000; bl init ... li r6, 7; ... bl load (0x801E54BC).
+    HleDispatchEntry* light_load = hle_dispatch_entry(0x801E54BCu);
+    if (strcmp(ED_GAME_ID, "GEDP01") == 0 && mem_read32(cpu, 0x801F2D84u) == 0x3C608060u &&
+        mem_read32(cpu, 0x801F2D8Cu) == 0x3863546Cu && mem_read32(cpu, 0x801F2D98u) == 0x38C04E20u &&
+        mem_read32(cpu, 0x801F2DB0u) == 0x38C00007u && mem_read32(cpu, 0x801E54BCu) == 0x9421FF50u && light_load != NULL &&
+        light_load->intercept == NULL && light_load->notify == NULL) {
+        HleDispatchEntry* channels = hle_dispatch_entry(0x801E58C8u);
+        if (mem_read32(cpu, 0x801E58C8u) == 0x9421FF60u && mem_read32(cpu, 0x801E58FCu) == 0x7C7D1B78u &&
+            channels != NULL && channels->intercept == NULL && channels->notify == NULL) {
+            light_load->intercept = hle_light_load;
+            channels->intercept = hle_light_channels;
+            g_player_light_found = true;
+        }
+        if (getenv("ED_LIGHT_LOG") != NULL)
+            light_load->notify = log_light_load;
+    }
+    const char* test_light = getenv("ED_PLAYER_LIGHT");  // testing: RRGGBBAA
+    if (test_light != NULL)
+        hle_set_player_light((u32)strtoul(test_light, NULL, 16));
     HleDispatchEntry* part = hle_dispatch_entry(0x800623B0u);
     if (strcmp(ED_GAME_ID, "GEDP01") == 0 && mem_read32(cpu, 0x800623B0u) == 0x9421FFE0u &&
         mem_read32(cpu, PART_HIT_RETURN - 4u) == 0x4BFFF57Du && part != NULL && part->intercept == NULL &&

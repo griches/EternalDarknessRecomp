@@ -46,6 +46,11 @@ void hle_set_debug_view(int view);
 int hle_debug_view(void);
 void hle_set_stamina_meter(bool on);
 bool hle_stamina_meter(void);
+// Light around you: the game's own light on the player, in this colour (RGBA;
+// 0 = off, the game's black).
+void hle_set_player_light(u32 rgba);
+u32 hle_player_light(void);
+bool hle_player_light_available(void);
 // Spawn enemy: another of a creature type alive in the area (the player's
 // thread makes it at its next pad read), and the types there with how many
 // of each (types/counts up to max; returns how many types).

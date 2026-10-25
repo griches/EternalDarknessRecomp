@@ -77,6 +77,9 @@ void hle_set_debug_view(int view);
 int hle_debug_view(void);
 void hle_set_stamina_meter(bool on);
 bool hle_stamina_meter(void);
+void hle_set_player_light(uint32_t rgba);
+uint32_t hle_player_light(void);
+bool hle_player_light_available(void);
 bool hle_spawn_available(void);
 void hle_spawn(int type);
 int hle_area_creatures(int* types, int* counts, int max);
@@ -1066,6 +1069,25 @@ void build_debug() {
     stamina.note = stamina.enabled ? "Stamina stays full: run as long as you like." : kNotFound;
     stamina.change = [](int) { hle_set_infinite_stamina(!hle_infinite_stamina()); };
     g_rows.push_back(stamina);
+
+    // A lantern's warm light, or a cast spell's purple.
+    static const uint32_t kLights[] = {0u, 0xB09068FFu, 0xA388E9FFu};
+    static const char* const kLightNames[] = {"Off", "Lantern", "Magick"};
+    int light = 0;
+    for (int i = 0; i < 3; i++)
+        if (kLights[i] == hle_player_light())
+            light = i;
+    Row glow{"Light around you", std::string("\u2039 ") + kLightNames[light] + " \u203a"};
+    glow.enabled = hle_player_light_available();
+    glow.note = glow.enabled ? "A light of your own that goes where you go: a lantern's warm light, or a spell's "
+                               "purple. Left/Right picks which."
+                             : kNotFound;
+    glow.change = [light](int dir) {
+        int at = light;
+        cycle(at, 3, dir);
+        hle_set_player_light(kLights[at]);
+    };
+    g_rows.push_back(glow);
 
     Row view{"Debug view", std::string("\u2039 ") + hle_debug_view_name(hle_debug_view()) + " \u203a"};
     view.enabled = hle_debug_views_available();
@@ -2480,6 +2502,8 @@ extern "C" void frontend_frame(void) {
                 hle_set_unlimited_ammo(true);
             if (std::strstr(t, ",one_hit") != nullptr)
                 hle_set_one_hit_kills(true);
+            if (std::strstr(t, ",lantern") != nullptr)
+                hle_set_player_light(0xB09068FFu);
             if (const char* v = std::strstr(t, ",view="); v != nullptr)
                 hle_set_debug_view(std::atoi(v + 6));
             if (const char* r = std::strstr(t, ",row="); r != nullptr)

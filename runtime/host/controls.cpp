@@ -479,10 +479,12 @@ int live_value(SDL_Gamepad* pad, int n) {
 // The debug menu (frontend.cpp): LT, RT, L3 and R3 held together. The game
 // does not see the four from then until they are let go, and the toggles
 // (sprint and creep on the stick clicks in Modern) are as they were before
-// the first of them went down.
+// the first of them went down. On the keyboard, the key left of 1 (` on a US
+// layout, § on a UK Mac's: SDL names it either way round on Mac ISO boards).
 constexpr int kDebugCombo[4] = {kLT, kRT, kL3, kR3};
 std::atomic<bool> g_debug_request{false};
 bool g_debug_combo_was = false;
+bool g_debug_key_was = false;
 bool g_toggled_before_combo[kActionCount];
 
 void check_debug_combo(SDL_Gamepad* pad) {
@@ -500,6 +502,12 @@ void check_debug_combo(SDL_Gamepad* pad) {
         std::fprintf(stderr, "[controls] debug menu combo at frame %llu\n", g_frame.load());
     }
     g_debug_combo_was = all;
+    const bool key = key_down(SDL_SCANCODE_GRAVE) || key_down(SDL_SCANCODE_NONUSBACKSLASH);
+    if (key && !g_debug_key_was) {
+        g_debug_request.store(true, std::memory_order_relaxed);
+        std::fprintf(stderr, "[controls] debug menu key at frame %llu\n", g_frame.load());
+    }
+    g_debug_key_was = key;
 }
 
 // Input recording and replay (controls_record_start, ED_PAD_REPLAY): one

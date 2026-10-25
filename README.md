@@ -150,7 +150,8 @@ folder, or the Mac app's
 - **Problem reports**: if the game stops responding, stops or crashes, it says
   so on screen and writes a report to `saves/reports/` to send.
 - **Debug menu**: hold LT, RT and both stick clicks together in play (L2, R2,
-  L3 and R3 on a PlayStation controller). Invincible; sanity always full or
+  L3 and R3 on a PlayStation controller), or press the key left of 1 (` or §)
+  on the keyboard. Invincible; sanity always full or
   always empty; infinite magick and stamina; unlimited ammo; one-hit kills; the
   early stamina meter the finished game never shows; the developers' own debug
   views (safe frame, regions, lighting, AI objects and more); and another of

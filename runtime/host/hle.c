@@ -6320,12 +6320,15 @@ static void log_game_mode(CPUState* cpu) {
         on = getenv("ED_MODE_LOG") != NULL;
     if (!on || !sda_ready(cpu))
         return;
+    static u32 queued_was = 0xFFFFFFFFu;
     const u32 mode = mem_read32(cpu, cpu->gpr[13] - 26240u);
-    if (mode != was)
-        fprintf(stderr, "[mode] %u -> %u (requested %u, back to %u) at frame %llu\n", was, mode,
-                mem_read32(cpu, cpu->gpr[13] - 26188u), mem_read32(cpu, cpu->gpr[13] - 26244u),
+    const u32 queued = mem_read32(cpu, cpu->gpr[13] - 24244u);
+    if (mode != was || queued != queued_was)
+        fprintf(stderr, "[mode] %u -> %u (requested %u, back to %u, after loading %u) at frame %llu\n", was, mode,
+                mem_read32(cpu, cpu->gpr[13] - 26188u), mem_read32(cpu, cpu->gpr[13] - 26244u), queued,
                 (unsigned long long)(cpu->timebase / 675000ull));
     was = mode;
+    queued_was = queued;
 }
 
 // The insanity effects that take over the screen (the quote of a restart,
@@ -6365,6 +6368,23 @@ static void request_insanity(CPUState* cpu) {
     fprintf(stderr, "[debug] insanity effect: mode %d\n", mode);
 }
 
+// ED_INSANITY_SWAP=mode (testing): whichever insanity screen the game asks
+// for, this one plays instead. Done where the main loop takes the request
+// (0x80018728, each frame), so it is the game's own start of a screen.
+static int g_insanity_swap = -1;
+
+static bool insanity_screen(u32 mode) { return mode == 7u || mode == 8u || (mode >= 10u && mode <= 13u); }
+
+static void hle_mode_switch(CPUState* cpu) {
+    g_hle_passthrough = true;
+    const u32 asked = mem_read32(cpu, cpu->gpr[13] - 26188u);
+    if (g_insanity_swap < 0 || asked == (u32)g_insanity_swap || !insanity_screen(asked) ||
+        asked == mem_read32(cpu, cpu->gpr[13] - 26240u))
+        return;
+    mem_write32(cpu, cpu->gpr[13] - 26188u, (u32)g_insanity_swap);
+    fprintf(stderr, "[debug] insanity screen %u asked for: %d instead\n", asked, g_insanity_swap);
+}
+
 static void find_insanity(CPUState* cpu) {
     if (strcmp(ED_GAME_ID, "GEDP01") != 0 || mem_read32(cpu, 0x80018808u) != 0x906D99B4u ||
         mem_read32(cpu, 0x8001880Cu) != 0x4E800020u || mem_read32(cpu, 0x80238810u + 7u * 8u) != 0x80112D98u ||
@@ -6373,6 +6393,14 @@ static void find_insanity(CPUState* cpu) {
         return;
     }
     g_insanity_found = true;
+    const char* swap = getenv("ED_INSANITY_SWAP");
+    HleDispatchEntry* entry = hle_dispatch_entry(0x80018728u);
+    if (swap != NULL && insanity_screen((u32)atoi(swap)) && entry != NULL && entry->intercept == NULL &&
+        entry->notify == NULL && mem_read32(cpu, 0x80018734u) == 0x806D9980u && mem_read32(cpu, 0x80018738u) == 0x808D99B4u) {
+        g_insanity_swap = atoi(swap);
+        entry->intercept = hle_mode_switch;
+        fprintf(stderr, "[debug] insanity screens: %d plays in place of each\n", g_insanity_swap);
+    }
 }
 
 bool hle_insanity_available(void) { return g_insanity_found; }

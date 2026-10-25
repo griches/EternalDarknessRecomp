@@ -16,7 +16,11 @@ Version 0.9.6.
 
 ## What you need
 
-- Your own image of the European disc: an `.iso` or `.gcm` file.
+- Your own image of the European disc: an `.iso` or `.gcm` file. An image in
+  another format (`.rvz`, `.gcz`, `.wia` or `.ciso`) needs turning into an
+  `.iso` first: open it in [Dolphin](https://dolphin-emu.org/), right-click the
+  game in its list, choose **Convert File...**, set **Format** to **ISO** and
+  click **Convert...**.
 - For the HD textures, a program that opens `.7z` files: 7-Zip on Windows, Keka
   or The Unarchiver on a Mac, Ark on a Steam Deck's desktop.
 
@@ -100,7 +104,8 @@ on and sharp baked shadows. In **Options > Game**, **HD textures** should say
 - **The Mac says the app can't be opened**: right-click it and choose **Open**
   (step 2 above).
 - **The disc isn't accepted**: only the European disc (`GEDP01`) works, as an
-  `.iso` or `.gcm`.
+  `.iso` or `.gcm`. Turn an `.rvz` or other format into an `.iso` with Dolphin
+  (see [What you need](#what-you-need)).
 - **HD textures says No pack**: the pack isn't inside `textures`. Check the
   folder against the one above, then start the game again: it looks for the
   pack as it starts.

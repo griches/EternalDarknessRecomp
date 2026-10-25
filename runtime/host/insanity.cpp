@@ -93,7 +93,8 @@ Platform platform() {
 // menus' Fira Sans; mono for console text.
 struct Faces {
     ImFont* ui = nullptr;
-    ImFont* light = nullptr;  // the PS5's thin system type
+    ImFont* light = nullptr;    // the PS5's thin system type
+    ImFont* regular = nullptr;  // and its body text
     ImFont* bold = nullptr;
     ImFont* mono = nullptr;
     ImFont* menu = nullptr;  // our menu's faces (menu.rcss), for the save states
@@ -143,7 +144,13 @@ bool any_press() {
 
 // Left or right, as pressed this frame (-1, +1, 0): the d-pad, the left stick,
 // the arrow keys.
+int g_test_sideways = 0;  // a test's left or right (run_modal), taken once
+
 int sideways_press() {
+    if (const int test = g_test_sideways; test != 0) {
+        g_test_sideways = 0;
+        return test;
+    }
     static int was = 0;
     int now = 0;
     if (dol_aurora_key_down(SDL_SCANCODE_LEFT))
@@ -643,6 +650,9 @@ bool linux_kernel_panic(const Step& s) {
 // k, and where the 16:9 frame the PS5 draws in sits on this screen (all of a
 // PS5's; the middle of a wider or taller window).
 float ps5_k() { return std::min(screen().x / 1920.f, screen().y / 1080.f); }
+
+// The black before a PS5 screen, as the game gives way to the system's.
+constexpr double kGiveWay = 0.5;
 float ps5_ox() { return (screen().x - 1920.f * ps5_k()) * 0.5f; }
 float ps5_oy() { return (screen().y - 1080.f * ps5_k()) * 0.5f; }
 
@@ -650,6 +660,7 @@ ImFont* ps5_face() {
     return g_faces.light != nullptr ? g_faces.light : g_faces.ui != nullptr ? g_faces.ui : ImGui::GetFont();
 }
 ImFont* ps5_medium() { return g_faces.ui != nullptr ? g_faces.ui : ps5_face(); }
+ImFont* ps5_regular() { return g_faces.regular != nullptr ? g_faces.regular : ps5_face(); }
 
 // Its backdrops, as 32 x 18 colours averaged from its own screens (a soft
 // room, so stretched they are it): the dim room lit from the top left behind
@@ -850,10 +861,17 @@ void ps5_motes(ImDrawList* d, double t, float alpha) {
     }
 }
 
-// Text at `size` so that `fit` (the PS5's own line, measured) spans `width`.
-float ps5_size(ImFont* f, const char* fit, float width) {
+// Text at `size` so that `fit` (the PS5's own line, measured) spans `width`
+// and its capitals stand `cap` high, as near as this face's proportions let
+// both be (the size between the two).
+float ps5_size(ImFont* f, const char* fit, float width, float cap = 0.f) {
     const float at_one = f->CalcTextSizeA(1.f, FLT_MAX, 0.f, fit).x;
-    return at_one > 0.f ? width / at_one : 30.f * ps5_k();
+    const float by_width = at_one > 0.f ? width / at_one : 30.f * ps5_k();
+    const ImFontGlyph* h = f->FindGlyph('H');
+    if (cap <= 0.f || h == nullptr || h->Y1 <= h->Y0)
+        return by_width;
+    const float by_cap = cap * f->FontSize / (h->Y1 - h->Y0);
+    return std::sqrt(by_width * by_cap);
 }
 
 // The top of the capitals at `size`, below the top of the line.
@@ -873,7 +891,7 @@ float ps5_width(ImFont* f, float size, const char* text) { return f->CalcTextSiz
 void ps5_title(ImDrawList* d, const char* title, float alpha) {
     const float k = ps5_k();
     ImFont* f = ps5_face();
-    const float size = ps5_size(f, "System Software Update", 492.f * k);
+    const float size = ps5_size(f, "System Software Update", 492.f * k, 35.f * k);
     ps5_text(d, f, size, ps5_ox() + 98.f * k, ps5_oy() + 86.f * k, rgba(0xf4, 0xf2, 0xf4, alpha), title);
 }
 
@@ -893,8 +911,9 @@ void ps5_button(ImDrawList* d, ImVec2 centre, const char* label, bool focus, boo
     } else {
         d->AddRectFilled(a, b, rgba(0xff, 0xff, 0xff, 0.085f * alpha), h * 0.5f);
     }
-    ImFont* f = ps5_medium();
-    const float size = ps5_size(f, "View Details", 168.f * k);
+    // Bold on the glass, regular on the focus, as the PS5 sets them.
+    ImFont* f = focus ? ps5_regular() : ps5_medium();
+    const float size = ps5_size(ps5_medium(), "View Details", 168.f * k, 20.5f * k);
     const float tw = ps5_width(f, size, label);
     const float cap = f->FindGlyph('H') != nullptr ? (f->FindGlyph('H')->Y1 - f->FindGlyph('H')->Y0) * size / f->FontSize
                                                    : size * 0.7f;
@@ -908,19 +927,91 @@ void ps5_no_sign(ImDrawList* d, ImVec2 c, float r, ImU32 colour) {
     d->AddLine(ImVec2{c.x - r * 0.62f, c.y - r * 0.62f}, ImVec2{c.x + r * 0.62f, c.y + r * 0.62f}, colour, r * 0.2f);
 }
 
-// The body: lines left-aligned as a block, the block centred, 62 apart, sized
-// as the PS5's "The PS5 system software will be updated." (542 wide).
+// The body's size: as the PS5's "The PS5 system software will be updated."
+// (548 wide, capitals 20.5).
+float ps5_body_size(ImFont* f) {
+    return ps5_size(f, "The PS5 system software will be updated.", 548.f * ps5_k(), 20.5f * ps5_k());
+}
+
+// The body: lines left-aligned as a block, the block centred, 61 apart.
 void ps5_body(ImDrawList* d, const char* const* lines, int count, float first_cap_top, float alpha) {
     const ImVec2 sc = screen();
     const float k = ps5_k();
-    ImFont* f = ps5_face();
-    const float size = ps5_size(f, "The PS5 system software will be updated.", 542.f * k);
+    ImFont* f = ps5_regular();
+    const float size = ps5_body_size(f);
     float widest = 0.f;
     for (int i = 0; i < count; i++)
         widest = std::max(widest, ps5_width(f, size, lines[i]));
     for (int i = 0; i < count; i++)
-        ps5_text(d, f, size, (sc.x - widest) * 0.5f, first_cap_top + i * 62.f * k, rgba(0xe7, 0xe6, 0xed, alpha),
+        ps5_text(d, f, size, (sc.x - widest) * 0.5f, first_cap_top + i * 61.f * k, rgba(0xe7, 0xe6, 0xed, alpha),
                  lines[i]);
+}
+
+// https://www.youtube.com/watch?v=OrOYvVf6tIM, level H (macOS CIQRCodeGenerator), 1 = a module.
+const char* const kUpdateQr[37] = {
+    "1111111000110110010000001010001111111",
+    "1000001000111101111010001110001000001",
+    "1011101011111001001100101100101011101",
+    "1011101010101110010101101110101011101",
+    "1011101001100001000010000000001011101",
+    "1000001001111100011111011010001000001",
+    "1111111010101010101010101010101111111",
+    "0000000000010101010010011111100000000",
+    "0001101101011001110011010110000001100",
+    "1100110110010101111101101111011110100",
+    "0110111111101011001111101101011001101",
+    "0111100000111110110110000011011101100",
+    "0100001001101000100111010001101101100",
+    "1010100010100010000110001101110010100",
+    "1001111100000111101111011111011011101",
+    "0010000010111001110011011001111111110",
+    "1001111010010101100100011111001100101",
+    "1100100011101000101011111101000101010",
+    "1100011011101010010001110001011001001",
+    "0011000011100110110111000100111001010",
+    "0101001111000111000001110011111010000",
+    "0101010001010011001110011101110111010",
+    "1111101110110110111111101011001010001",
+    "1011100111110010010110010011110100100",
+    "1001001110001011011000101100001001000",
+    "1101000001001000101101000111000011100",
+    "1111001010101010100000011011101000011",
+    "1011010110010111000110110001010001110",
+    "1011101011001011110010001101111110011",
+    "0000000011000100111111110110100011100",
+    "1111111011100110110000010000101011101",
+    "1000001001000110000101100111100011010",
+    "1011101011110111001011011011111110011",
+    "1011101011000110011010001010101100000",
+    "1011101000100100011100010100000110011",
+    "1000001001101110011001110001001111111",
+    "1111111001011101100101100010111001001",
+};
+
+// The QR code as the PS5 shows it: light modules in a dark rounded square,
+// the PlayStation shapes on a dark patch in its middle (the code's error
+// correction reads through it).
+void ps5_qr(ImDrawList* d, ImVec2 at, float box, float alpha) {
+    const float k = ps5_k();
+    d->AddRectFilled(at, ImVec2{at.x + box, at.y + box}, rgba(0x14, 0x14, 0x1a, 0.62f * alpha), 6.f * k);
+    const float inset = 16.f * k, m = (box - 2.f * inset) / 37.f;
+    const ImU32 light = rgba(0xf2, 0xf2, 0xf4, alpha);
+    for (int y = 0; y < 37; y++)
+        for (int x = 0; x < 37; x++)
+            if (kUpdateQr[y][x] == '1' && !(x >= 14 && x <= 22 && y >= 14 && y <= 22))
+                d->AddRectFilled(ImVec2{at.x + inset + x * m, at.y + inset + y * m},
+                                 ImVec2{at.x + inset + (x + 1) * m, at.y + inset + (y + 1) * m}, light);
+    // The shapes: triangle and circle above, cross and square below.
+    const ImVec2 c{at.x + inset + 18.5f * m, at.y + inset + 18.5f * m};
+    const float r = m * 1.15f, w = std::max(1.f, m * 0.38f), s2 = m * 1.55f;
+    const ImVec2 tri{c.x - s2, c.y - s2}, cir{c.x + s2, c.y - s2}, crs{c.x - s2, c.y + s2}, sq{c.x + s2, c.y + s2};
+    d->AddTriangle(ImVec2{tri.x, tri.y - r}, ImVec2{tri.x + r * 0.9f, tri.y + r * 0.6f},
+                   ImVec2{tri.x - r * 0.9f, tri.y + r * 0.6f}, light, w);
+    d->AddCircle(cir, r * 0.85f, light, 16, w);
+    d->AddLine(ImVec2{crs.x - r * 0.75f, crs.y - r * 0.75f}, ImVec2{crs.x + r * 0.75f, crs.y + r * 0.75f}, light, w);
+    d->AddLine(ImVec2{crs.x - r * 0.75f, crs.y + r * 0.75f}, ImVec2{crs.x + r * 0.75f, crs.y - r * 0.75f}, light, w);
+    d->AddRect(ImVec2{sq.x - r * 0.75f, sq.y - r * 0.75f}, ImVec2{sq.x + r * 0.75f, sq.y + r * 0.75f}, light, 0.f, 0,
+               w);
 }
 
 // A notice in the PS5's manner (Temperature Alert, an update that failed):
@@ -950,6 +1041,10 @@ bool ps5_too_hot(const Step& s) {
         pressed = -1.0;
     static const char* const kLines[] = {
         "Your PS5 is too hot. Turn off your PS5, and wait until the temperature goes down."};
+    if (s.t < kGiveWay) {
+        canvas()->AddRectFilled(ImVec2{0, 0}, screen(), IM_COL32(0, 0, 0, 0xff));
+        return true;
+    }
     if (pressed < 0.0 && s.t > 20.0)
         pressed = s.t;
     if (pressed < 0.0 || s.t - pressed < 0.25) {
@@ -1050,62 +1145,75 @@ bool ps5_trophy(const Step& s) {
     return s.t < kShown;
 }
 
-// System software 14.20: the PS5 asks to update; whichever button is
-// pressed, it restarts into the install, its bar creeps up to 99% and stops
-// there; then it can't update the system software (SU-42118-6, as a real
-// failed update says), OK, and the game, as if none of it was real.
+// System software 14.20, as the PS5 asks today: the two lines, the update's
+// details behind a QR code, Cancel and Update. Whichever is pressed, it
+// restarts into the install; the bar climbs to 100%, stays a couple of
+// seconds, and the game is back, as if none of it was real.
 bool ps5_update(const Step& s) {
-    constexpr double kDark = 1.6, kClimb = 10.0, kStuck = 4.5;
-    static double pressed = -1.0, chosen = -1.0;
-    static int focus = 2;
+    constexpr double kDark = 1.6, kClimb = 11.0, kFull = 2.2;
+    static double chosen = -1.0;
+    static int focus = 1;
     if (s.first) {
-        pressed = chosen = -1.0;
-        focus = 2;
+        chosen = -1.0;
+        focus = 1;
     }
     ImDrawList* d = canvas();
     const ImVec2 sc = screen();
-    const float k = ps5_k();
-    const double t = s.t;
+    const float k = ps5_k(), oy = ps5_oy();
+    // Half a second of black first, as the game gives way to the system.
+    d->AddRectFilled(ImVec2{0, 0}, sc, IM_COL32(0, 0, 0, 0xff));
+    if (s.t < kGiveWay)
+        return true;
+    const double t = s.t - kGiveWay;
     if (chosen < 0.0 && ((s.press && t > 0.6) || t > 45.0))
         chosen = t;
     else if (chosen < 0.0)
-        focus = std::clamp(focus + sideways_press(), 0, 2);
+        focus = std::clamp(focus + sideways_press(), 0, 1);
     const double asked = chosen < 0.0 ? 1e9 : chosen + 0.22;
     d->AddRectFilled(ImVec2{0, 0}, sc, IM_COL32(0, 0, 0, 0xff));
     if (t < asked) {
+        // Measured from the PS5's own (1080 lines).
         ps5_room(d, kPs5Room, 1.f);
         ps5_title(d, "System Software Update", 1.f);
         static const char* const kLines[] = {"The PS5 system software will be updated.",
-                                             "Your PS5 will restart and start the update.",
-                                             "Version: 26.07-14.20.00"};
-        ps5_body(d, kLines, 3, ps5_oy() + 408.f * k, 1.f);
-        static const char* const kButtons[] = {"View Details", "Cancel", "Update"};
-        for (int i = 0; i < 3; i++)
-            ps5_button(d, ImVec2{sc.x * 0.5f + (i - 1) * 438.f * k, ps5_oy() + 953.f * k}, kButtons[i], i == focus,
-                       i == focus && chosen >= 0.0, 1.f);
+                                             "Your PS5 will restart and start the update."};
+        ps5_body(d, kLines, 2, oy + 318.f * k, 1.f);
+        // The details: two lines beside the code, the pair centred.
+        ImFont* f = ps5_regular();
+        const float size = ps5_body_size(f);
+        const char* q1 = "To check the update details, scan the";
+        const char* q2 = "QR code.";
+        const float box = 214.f * k, gap = 34.f * k;
+        const float left = (sc.x - (ps5_width(f, size, q1) + gap + box)) * 0.5f;
+        const ImU32 text = rgba(0xe7, 0xe6, 0xed, 1.f);
+        ps5_text(d, f, size, left, oy + 675.f * k, text, q1);
+        ps5_text(d, f, size, left, oy + 718.f * k, text, q2);
+        ps5_qr(d, ImVec2{left + ps5_width(f, size, q1) + gap, oy + 603.f * k}, box, 1.f);
+        static const char* const kButtons[] = {"Cancel", "Update"};
+        for (int i = 0; i < 2; i++)
+            ps5_button(d, ImVec2{sc.x * 0.5f + (i == 0 ? -196.f : 196.f) * k, oy + 951.f * k}, kButtons[i], i == focus,
+                       i == focus && chosen >= 0.0, 1.f, 378.f * k);
         return true;
     }
     if (t < asked + kDark)
         return true;  // dark, restarting
     const double u = t - asked - kDark;
-    if (u < kClimb + kStuck) {
+    if (u < kClimb + kFull) {
         const float in = static_cast<float>(std::min(1.0, u / 0.6));
         ps5_room(d, kPs5Install, in);
         ps5_motes(d, t, in);
         ps5_title(d, "System Software Update", in);
         ImFont* f = ps5_face();
-        const float oy = ps5_oy();
-        const float size = ps5_size(f, "Installing...", 212.f * k);
+        const float size = ps5_size(f, "Installing...", 212.f * k, 25.f * k);
         const ImU32 text = rgba(0xd2, 0xd0, 0xd6, in);
         auto centred = [&](float cap_top, const char* line) {
             ps5_text(d, f, size, (sc.x - ps5_width(f, size, line)) * 0.5f, cap_top, text, line);
         };
-        centred(oy + 248.f * k, "After the installation is complete, your PS5 will automatically restart.");
-        centred(oy + 383.f * k, "Installing the update file…");
-        // Quick at first, slower and slower: 99 and no further.
-        const double share = std::min(0.99, 0.99 * (1.0 - std::pow(1.0 - std::min(1.0, u / kClimb), 2.4)));
+        centred(oy + 383.f * k, "Installing...");
+        // Quick at first, then slower: 100 at the end.
+        const double share = 1.0 - std::pow(1.0 - std::min(1.0, u / kClimb), 1.8);
         char percent[16];
-        std::snprintf(percent, sizeof percent, "%d%%", static_cast<int>(share * 100.0));
+        std::snprintf(percent, sizeof percent, "%d%%", static_cast<int>(share * 100.0 + 1e-6));
         centred(oy + 466.f * k, percent);
         const float bw = 1068.f * k, by = oy + 538.f * k;
         const float bx = (sc.x - bw) * 0.5f;
@@ -1113,23 +1221,15 @@ bool ps5_update(const Step& s) {
         d->AddRectFilled(ImVec2{bx, by - 2.6f * k}, ImVec2{bx + bw * static_cast<float>(share), by + 2.6f * k},
                          rgba(0xf4, 0xf4, 0xf6, in), 2.6f * k);
         const char* warn = "Don't turn off your PS5. Don't insert or eject discs.";
-        const float icon = 41.f * k, gap = 17.f * k;
-        const float ww = ps5_width(f, size, warn), wx = (sc.x - ww - icon - gap) * 0.5f;
+        const float icon = 41.f * k, igap = 17.f * k;
+        const float ww = ps5_width(f, size, warn), wx = (sc.x - ww - icon - igap) * 0.5f;
         const ImFontGlyph* hg = f->FindGlyph('H');
         const float cap = hg != nullptr ? (hg->Y1 - hg->Y0) * size / f->FontSize : size * 0.7f;
         ps5_no_sign(d, ImVec2{wx + icon * 0.5f, oy + 676.f * k + cap * 0.5f}, icon * 0.5f, rgba(0xf0, 0xf0, 0xf2, in));
-        ps5_text(d, f, size, wx + icon + gap, oy + 676.f * k, text, warn);
+        ps5_text(d, f, size, wx + icon + igap, oy + 676.f * k, text, warn);
         return true;
     }
-    static const char* const kError[] = {"Can't update the system software.", "SU-42118-6"};
-    const double shown_at = asked + kDark + kClimb + kStuck;
-    if (pressed < 0.0 && t - shown_at > 20.0)
-        pressed = t;
-    if (pressed < 0.0 || t - pressed < 0.25) {
-        ps5_notice(s, shown_at, "System Software Update", kError, 2, 1.0, &pressed);
-        return true;
-    }
-    return t - pressed < 0.9;
+    return false;
 }
 
 // --- DualSense -------------------------------------------------------------------
@@ -1269,7 +1369,25 @@ void run_modal(const Effect& e) {
             if (end == at && *at != '\0')
                 break;
         }
-    size_t next_press = 0;
+    // ED_OWN_INSANITY_KEYS=s:left,s:right,s:press,... (testing): those, then.
+    std::vector<std::pair<double, int>> keys;
+    if (const char* p = std::getenv("ED_OWN_INSANITY_KEYS"); p != nullptr) {
+        std::string all = p;
+        for (size_t at = 0; at < all.size();) {
+            size_t end = all.find(',', at);
+            if (end == std::string::npos)
+                end = all.size();
+            const std::string item = all.substr(at, end - at);
+            const size_t colon = item.find(':');
+            if (colon != std::string::npos) {
+                const std::string what = item.substr(colon + 1);
+                keys.emplace_back(std::atof(item.substr(0, colon).c_str()),
+                                  what == "left" ? -1 : what == "right" ? 1 : 0);
+            }
+            at = end + 1;
+        }
+    }
+    size_t next_press = 0, next_key = 0;
     const Uint64 start = SDL_GetTicksNS();
     for (bool first = true;; first = false) {
         const double t = static_cast<double>(SDL_GetTicksNS() - start) / 1e9;
@@ -1277,6 +1395,13 @@ void run_modal(const Effect& e) {
         if (next_press < presses.size() && t >= presses[next_press]) {
             press = true;
             next_press++;
+        }
+        if (next_key < keys.size() && t >= keys[next_key].first) {
+            if (keys[next_key].second == 0)
+                press = true;
+            else
+                g_test_sideways = keys[next_key].second;
+            next_key++;
         }
         const Step s{t, first, press};
         const bool more = e.step(s);
@@ -1468,6 +1593,11 @@ extern "C" void insanity_imgui_init(void) {
         light.insert(light.begin(), {"/System/Library/Fonts/Supplemental/Seravek.ttc", 5});
     light.insert(light.end(), ui.begin(), ui.end());
     g_faces.light = add_face(light, 36.f);
+    std::vector<std::pair<std::string, int>> regular;
+    if (platform() == kPS5)
+        regular.push_back({"/System/Library/Fonts/Supplemental/Seravek.ttc", 0});
+    regular.insert(regular.end(), ui.begin(), ui.end());
+    g_faces.regular = add_face(regular, 36.f);
     g_faces.ui = add_face(ui, 32.f);
     g_faces.bold = add_face(bold, 32.f);
     g_faces.mono = add_face(mono, 32.f);

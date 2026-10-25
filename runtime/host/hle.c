@@ -6311,7 +6311,76 @@ static void diff_nearest(CPUState* cpu) {
     who = near;
 }
 
+// ED_MODE_LOG=1 (testing): each change of the game's mode (PAL: the word at
+// r13-26240; the main loop runs the mode table's function for it each frame).
+static void log_game_mode(CPUState* cpu) {
+    static int on = -1;
+    static u32 was = 0xFFFFFFFFu;
+    if (on < 0)
+        on = getenv("ED_MODE_LOG") != NULL;
+    if (!on || !sda_ready(cpu))
+        return;
+    const u32 mode = mem_read32(cpu, cpu->gpr[13] - 26240u);
+    if (mode != was)
+        fprintf(stderr, "[mode] %u -> %u (requested %u, back to %u) at frame %llu\n", was, mode,
+                mem_read32(cpu, cpu->gpr[13] - 26188u), mem_read32(cpu, cpu->gpr[13] - 26244u),
+                (unsigned long long)(cpu->timebase / 675000ull));
+    was = mode;
+}
+
+// The insanity effects that take over the screen (the quote of a restart,
+// and five more) are game modes, as play is: the main loop switches to the
+// mode requested at r13-26188 (PAL; the game's own request is stw r3,
+// -26188(r13) at 0x80018808), starting it with the mode table's first
+// function (0x80238810: start, run per mode), and the effect returns to the
+// mode it came from when it is done. Play is mode 2; the screen effects are
+// 7, 8, 10, 11, 12 and 13, all started by 0x80112D98 (the language's
+// UInsane.cmp). hle_play_insanity(mode) asks for one at the next pad read,
+// from play only. ED_INSANITY_TEST=mode,after: the same, `after` pad reads in.
+#define GAME_MODE_PLAY 2u
+static volatile int g_insanity_request = -1;
+static bool g_insanity_found;
+
+static void request_insanity(CPUState* cpu) {
+    static int test_mode = -2, test_after;
+    if (test_mode == -2) {
+        test_mode = -1;
+        const char* t = getenv("ED_INSANITY_TEST");
+        if (t != NULL && sscanf(t, "%d,%d", &test_mode, &test_after) < 2)
+            test_mode = -1;
+    }
+    if (test_mode >= 0 && test_after-- <= 0) {
+        g_insanity_request = test_mode;
+        test_mode = -1;
+    }
+    const int mode = g_insanity_request;
+    if (mode < 0 || !g_insanity_found || !sda_ready(cpu))
+        return;
+    g_insanity_request = -1;
+    if (mem_read32(cpu, cpu->gpr[13] - 26240u) != GAME_MODE_PLAY) {
+        fprintf(stderr, "[debug] insanity effect %d: not in play\n", mode);
+        return;
+    }
+    mem_write32(cpu, cpu->gpr[13] - 26188u, (u32)mode);
+    fprintf(stderr, "[debug] insanity effect: mode %d\n", mode);
+}
+
+static void find_insanity(CPUState* cpu) {
+    if (strcmp(ED_GAME_ID, "GEDP01") != 0 || mem_read32(cpu, 0x80018808u) != 0x906D99B4u ||
+        mem_read32(cpu, 0x8001880Cu) != 0x4E800020u || mem_read32(cpu, 0x80238810u + 7u * 8u) != 0x80112D98u ||
+        mem_read32(cpu, 0x80238810u + 13u * 8u) != 0x80112D98u) {
+        fprintf(stderr, "[debug] the game's insanity screens not found\n");
+        return;
+    }
+    g_insanity_found = true;
+}
+
+bool hle_insanity_available(void) { return g_insanity_found; }
+void hle_play_insanity(int mode) { g_insanity_request = mode; }
+
 static void hold_stats(CPUState* cpu) {
+    log_game_mode(cpu);
+    request_insanity(cpu);
     diff_nearest(cpu);
     watch_health(cpu);
     hold_invincible(cpu);
@@ -6940,6 +7009,7 @@ void hle_install(CPUState* cpu) {
     find_spawn(cpu);
     find_count_setter(cpu);
     find_debug_views(cpu);
+    find_insanity(cpu);
 #endif
     find_refresh_prompt(cpu);
     publish_codegen_options();

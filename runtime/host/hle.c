@@ -29,6 +29,7 @@
 #include "host/camera.h"
 #include "host/controls.h"
 #include "host/frontend.h"
+#include "host/insanity.h"
 #include "host/report.h"
 // Aurora (aurora/gfx.h): a movie is playing (HDR shows it at video white).
 // Declared here: the Mac app and the Linux package build this file on the
@@ -6393,13 +6394,66 @@ static void request_insanity(CPUState* cpu) {
 #define INSANITY_EFFECTS 44u
 static int g_insanity_force = -1;
 
+static int g_insanity_once = -1;      // hle_play_game_insanity: until it starts
+static unsigned g_insanity_once_reads;
+static volatile bool g_insanity_recovered;  // hle_insanity_recovered: her line next
+
+static int player_insanity_effect(CPUState* cpu, u32* state);
+
 static void force_insanity(CPUState* cpu) {
-    if (g_insanity_force < 0 || !sda_ready(cpu))
+    if (!sda_ready(cpu))
+        return;
+    // After one of ours: "This isn't happening!", as after the game's own
+    // (play asks for mode 12 while r13-24140 is set: 0x80113DEC, 0x80113E04).
+    if (g_insanity_recovered) {
+        g_insanity_recovered = false;
+        mem_write32(cpu, cpu->gpr[13] - 24140u, 1u);
+    }
+    int effect = g_insanity_force;
+    if (effect < 0 && g_insanity_once >= 0) {
+        // On until the player has it (or ten seconds of pad reads), then off.
+        u32 state = 0;
+        if (player_insanity_effect(cpu, &state) == g_insanity_once || ++g_insanity_once_reads > 600u) {
+            fprintf(stderr, "[debug] the game's insanity effect %d: %s\n", g_insanity_once,
+                    g_insanity_once_reads > 600u ? "not here" : "started");
+            g_insanity_once = -1;
+            mem_write32(cpu, cpu->gpr[13] - INSANITY_TEST_MODE, 0u);
+            for (u32 i = 0; i < INSANITY_EFFECTS; i++)
+                mem_write32(cpu, INSANITY_FORCE_LIST + 4u * i, 0u);
+            return;
+        }
+        effect = g_insanity_once;
+    }
+    if (effect < 0)
         return;
     mem_write32(cpu, cpu->gpr[13] - INSANITY_TEST_MODE, 1u);
     for (u32 i = 0; i < INSANITY_EFFECTS; i++)
-        mem_write32(cpu, INSANITY_FORCE_LIST + 4u * i, i == (u32)g_insanity_force ? 1u : 0u);
+        mem_write32(cpu, INSANITY_FORCE_LIST + 4u * i, i == (u32)effect ? 1u : 0u);
 }
+
+void hle_insanity_recovered(void) { g_insanity_recovered = true; }
+
+// One of the game's effects now (the debug menu): its test mode with it
+// forced, until the player has it.
+void hle_play_game_insanity(int effect) {
+    if (effect <= 0 || effect >= (int)INSANITY_EFFECTS || !g_insanity_found)
+        return;
+    g_insanity_once = effect;
+    g_insanity_once_reads = 0;
+}
+
+#ifdef ED_AURORA
+// The game rolls an insanity effect: 0x800697C0(count, level) returns the
+// record picked, or 0 for none. Some rolls go to the recomp's own effects
+// (insanity.cpp): the game is told none, and one of ours is armed.
+static void hle_insanity_roll(CPUState* cpu) {
+    g_hle_passthrough = true;
+    if (g_insanity_force >= 0 || g_insanity_once >= 0 || !insanity_take_roll((int)(cpu->gpr[4] & 0xFFu)))
+        return;
+    g_hle_passthrough = false;
+    cpu->gpr[3] = 0u;
+}
+#endif
 
 // The player's insanity effect (the record the Start press reads, 0x80006CDC):
 // its number, and in *state its stage (3 ready, 4 running, 5 waiting), or -1.
@@ -6451,6 +6505,14 @@ static void find_insanity(CPUState* cpu) {
         g_insanity_force = atoi(force);
         fprintf(stderr, "[debug] the game's insanity test mode, effect %d\n", g_insanity_force);
     }
+#ifdef ED_AURORA
+    HleDispatchEntry* roll = hle_dispatch_entry(0x800697C0u);
+    if (roll != NULL && roll->intercept == NULL && roll->notify == NULL && mem_read32(cpu, 0x800697C0u) == 0x9421FFC0u &&
+        mem_read32(cpu, 0x800697ECu) == 0x80CD9C7Cu)
+        roll->intercept = hle_insanity_roll;
+    else
+        fprintf(stderr, "[debug] the game's insanity roll not found: the recomp's effects stay off\n");
+#endif
     const char* swap = getenv("ED_INSANITY_SWAP");
     HleDispatchEntry* entry = hle_dispatch_entry(0x80018728u);
     if (swap != NULL && insanity_screen((u32)atoi(swap)) && entry != NULL && entry->intercept == NULL &&

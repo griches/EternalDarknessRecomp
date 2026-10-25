@@ -8,6 +8,7 @@
 #include "host/buttons.h"
 #include "host/camera.h"
 #include "host/controls.h"
+#include "host/insanity.h"
 #include "host/report.h"
 #include "host/settings.h"
 #include "host/texpack.h"
@@ -84,6 +85,8 @@ bool hle_spawn_available(void);
 void hle_spawn(int type);
 int hle_area_creatures(int* types, int* counts, int max);
 bool controls_take_debug_request(void);
+bool hle_insanity_available(void);
+void hle_play_game_insanity(int effect);
 }
 
 namespace {
@@ -942,8 +945,10 @@ void build_in_game() {
     resume.activate = [] { g_close = true; };
     g_rows.push_back(resume);
 
+    // An insanity effect may show them wiped (insanity::slots_hidden).
+    const auto shown = [](int slot) { return slot_used(slot) && !insanity::slots_hidden(); };
     Row save{"Save game", "\u2039 Slot " + std::to_string(g_slot) +
-                              (slot_used(g_slot) ? " \u00b7 used \u203a" : " \u00b7 empty \u203a")};
+                              (shown(g_slot) ? " \u00b7 used \u203a" : " \u00b7 empty \u203a")};
     save.gap = true;
     save.note = "Saves everything, exactly where you are.";
     save.change = [](int dir) { g_slot = (g_slot - 1 + dir + 4) % 4 + 1; };
@@ -954,8 +959,8 @@ void build_in_game() {
     g_rows.push_back(save);
 
     Row load{"Load game", "\u2039 Slot " + std::to_string(g_slot) +
-                              (slot_used(g_slot) ? " \u203a" : " \u00b7 empty \u203a")};
-    load.enabled = slot_used(g_slot);
+                              (shown(g_slot) ? " \u203a" : " \u00b7 empty \u203a")};
+    load.enabled = shown(g_slot);
     load.browse = true;
     load.change = [](int dir) { g_slot = (g_slot - 1 + dir + 4) % 4 + 1; };
     load.activate = [] {
@@ -1100,6 +1105,40 @@ void build_debug() {
         hle_set_debug_view(at);
     };
     g_rows.push_back(view);
+
+    // An insanity effect now: the game's own (its test mode, with the one
+    // chosen forced) or the recomp's for this machine (insanity.cpp).
+    struct GameEffect {
+        int number;
+        const char* name;
+    };
+    static const GameEffect kGameEffects[] = {{20, "Empty inventory"}, {25, "TV video"},
+                                              {26, "Game reset (the quote)"}, {27, "Save erased"},
+                                              {28, "Blue screen"}, {34, "Shoots self"},
+                                              {36, "Spell goes wrong"}, {38, "Footstep trail"}};
+    constexpr int kGameCount = sizeof kGameEffects / sizeof kGameEffects[0];
+    static int effect = 0;
+    const int effects = kGameCount + insanity::count();
+    effect = std::clamp(effect, 0, effects - 1);
+    const bool game_effect = effect < kGameCount;
+    Row insane{"Insanity effect", std::string("\u2039 ") +
+                                      (game_effect ? std::string("Game: ") + kGameEffects[effect].name
+                                                   : std::string("Recomp: ") + insanity::name(effect - kGameCount)) +
+                                      " \u203a"};
+    insane.enabled = !game_effect || hle_insanity_available();
+    insane.note = !insane.enabled ? kNotFound
+                  : game_effect   ? "One of the game's own, when it next can (some only in certain places): it "
+                                    "plays as you resume. Left/Right picks which, A plays it."
+                                  : insanity::note(effect - kGameCount);
+    insane.change = [effects](int dir) { cycle(effect, effects, dir); };
+    insane.activate = [] {
+        if (effect < kGameCount)
+            hle_play_game_insanity(kGameEffects[effect].number);
+        else
+            insanity::play(effect - kGameCount);
+        g_close = true;
+    };
+    g_rows.push_back(insane);
 
     // The creature types alive here (the game's own numbers: it names none),
     // the choice kept while its type is still here.
@@ -1490,6 +1529,8 @@ bool run_menu() {
             refresh = SDL_GetTicks() + 500;  // controller plugged in / out
             dirty = true;
         }
+        if (insanity::menu_frame(g_screen == Screen::InGame))
+            dirty = true;
         if (dirty)
             build_rows();
         if (!dol_aurora_ui_frame()) {
@@ -1497,6 +1538,7 @@ bool run_menu() {
             break;
         }
     }
+    insanity::menu_closed();
     g_doc->Hide();
     // Wait for every button to be let go so the game does not see the press
     // that closed the menu.
@@ -1515,6 +1557,7 @@ std::string frontend_res_dir() { return res_dir(); }
 // Before ImGui's first frame (its font atlas is locked during one): Fira Sans
 // Bold, the menus' face, baked large so the counter stays sharp at any scale.
 extern "C" void frontend_imgui_init(void) {
+    insanity_imgui_init();
     const std::string path = res_dir() + "/fonts/FiraSans-Bold.ttf";
     struct stat st;
     if (stat(path.c_str(), &st) != 0) {
@@ -2443,6 +2486,7 @@ extern "C" void frontend_frame(void) {
     }
     update_fps_counter();
     update_fast_forward_prompt();
+    insanity_frame();
     update_cursor();
     static bool menu_was_held = false;
     bool held[kButtonCount];

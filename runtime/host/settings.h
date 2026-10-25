@@ -8,8 +8,8 @@ extern "C" {
 #endif
 
 typedef struct {
-    int aspect;           // 1 4:3, 2 16:9 (the game's own widescreen view), 4 21:9 (that view
-                          // widened); settings.ini's 0 (follow the game) and 3 (the old
+    int aspect;           // 1 4:3, 2 16:9 (the game's own widescreen view), 4 21:9 and 5 32:9
+                          // (that view widened); settings.ini's 0 (follow the game) and 3 (the old
                           // stretch) read as 16:9
     int render_scale;     // 0 window pixels, 1-4 = 720p, 1080p, 1440p, 4K
     int frame_rate;       // 60 the game's own; above it, frames in between at the screen's rate

@@ -93,7 +93,7 @@ void settings_load(void) {
         const char* value = trim(eq + 1);
         const int n = atoi(value);
         if (strcmp(key, "aspect") == 0)
-            g_settings.aspect = n == 1 || n == 4 ? n : 2;
+            g_settings.aspect = n == 1 || n == 4 || n == 5 ? n : 2;
         else if (strcmp(key, "render_scale") == 0)
             g_settings.render_scale = clamp_int(n, 0, 4);
         else if (strcmp(key, "frame_rate") == 0)

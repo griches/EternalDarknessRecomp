@@ -5264,7 +5264,7 @@ static void find_widescreen_option(CPUState* cpu) {
     find_book(cpu, toggle);
 }
 
-// The launcher's choice as the game's word: 16:9 and 21:9 on, 4:3 off.
+// The launcher's choice as the game's word: 16:9, 21:9 and 32:9 on, 4:3 off.
 static int launcher_widescreen(void) {
     return g_settings.aspect != 1;
 }
@@ -5280,7 +5280,7 @@ static void sync_widescreen_option(CPUState* cpu) {
         menu_presents--;
     }
     const bool chose = menu_presents > 0;
-    static int wide = 2;  // turned back on in the game: the wide shape it had (16:9 or 21:9)
+    static int wide = 2;  // turned back on in the game: the wide shape it had (16:9, 21:9 or 32:9)
     if (g_settings.aspect != 1)
         wide = g_settings.aspect;
     if (g_widescreen_offset == 0 || !sda_ready(cpu))
@@ -5292,7 +5292,7 @@ static void sync_widescreen_option(CPUState* cpu) {
         settings_apply();
         settings_save();
         fprintf(stderr, "[widescreen] chosen in the game's options: %s\n",
-                !value ? "4:3" : wide == 4 ? "21:9" : "16:9");
+                !value ? "4:3" : wide == 5 ? "32:9" : wide == 4 ? "21:9" : "16:9");
     }
     const int want = launcher_widescreen();
     if (value != want) {

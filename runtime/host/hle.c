@@ -6311,6 +6311,10 @@ static void diff_nearest(CPUState* cpu) {
     who = near;
 }
 
+#define GAME_MODE_PLAY 2u
+static bool g_insanity_found;
+static int player_insanity_effect(CPUState* cpu, u32* state);
+
 // ED_MODE_LOG=1 (testing): each change of the game's mode (PAL: the word at
 // r13-26240; the main loop runs the mode table's function for it each frame).
 static void log_game_mode(CPUState* cpu) {
@@ -6329,6 +6333,15 @@ static void log_game_mode(CPUState* cpu) {
                 (unsigned long long)(cpu->timebase / 675000ull));
     was = mode;
     queued_was = queued;
+    static int effect_was = -2;
+    static u32 state_was;
+    u32 state = 0;
+    const int effect = mode == GAME_MODE_PLAY && g_insanity_found ? player_insanity_effect(cpu, &state) : effect_was;
+    if (effect != effect_was || state != state_was)
+        fprintf(stderr, "[mode] insanity effect %d (stage %u) at frame %llu\n", effect, state,
+                (unsigned long long)(cpu->timebase / 675000ull));
+    effect_was = effect;
+    state_was = state;
 }
 
 // The insanity effects that take over the screen (the quote of a restart,
@@ -6340,9 +6353,7 @@ static void log_game_mode(CPUState* cpu) {
 // 7, 8, 10, 11, 12 and 13, all started by 0x80112D98 (the language's
 // UInsane.cmp). hle_play_insanity(mode) asks for one at the next pad read,
 // from play only. ED_INSANITY_TEST=mode,after: the same, `after` pad reads in.
-#define GAME_MODE_PLAY 2u
 static volatile int g_insanity_request = -1;
-static bool g_insanity_found;
 
 static void request_insanity(CPUState* cpu) {
     static int test_mode = -2, test_after;
@@ -6366,6 +6377,46 @@ static void request_insanity(CPUState* cpu) {
     }
     mem_write32(cpu, cpu->gpr[13] - 26188u, (u32)mode);
     fprintf(stderr, "[debug] insanity effect: mode %d\n", mode);
+}
+
+// The game's own insanity test mode, left in by its makers (PAL): a master
+// word at r13-24632 that nothing sets, and a list of 44 words at 0x8024DFC8,
+// one per effect. With the master on, sanity counts as gone (0x80069B94
+// returns 6) and effects come readily (0x80069BF0, 0x8006ECEC); the random
+// pick (0x800697C0) takes the first effect whose word is set (0x8006DB68),
+// when the place has it. Effects by the game's names for them (0x8006B010):
+// 20 Empty Inventory, 25 TV Video, 26 Game Reset, 27 Save/Erase Game, 28 Blue
+// Screen Of Death, 34 Max Shoot Self, 36 Spell Cast Bust, 38 Footstep Trail.
+// ED_INSANITY_FORCE=N (testing): the test mode on, with N.
+#define INSANITY_TEST_MODE 24632u
+#define INSANITY_FORCE_LIST 0x8024DFC8u
+#define INSANITY_EFFECTS 44u
+static int g_insanity_force = -1;
+
+static void force_insanity(CPUState* cpu) {
+    if (g_insanity_force < 0 || !sda_ready(cpu))
+        return;
+    mem_write32(cpu, cpu->gpr[13] - INSANITY_TEST_MODE, 1u);
+    for (u32 i = 0; i < INSANITY_EFFECTS; i++)
+        mem_write32(cpu, INSANITY_FORCE_LIST + 4u * i, i == (u32)g_insanity_force ? 1u : 0u);
+}
+
+// The player's insanity effect (the record the Start press reads, 0x80006CDC):
+// its number, and in *state its stage (3 ready, 4 running, 5 waiting), or -1.
+static int player_insanity_effect(CPUState* cpu, u32* state) {
+    u32 r = 0, character = 0, holder = 0;
+    if (!hle_guest_call(cpu, 0x801F6310u, NULL, 0, 0.0, &r) || r == 0u)
+        return -1;
+    const u32 args[] = {r, 32u};
+    if (!hle_guest_call(cpu, 0x801F8FD8u, args, 2, 0.0, &character) || character == 0u)
+        return -1;
+    if (!hle_guest_call(cpu, 0x8006A4A8u, &character, 1, 0.0, &holder) || !guest_ram_range_valid(cpu, holder + 4u, 4u))
+        return -1;
+    const u32 record = mem_read32(cpu, holder + 4u);
+    if (!guest_ram_range_valid(cpu, record, 12u))
+        return -1;
+    *state = mem_read16(cpu, record + 10u);
+    return (int)mem_read32(cpu, record);
 }
 
 // ED_INSANITY_SWAP=mode (testing): whichever insanity screen the game asks
@@ -6393,6 +6444,13 @@ static void find_insanity(CPUState* cpu) {
         return;
     }
     g_insanity_found = true;
+    const char* force = getenv("ED_INSANITY_FORCE");
+    if (force != NULL && atoi(force) > 0 && atoi(force) < (int)INSANITY_EFFECTS &&
+        mem_read32(cpu, 0x8006DB70u) == 0x3C608025u && mem_read32(cpu, 0x8006DB80u) == 0x3883DFC8u &&
+        mem_read32(cpu, 0x80069844u) == 0x800D9FC8u) {
+        g_insanity_force = atoi(force);
+        fprintf(stderr, "[debug] the game's insanity test mode, effect %d\n", g_insanity_force);
+    }
     const char* swap = getenv("ED_INSANITY_SWAP");
     HleDispatchEntry* entry = hle_dispatch_entry(0x80018728u);
     if (swap != NULL && insanity_screen((u32)atoi(swap)) && entry != NULL && entry->intercept == NULL &&
@@ -6407,6 +6465,7 @@ bool hle_insanity_available(void) { return g_insanity_found; }
 void hle_play_insanity(int mode) { g_insanity_request = mode; }
 
 static void hold_stats(CPUState* cpu) {
+    force_insanity(cpu);
     log_game_mode(cpu);
     request_insanity(cpu);
     diff_nearest(cpu);

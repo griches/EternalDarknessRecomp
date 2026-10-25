@@ -10,6 +10,7 @@
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 #include <string.h>
 
 #define DSP_BASE 0xCC005000u
@@ -264,11 +265,37 @@ void audio_poll(CPUState* cpu) {
     // to inspect the mix offline.
     static FILE* pcm_out;
     static int pcm_checked;
+    // ED_PCM_WALL=1 too: silence written for the time nothing came (the game
+    // held by a menu), so the file runs with the clock (to put under a
+    // screen recording; the time it starts is logged).
+    static int pcm_wall;
+    static double pcm_last_s;
+    static u32 pcm_rate;
     if (!pcm_checked) {
         pcm_checked = 1;
         const char* path = getenv("ED_PCM_OUT");
         if (path != NULL && path[0] != '\0')
             pcm_out = fopen(path, "wb");
+        pcm_wall = pcm_out != NULL && getenv("ED_PCM_WALL") != NULL;
+        if (pcm_wall) {
+            struct timespec now;
+            timespec_get(&now, TIME_UTC);
+            fprintf(stderr, "[audio] pcm out starts at %.3f, %u Hz\n", now.tv_sec + now.tv_nsec / 1e9,
+                    dol_audio_dma_sample_rate(&g_audio_dma));
+        }
+    }
+    if (pcm_out != NULL && pcm_wall) {
+        struct timespec ts;
+        timespec_get(&ts, TIME_UTC);
+        const double now = ts.tv_sec + ts.tv_nsec / 1e9;
+        pcm_rate = dol_audio_dma_sample_rate(&g_audio_dma);
+        if (pcm_last_s != 0.0 && now - pcm_last_s > 0.1 && pcm_rate != 0u) {
+            static const s16 silence[16 * 2] = {0};
+            u64 frames = (u64)((now - pcm_last_s) * pcm_rate);
+            for (; frames >= 16u; frames -= 16u)
+                fwrite(silence, sizeof silence, 1, pcm_out);
+        }
+        pcm_last_s = now;
     }
     if (pcm_out != NULL) {
         fwrite(output, sizeof output, 1, pcm_out);

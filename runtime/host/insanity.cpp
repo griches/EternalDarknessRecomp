@@ -1442,9 +1442,11 @@ extern "C" void insanity_imgui_init(void) {
         break;
     case kPS5:
         // The PS5's own SST where it can be read; else, for a look at them
-        // on a Mac, Helvetica Neue's medium.
-        ui = {{"/System/Library/Fonts/HelveticaNeue.ttc", 10}};
-        bold = {{"/System/Library/Fonts/HelveticaNeue.ttc", 1}};
+        // on a Mac, the nearest it has: Seravek (Light for text, Medium for
+        // buttons), another humanist sans much like it.
+        ui = {{"/System/Library/Fonts/Supplemental/Seravek.ttc", 3},
+              {"/System/Library/Fonts/HelveticaNeue.ttc", 10}};
+        bold = {{"/System/Library/Fonts/Supplemental/Seravek.ttc", 9}};
         break;
     default:
         break;
@@ -1462,6 +1464,8 @@ extern "C" void insanity_imgui_init(void) {
     // machine has.
     std::vector<std::pair<std::string, int>> light = {{"/System/Library/Fonts/HelveticaNeue.ttc", 7},
                                                       {"C:/Windows/Fonts/segoeuil.ttf", 0}};
+    if (platform() == kPS5)
+        light.insert(light.begin(), {"/System/Library/Fonts/Supplemental/Seravek.ttc", 5});
     light.insert(light.end(), ui.begin(), ui.end());
     g_faces.light = add_face(light, 36.f);
     g_faces.ui = add_face(ui, 32.f);

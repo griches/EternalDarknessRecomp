@@ -23,6 +23,11 @@ void audio_set_fast_forward(bool on);
 // a new size), but nothing is heard.
 void audio_set_muted(bool muted);
 
+// A sound of the host's own (a trophy's chime), mixed into the game's output
+// once: mono, `count` samples at `rate`, scaled by `volume`. The samples must
+// last until it has played.
+void audio_play_host_sound(const s16* samples, u32 count, u32 rate, float volume);
+
 bool audio_mmio_contains(u32 address);
 u64  audio_mmio_read(u32 address, u8 size);
 void audio_mmio_write(u32 address, u8 size, u64 value);

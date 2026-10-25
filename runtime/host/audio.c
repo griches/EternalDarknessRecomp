@@ -168,6 +168,42 @@ void audio_mmio_write(u32 address, u8 size, u64 value) {
     }
 }
 
+// A sound of the host's own (insanity.cpp: a trophy's chime), mixed into the
+// game's output as it goes out, once: mono s16 at its own rate, stepped to
+// the AID rate. Set and played on the game thread.
+static const s16* g_host_sound;
+static u32 g_host_sound_count;
+static double g_host_sound_at, g_host_sound_step_rate;
+static float g_host_sound_volume;
+
+void audio_play_host_sound(const s16* samples, u32 count, u32 rate, float volume) {
+    g_host_sound_count = 0u;
+    g_host_sound = samples;
+    g_host_sound_at = 0.0;
+    g_host_sound_step_rate = (double)rate;
+    g_host_sound_volume = volume;
+    g_host_sound_count = count;
+}
+
+static void mix_host_sound(s16* output, u32 frames, u32 aid_rate) {
+    if (g_host_sound_count == 0u || aid_rate == 0u)
+        return;
+    const double step = g_host_sound_step_rate / (double)aid_rate;
+    for (u32 i = 0; i < frames; i++) {
+        const u32 at = (u32)g_host_sound_at;
+        if (at >= g_host_sound_count) {
+            g_host_sound_count = 0u;
+            return;
+        }
+        const s32 v = (s32)((float)g_host_sound[at] * g_host_sound_volume);
+        for (u32 c = 0; c < 2u; c++) {
+            const s32 mixed = output[i * 2u + c] + v;
+            output[i * 2u + c] = (s16)(mixed > 32767 ? 32767 : mixed < -32768 ? -32768 : mixed);
+        }
+        g_host_sound_at += step;
+    }
+}
+
 void audio_poll(CPUState* cpu) {
     u32 physical = 0;
     if (!dol_audio_dma_poll(&g_audio_dma, &physical))
@@ -219,6 +255,7 @@ void audio_poll(CPUState* cpu) {
             g_ai_interrupt_timing - old <= g_ai_sample_counter - old)
             g_ai_stream_control |= AICR_AIINT;
     }
+    mix_host_sound(output, 8u, dol_audio_dma_sample_rate(&g_audio_dma));
     g_aid_chunks++;
     if (g_log && (g_aid_chunks <= 10u || g_aid_chunks % 400u == 0u))
         fprintf(stderr, "[audio] AID chunk %llu: source=%08x peak=%u\n",

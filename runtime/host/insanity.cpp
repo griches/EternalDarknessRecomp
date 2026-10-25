@@ -8,6 +8,7 @@
 #include "gxruntime/aurora_backend.h"
 #include "host/buttons.h"
 #include "host/frontend.h"
+#include "host/report.h"
 
 #include <aurora/imgui.h>
 #include <imgui.h>
@@ -20,6 +21,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -29,6 +31,8 @@
 #include <vector>
 
 extern "C" void hle_insanity_recovered(void);
+// audio.c: a sound of ours mixed into the game's as it goes out.
+extern "C" void audio_play_host_sound(const int16_t* samples, uint32_t count, uint32_t rate, float volume);
 
 namespace insanity {
 namespace {
@@ -89,6 +93,7 @@ Platform platform() {
 // menus' Fira Sans; mono for console text.
 struct Faces {
     ImFont* ui = nullptr;
+    ImFont* light = nullptr;  // the PS5's thin system type
     ImFont* bold = nullptr;
     ImFont* mono = nullptr;
     ImFont* menu = nullptr;  // our menu's faces (menu.rcss), for the save states
@@ -132,6 +137,32 @@ bool any_press() {
         SDL_free(ids);
     }
     const bool press = now && !was;
+    was = now;
+    return press;
+}
+
+// Left or right, as pressed this frame (-1, +1, 0): the d-pad, the left stick,
+// the arrow keys.
+int sideways_press() {
+    static int was = 0;
+    int now = 0;
+    if (dol_aurora_key_down(SDL_SCANCODE_LEFT))
+        now = -1;
+    if (dol_aurora_key_down(SDL_SCANCODE_RIGHT))
+        now = 1;
+    int count = 0;
+    if (SDL_JoystickID* ids = SDL_GetGamepads(&count); ids != nullptr) {
+        for (int i = 0; i < count; i++)
+            if (SDL_Gamepad* pad = SDL_GetGamepadFromID(ids[i]); pad != nullptr) {
+                const float x = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX) / 32767.f;
+                if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_DPAD_LEFT) || x < -0.5f)
+                    now = -1;
+                if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT) || x > 0.5f)
+                    now = 1;
+            }
+        SDL_free(ids);
+    }
+    const int press = now != was ? now : 0;
     was = now;
     return press;
 }
@@ -605,147 +636,500 @@ bool linux_kernel_panic(const Step& s) {
 
 // --- PS5 ---------------------------------------------------------------------
 
-// The PS5's system look: white on near-black, light and airy type.
-const ImU32 kPs5White = IM_COL32(0xff, 0xff, 0xff, 0xff);
-const ImU32 kPs5Grey = IM_COL32(0xb4, 0xb4, 0xb4, 0xff);
+// The PS5's own system screens, laid out as it lays them out: every size and
+// place below is measured from its screens at 1080 lines (k = one of those
+// lines), and text is sized to the width the PS5's own makes, whatever face
+// draws it here.
+// k, and where the 16:9 frame the PS5 draws in sits on this screen (all of a
+// PS5's; the middle of a wider or taller window).
+float ps5_k() { return std::min(screen().x / 1920.f, screen().y / 1080.f); }
+float ps5_ox() { return (screen().x - 1920.f * ps5_k()) * 0.5f; }
+float ps5_oy() { return (screen().y - 1080.f * ps5_k()) * 0.5f; }
 
-ImVec2 centred(ImDrawList* d, ImFont* f, float size, float y, ImU32 colour, const char* text, float wrap = 0.f) {
-    const ImVec2 sc = screen();
-    const ImVec2 ts = text_size(f, size, text, wrap);
-    const float x = wrap > 0.f ? (sc.x - wrap) * 0.5f : (sc.x - ts.x) * 0.5f;
-    if (wrap > 0.f) {
-        // Each wrapped line centred on its own.
-        const char* at = text;
-        const char* const text_end = text + std::strlen(text);
-        float line_y = y;
-        while (*at != '\0') {
-            const char* end = f->CalcWordWrapPositionA(size / f->FontSize, at, text_end, wrap);
-            if (end == at)
-                end = at + 1;
-            const ImVec2 ls = f->CalcTextSizeA(size, FLT_MAX, 0.f, at, end);
-            d->AddText(f, size, ImVec2{(sc.x - ls.x) * 0.5f, line_y}, colour, at, end);
-            line_y += size * 1.3f;
-            at = end;
-            while (*at == ' ')
-                at++;
+ImFont* ps5_face() {
+    return g_faces.light != nullptr ? g_faces.light : g_faces.ui != nullptr ? g_faces.ui : ImGui::GetFont();
+}
+ImFont* ps5_medium() { return g_faces.ui != nullptr ? g_faces.ui : ps5_face(); }
+
+// Its backdrops, as 32 x 18 colours averaged from its own screens (a soft
+// room, so stretched they are it): the dim room lit from the top left behind
+// its notices, and the plum one behind an update's install.
+const uint32_t kPs5Room[32 * 18] = {
+    0x1f1e26, 0x312c31, 0x504648, 0x7b6969, 0x8d7877, 0x96817e, 0x7f6d6c, 0x655758,
+    0x4c4245, 0x3a3438, 0x29282e, 0x212129, 0x1e1e28, 0x1c1c26, 0x1b1b26, 0x1b1b25,
+    0x1a1a24, 0x191923, 0x191923, 0x181a23, 0x161822, 0x151722, 0x141622, 0x131521,
+    0x131521, 0x141420, 0x141420, 0x13131f, 0x12121e, 0x12121e, 0x11111d, 0x111020,
+    0x232129, 0x332d33, 0x4d4345, 0x6e5e5f, 0x7c6a6a, 0x847171, 0x766565, 0x625456,
+    0x4d4346, 0x3f383c, 0x302d33, 0x2a282f, 0x23222b, 0x1f1f29, 0x1d1d27, 0x1c1c27,
+    0x1b1b25, 0x1a1a24, 0x191923, 0x191923, 0x171a23, 0x151822, 0x141622, 0x141622,
+    0x131521, 0x141521, 0x141420, 0x141420, 0x13131f, 0x12121e, 0x11111d, 0x11101f,
+    0x27252c, 0x342e34, 0x494042, 0x615455, 0x6b5c5d, 0x726263, 0x6c5e5e, 0x5e5253,
+    0x4f4548, 0x443d40, 0x373237, 0x332e36, 0x29282f, 0x24232b, 0x202029, 0x1e1e28,
+    0x1c1c26, 0x1b1b25, 0x1a1a24, 0x191923, 0x181923, 0x161922, 0x151722, 0x141622,
+    0x131521, 0x131521, 0x141420, 0x141420, 0x13131f, 0x12121e, 0x11111d, 0x11101e,
+    0x2a272e, 0x363035, 0x453d40, 0x54494b, 0x5a4e50, 0x605355, 0x635657, 0x5b4f51,
+    0x514749, 0x494144, 0x3e383c, 0x373138, 0x2f2d33, 0x29282e, 0x25242b, 0x20202a,
+    0x1e1e28, 0x1c1c26, 0x1b1b25, 0x1a1a24, 0x191923, 0x171a23, 0x151822, 0x141622,
+    0x141622, 0x131521, 0x141420, 0x141420, 0x141420, 0x12121e, 0x12121e, 0x11111d,
+    0x2a282f, 0x362f35, 0x423a3d, 0x4d4346, 0x51474a, 0x554b4d, 0x5b5051, 0x564c4d,
+    0x4e4548, 0x494043, 0x413b3e, 0x393239, 0x312e35, 0x2d2b31, 0x28272e, 0x25242b,
+    0x21202a, 0x1e1e28, 0x1b1b26, 0x1a1a24, 0x191923, 0x181923, 0x161922, 0x151723,
+    0x141622, 0x131521, 0x131521, 0x141420, 0x141420, 0x12121e, 0x12121e, 0x11111d,
+    0x2a292f, 0x342e35, 0x3e383b, 0x473f42, 0x4b4245, 0x4d4447, 0x534a4b, 0x52484a,
+    0x4c4447, 0x453e41, 0x413b3e, 0x3c363b, 0x333037, 0x2f2d33, 0x2b2930, 0x27262d,
+    0x24232b, 0x21202a, 0x1d1d27, 0x1b1b25, 0x1a1a24, 0x191923, 0x171922, 0x151722,
+    0x141622, 0x131521, 0x131521, 0x141420, 0x141420, 0x13131f, 0x12121e, 0x11111d,
+    0x2a292f, 0x332d34, 0x3c363a, 0x423c3e, 0x453e41, 0x484043, 0x4c4447, 0x4d4548,
+    0x494245, 0x443e40, 0x403a3e, 0x3c383b, 0x363239, 0x302e34, 0x2c2b31, 0x29282e,
+    0x26252c, 0x24232a, 0x201f29, 0x1d1d26, 0x1b1b25, 0x1a1a24, 0x191923, 0x161822,
+    0x141622, 0x141622, 0x131521, 0x131420, 0x141420, 0x13131f, 0x12121e, 0x11111d,
+    0x2a292f, 0x322d35, 0x3a333a, 0x3f393c, 0x413b3e, 0x433c3f, 0x464042, 0x484244,
+    0x474143, 0x433d40, 0x3f393d, 0x3b383b, 0x37333b, 0x322f36, 0x2d2c32, 0x2a292f,
+    0x27262d, 0x25242b, 0x22212a, 0x1f1f28, 0x1c1c26, 0x1a1a24, 0x191923, 0x171922,
+    0x151722, 0x141622, 0x131521, 0x141420, 0x141420, 0x13131f, 0x12121e, 0x11111d,
+    0x29282e, 0x312d34, 0x383139, 0x3c363b, 0x3e383c, 0x403a3e, 0x3f383d, 0x413b3f,
+    0x423b3e, 0x40393f, 0x3a373b, 0x3c3940, 0x3b383f, 0x3a373e, 0x3a373e, 0x38353c,
+    0x36343b, 0x323137, 0x302e35, 0x302f36, 0x2a292f, 0x201f28, 0x1e1d25, 0x1b1a25,
+    0x191923, 0x171722, 0x161622, 0x141521, 0x141420, 0x141420, 0x12121e, 0x11111d,
+    0x29282e, 0x2f2c33, 0x363038, 0x39333a, 0x3c373b, 0x3d383c, 0x3a373c, 0x3d383d,
+    0x3f393f, 0x3f383d, 0x39363d, 0x36343a, 0x333037, 0x312f35, 0x2f2e34, 0x2f2c33,
+    0x2d2c32, 0x2b2a30, 0x28272d, 0x26252b, 0x242329, 0x222029, 0x1f1e26, 0x1d1c24,
+    0x1b1a24, 0x191923, 0x171722, 0x151521, 0x141420, 0x141420, 0x12121e, 0x12121e,
+    0x29282e, 0x2e2c33, 0x333037, 0x383139, 0x37343b, 0x39373c, 0x38363c, 0x39363d,
+    0x3c373d, 0x3b373e, 0x39363d, 0x36343a, 0x333137, 0x302f35, 0x2e2d33, 0x2d2c32,
+    0x2c2b31, 0x2b2a30, 0x28272d, 0x26252b, 0x25232a, 0x222128, 0x201f27, 0x1e1d25,
+    0x1d1b24, 0x1b1924, 0x181822, 0x151521, 0x141420, 0x141420, 0x13131f, 0x12121e,
+    0x29282e, 0x2d2c32, 0x322f36, 0x353138, 0x36333a, 0x37353c, 0x38373d, 0x3c383e,
+    0x3f3840, 0x3d383e, 0x3a373e, 0x37363c, 0x353239, 0x323037, 0x312e35, 0x2e2d33,
+    0x2a292f, 0x27262d, 0x25242b, 0x24222a, 0x212029, 0x201e27, 0x1d1d26, 0x1b1b25,
+    0x191923, 0x181822, 0x171722, 0x161622, 0x151521, 0x141420, 0x13131f, 0x12121e,
+    0x2b2a30, 0x2f2d34, 0x323037, 0x343239, 0x35343a, 0x37363c, 0x38373d, 0x3a383e,
+    0x3b383f, 0x3b383f, 0x39373e, 0x37363c, 0x35333a, 0x323137, 0x302f35, 0x2e2d33,
+    0x2b2a30, 0x28272e, 0x26252c, 0x24232a, 0x222129, 0x201f29, 0x1e1d26, 0x1c1b25,
+    0x1a1a24, 0x191923, 0x181822, 0x161622, 0x151521, 0x141420, 0x141420, 0x12121e,
+    0x2f2e34, 0x323137, 0x35343a, 0x37363c, 0x39383e, 0x3a393f, 0x3b3a40, 0x3c3b41,
+    0x3d3c42, 0x3d3b42, 0x3b3a40, 0x39383e, 0x37363c, 0x343339, 0x313036, 0x2f2e34,
+    0x2d2c32, 0x2a292f, 0x27262d, 0x25242b, 0x23222a, 0x211f29, 0x1f1e27, 0x1d1c25,
+    0x1b1b25, 0x1a1a24, 0x191923, 0x171721, 0x161622, 0x151521, 0x141420, 0x141420,
+    0x36373d, 0x3a3b41, 0x3f3f44, 0x414147, 0x44444a, 0x45454b, 0x47464c, 0x47464c,
+    0x47464c, 0x45444a, 0x434248, 0x403f45, 0x3c3b40, 0x38373d, 0x35343a, 0x323137,
+    0x2f2e35, 0x2d2c32, 0x2a292f, 0x27262d, 0x25242b, 0x23222a, 0x211f29, 0x1f1e27,
+    0x1c1c26, 0x1b1b25, 0x1a1a24, 0x191923, 0x171721, 0x161622, 0x151521, 0x141420,
+    0x3f4046, 0x44444a, 0x48484e, 0x4b4c52, 0x4e4f54, 0x505156, 0x505157, 0x505056,
+    0x4f5055, 0x4c4d52, 0x4a494f, 0x45454b, 0x404146, 0x3d3c42, 0x38383e, 0x34353a,
+    0x323237, 0x302f35, 0x2d2c32, 0x29292f, 0x26262d, 0x25242b, 0x23222a, 0x211f29,
+    0x1f1f28, 0x1d1d26, 0x1b1b25, 0x1a1a24, 0x191923, 0x181822, 0x161622, 0x151521,
+    0x403f45, 0x434148, 0x45434a, 0x46454b, 0x47474d, 0x48484e, 0x48484e, 0x46484d,
+    0x46474c, 0x45464b, 0x434349, 0x404146, 0x3d3e43, 0x3a3b40, 0x37383d, 0x34353a,
+    0x313237, 0x302f35, 0x2e2d33, 0x2a2b30, 0x28282f, 0x25252d, 0x24242c, 0x23212b,
+    0x212029, 0x1f1f28, 0x1d1d26, 0x1b1b25, 0x1a1a24, 0x191923, 0x191923, 0x171722,
+    0x38373d, 0x39383e, 0x3a393f, 0x3b3a40, 0x3b3a41, 0x3c3b41, 0x3c3b41, 0x3c3b41,
+    0x3c3b41, 0x3c3b41, 0x3b3a40, 0x3a393f, 0x38373d, 0x36353b, 0x333339, 0x313036,
+    0x2f2e34, 0x2e2d33, 0x2c2b31, 0x2a2a2f, 0x27282e, 0x26252d, 0x25242b, 0x24222c,
+    0x222029, 0x201f29, 0x1e1e27, 0x1d1d26, 0x1b1b25, 0x1a1a24, 0x1a1a24, 0x191923,
+};
+
+const uint32_t kPs5Install[32 * 18] = {
+    0x22222c, 0x22222c, 0x22222c, 0x22222c, 0x22222c, 0x22222c, 0x23222c, 0x24232b,
+    0x24232b, 0x24232b, 0x24222d, 0x24232b, 0x25242a, 0x25242c, 0x26252b, 0x28272f,
+    0x29282e, 0x2a292f, 0x2a292f, 0x2e2930, 0x2d2a31, 0x2f2c32, 0x342f35, 0x383339,
+    0x3b353a, 0x3b363c, 0x3f393d, 0x3f3a3e, 0x3f3a3e, 0x3f3a3e, 0x3f3a3e, 0x3f3a3e,
+    0x22222c, 0x22222c, 0x22222c, 0x22222c, 0x22222b, 0x22222b, 0x24222d, 0x24232b,
+    0x24232b, 0x24232b, 0x24222d, 0x24232b, 0x25242a, 0x25242b, 0x26252b, 0x27262e,
+    0x29282e, 0x2a292f, 0x2a282f, 0x2e2930, 0x2d2a31, 0x2f2d32, 0x342f35, 0x383439,
+    0x39343a, 0x3b363c, 0x3e383c, 0x3f393d, 0x3f393d, 0x3f393d, 0x3f393d, 0x3f393d,
+    0x22222c, 0x22222c, 0x22222c, 0x22222c, 0x22222c, 0x22222c, 0x22212b, 0x23212b,
+    0x24222d, 0x24232b, 0x24232b, 0x25242c, 0x25242b, 0x26252b, 0x27262e, 0x29282e,
+    0x29282e, 0x2a292f, 0x2a282f, 0x2d2930, 0x2f2b32, 0x342f35, 0x363238, 0x39343a,
+    0x39343a, 0x3b363c, 0x3c373b, 0x3e393d, 0x3e393d, 0x3e393d, 0x3e393d, 0x3e393d,
+    0x22222c, 0x22222c, 0x22222c, 0x22222c, 0x22222c, 0x22222c, 0x22222c, 0x24222d,
+    0x24232b, 0x24232b, 0x25242c, 0x25242b, 0x26252b, 0x27262e, 0x27262e, 0x29282e,
+    0x29282e, 0x2a292f, 0x2d2930, 0x2f2a31, 0x322e33, 0x353036, 0x363137, 0x373138,
+    0x39343a, 0x39343a, 0x3c373d, 0x3c373b, 0x3c373b, 0x3c373b, 0x3c373b, 0x3c373b,
+    0x21212b, 0x21212b, 0x21212b, 0x22222c, 0x22222c, 0x22222c, 0x22222c, 0x24232b,
+    0x24232b, 0x25242a, 0x25242c, 0x26252b, 0x26252b, 0x28272f, 0x28272f, 0x29282e,
+    0x29282e, 0x2a292f, 0x2f2a31, 0x302d33, 0x342f35, 0x342f35, 0x342f35, 0x363137,
+    0x383339, 0x39343a, 0x3b363c, 0x3c373b, 0x3c373b, 0x3c373b, 0x3c373b, 0x3c373b,
+    0x21212b, 0x21212b, 0x21212b, 0x22222c, 0x22222c, 0x22212c, 0x24232b, 0x24232b,
+    0x25242c, 0x25242c, 0x25242b, 0x26252b, 0x26252b, 0x27262e, 0x27262e, 0x29282e,
+    0x2a292f, 0x2d2a31, 0x2e2b32, 0x322e33, 0x342f35, 0x342f35, 0x342f35, 0x343237,
+    0x383138, 0x39343a, 0x3b363c, 0x3b363c, 0x3b363c, 0x3b363c, 0x3b363c, 0x3b363c,
+    0x21212b, 0x21212b, 0x22222c, 0x22222c, 0x22222c, 0x24232b, 0x24232b, 0x25232e,
+    0x25242c, 0x25242c, 0x25242a, 0x26252b, 0x26252b, 0x27262e, 0x28262e, 0x29282e,
+    0x2d2a30, 0x2f2a31, 0x2f2d32, 0x302e33, 0x302e33, 0x342f35, 0x342f35, 0x353137,
+    0x373238, 0x39343a, 0x3a353b, 0x3b363c, 0x3b363c, 0x3b363c, 0x3b363c, 0x3b363c,
+    0x21212b, 0x21212b, 0x22222c, 0x22222c, 0x24222d, 0x24232b, 0x24222d, 0x25232c,
+    0x25242c, 0x25242c, 0x25242c, 0x25242b, 0x26252b, 0x27262e, 0x29282e, 0x2a2930,
+    0x2e2a31, 0x302b32, 0x2f2d32, 0x2f2d32, 0x2f2d32, 0x322e33, 0x342f35, 0x342f35,
+    0x363137, 0x383339, 0x39343a, 0x39343a, 0x39343a, 0x39343a, 0x39343a, 0x39343a,
+    0x22222c, 0x22222c, 0x22222c, 0x22222c, 0x23212c, 0x24232b, 0x24222d, 0x24232b,
+    0x24232b, 0x25242c, 0x25242c, 0x25242b, 0x27262e, 0x29282e, 0x2a282f, 0x2c282f,
+    0x2f2a31, 0x2f2b31, 0x302b31, 0x302b31, 0x2f2d32, 0x302e33, 0x342f35, 0x342f35,
+    0x343137, 0x383138, 0x39343a, 0x39343a, 0x39343a, 0x39343a, 0x39343a, 0x39343a,
+    0x22222b, 0x22222c, 0x22222c, 0x22212c, 0x23212c, 0x23212b, 0x24232b, 0x24232b,
+    0x24232b, 0x25242c, 0x25242c, 0x26252b, 0x27262e, 0x29282e, 0x2b282f, 0x2d2930,
+    0x2f2a31, 0x2f2a31, 0x2f2a31, 0x302b32, 0x2f2d32, 0x302e33, 0x322e33, 0x342f35,
+    0x343036, 0x373138, 0x383339, 0x38333a, 0x38333a, 0x38333a, 0x38333a, 0x38333a,
+    0x23222b, 0x23222b, 0x24222d, 0x24232b, 0x24232b, 0x24232b, 0x24232b, 0x24232b,
+    0x24222c, 0x25242c, 0x25242c, 0x27262e, 0x29282e, 0x2a292f, 0x2d2930, 0x2d2930,
+    0x2e2930, 0x2d2930, 0x2f2a31, 0x2e2b32, 0x302b31, 0x2f2d32, 0x322d33, 0x342f35,
+    0x342f35, 0x363137, 0x373138, 0x373238, 0x373238, 0x373238, 0x373238, 0x373238,
+    0x1f202a, 0x1f2029, 0x21202a, 0x21212b, 0x24222b, 0x24232b, 0x25242c, 0x25242c,
+    0x26252c, 0x26252d, 0x28272d, 0x28272f, 0x29282e, 0x2a292f, 0x2d2930, 0x2c282f,
+    0x2d2930, 0x2e2930, 0x2e2a31, 0x2e2b32, 0x2f2c32, 0x302d32, 0x332e34, 0x332f35,
+    0x373338, 0x3a3438, 0x353136, 0x363137, 0x363137, 0x363137, 0x363137, 0x363137,
+    0x1f1f29, 0x1f1f29, 0x201f29, 0x211f29, 0x201e29, 0x21202a, 0x22212b, 0x24232b,
+    0x25242b, 0x27262e, 0x29282e, 0x29282e, 0x2a282f, 0x2c282f, 0x2b282f, 0x2d282f,
+    0x2b282f, 0x2e2830, 0x2c282f, 0x2f2a31, 0x2e2b32, 0x2f2b32, 0x302d32, 0x322e34,
+    0x332e34, 0x343035, 0x342f35, 0x343036, 0x343036, 0x343036, 0x343036, 0x343036,
+    0x21222a, 0x25202a, 0x222029, 0x21202a, 0x211f2a, 0x22202b, 0x22202b, 0x22212b,
+    0x24232b, 0x25242b, 0x27262e, 0x29282e, 0x2b282f, 0x2b282f, 0x2d282f, 0x2e2930,
+    0x2d2930, 0x2c2930, 0x2d2a31, 0x2d2a31, 0x2d2a31, 0x2e2b32, 0x2f2d32, 0x322d33,
+    0x332e34, 0x332e34, 0x342f35, 0x342f35, 0x342f35, 0x342f35, 0x342f35, 0x342f35,
+    0x22202a, 0x22202b, 0x26222a, 0x28232a, 0x362f2e, 0x25222b, 0x26222b, 0x27222b,
+    0x25242b, 0x27242b, 0x26242b, 0x25242a, 0x27242b, 0x28252c, 0x28272e, 0x2a272f,
+    0x2b282f, 0x2c2930, 0x2d2a31, 0x2e2a31, 0x2f2b32, 0x2e2b32, 0x323134, 0x322d33,
+    0x302e33, 0x342f34, 0x342f35, 0x342f35, 0x342f35, 0x342f35, 0x342f35, 0x342f35,
+    0x22212b, 0x23212b, 0x23222a, 0x25232a, 0x24232a, 0x26232a, 0x26232a, 0x27242b,
+    0x28252c, 0x28252e, 0x28252c, 0x28252e, 0x28252c, 0x28252c, 0x28252e, 0x28252e,
+    0x28252d, 0x2a272e, 0x2b282f, 0x2d282f, 0x2d2a31, 0x302c32, 0x2f2d32, 0x322e33,
+    0x322d33, 0x322e34, 0x342f35, 0x332e34, 0x332e34, 0x332e34, 0x332e34, 0x332e34,
+    0x24222c, 0x24222b, 0x24222a, 0x24222b, 0x252229, 0x27242b, 0x28252c, 0x28252c,
+    0x28252e, 0x29262d, 0x28252d, 0x28252c, 0x28252c, 0x28252d, 0x28252c, 0x28252c,
+    0x28252d, 0x2a272e, 0x2a272e, 0x2b282f, 0x2c2930, 0x2f2a31, 0x302c32, 0x302e33,
+    0x302e33, 0x322e33, 0x332e34, 0x342f35, 0x342f35, 0x342f35, 0x342f35, 0x342f35,
+    0x24222c, 0x24222b, 0x24222a, 0x24222b, 0x252229, 0x27242b, 0x28252c, 0x28252c,
+    0x28252e, 0x29262d, 0x28252d, 0x28252c, 0x28252c, 0x28252d, 0x28252c, 0x28252c,
+    0x28252d, 0x2a272e, 0x2a272e, 0x2b282f, 0x2c2930, 0x2f2a31, 0x302c32, 0x302e33,
+    0x302e33, 0x322e33, 0x332e34, 0x342f35, 0x342f35, 0x342f35, 0x342f35, 0x342f35,
+};
+
+void ps5_room(ImDrawList* d, const uint32_t* grid, float alpha) {
+    static std::vector<std::pair<const uint32_t*, ImTextureID>> made;
+    ImTextureID id = 0;
+    for (const auto& [g, t] : made)
+        if (g == grid)
+            id = t;
+    if (id == 0) {
+        std::vector<uint8_t> pixels(32 * 18 * 4);
+        for (int i = 0; i < 32 * 18; i++) {
+            pixels[i * 4] = static_cast<uint8_t>(grid[i] >> 16);
+            pixels[i * 4 + 1] = static_cast<uint8_t>(grid[i] >> 8);
+            pixels[i * 4 + 2] = static_cast<uint8_t>(grid[i]);
+            pixels[i * 4 + 3] = 0xff;
         }
-        return ImVec2{x, line_y};
+        id = aurora_imgui_add_texture(32, 18, pixels.data());
+        made.emplace_back(grid, id);
     }
-    d->AddText(f, size, ImVec2{x, y}, colour, text);
-    return ImVec2{x, y + ts.y};
+    // Texel centres at the screen's edges, so nothing smears in from beyond.
+    d->AddImage(id, ImVec2{0, 0}, screen(), ImVec2{0.5f / 32.f, 0.5f / 18.f}, ImVec2{31.5f / 32.f, 17.5f / 18.f},
+                rgba(0xff, 0xff, 0xff, alpha));
 }
 
-// The PS5 warns that it is too hot, says it is turning off, and the screen
-// fades to black as it would; after a few seconds dark, the game again.
-bool ps5_too_hot(const Step& s) {
-    constexpr double kWarn = 6.5, kTurning = 2.5, kFade = 1.2, kDark = 3.0;
-    ImDrawList* d = canvas();
+// Gold motes over the install's room, thickest in the lower corners, some
+// near and soft, most far and small, drifting slowly up.
+void ps5_motes(ImDrawList* d, double t, float alpha) {
     const ImVec2 sc = screen();
-    const float k = sc.y / 1080.f;  // the PS5 draws its notices for the screen, not a window
-    d->AddRectFilled(ImVec2{0, 0}, sc, IM_COL32(0x08, 0x08, 0x0a, 0xff));
-    const double t = s.t;
-    if (t > kWarn + kTurning + kFade) {
-        d->AddRectFilled(ImVec2{0, 0}, sc, IM_COL32(0, 0, 0, 0xff));  // off
-        return t < kWarn + kTurning + kFade + kDark;
+    const float k = ps5_k();
+    for (int i = 0; i < 520; i++) {
+        const float u = std::fmod(i * 0.61803f, 1.f), v = std::fmod(i * 0.41421f + 0.13f, 1.f);
+        const float w = std::fmod(i * 0.27183f + 0.5f, 1.f);
+        const bool left = i % 5 < 3;
+        const float x = left ? sc.x * 0.36f * u * u : sc.x * (1.f - 0.24f * u * u);
+        const float drift = static_cast<float>(std::fmod(t * (3.f + 5.f * v) * k, 260.f * k));
+        const float y = sc.y * (0.55f + 0.45f * std::sqrt(v)) - drift + 120.f * k * w;
+        const bool near = i % 8 == 0;
+        const float r = near ? (5.f + 9.f * w) * k : (1.f + 3.2f * w * w) * k;
+        const float twinkle = 0.55f + 0.45f * std::sin(static_cast<float>(t) * (0.4f + v) + i);
+        const float a = alpha * twinkle * (near ? 0.16f : 0.55f + 0.35f * w);
+        if (near)
+            for (int ring = 3; ring >= 1; ring--)
+                d->AddCircleFilled(ImVec2{x, y}, r * ring / 3.f, rgba(0xd6, 0xa8, 0x5c, a * 0.5f), 20);
+        else
+            d->AddCircleFilled(ImVec2{x, y}, r, rgba(0xe0, 0xb4, 0x6a, a), 10);
     }
-    ImFont* ui = g_faces.ui != nullptr ? g_faces.ui : ImGui::GetFont();
-    const float dim = t > kWarn + kTurning ? static_cast<float>(1.0 - (t - kWarn - kTurning) / kFade) : 1.f;
-    const ImU32 white = rgba(0xff, 0xff, 0xff, dim), grey = rgba(0xb4, 0xb4, 0xb4, dim);
-    if (t < kWarn) {
-        // The warning sign: a rounded triangle with its mark.
-        const ImVec2 c{sc.x * 0.5f, sc.y * 0.5f - 150.f * k};
-        const float r = 40.f * k;
-        d->AddTriangleFilled(ImVec2{c.x, c.y - r}, ImVec2{c.x + r * 1.1f, c.y + r * 0.8f}, ImVec2{c.x - r * 1.1f, c.y + r * 0.8f},
-                             white);
-        d->AddRectFilled(ImVec2{c.x - 3.5f * k, c.y - r * 0.45f}, ImVec2{c.x + 3.5f * k, c.y + r * 0.3f},
-                         IM_COL32(0x08, 0x08, 0x0a, 0xff), 2.f * k);
-        d->AddCircleFilled(ImVec2{c.x, c.y + r * 0.55f}, 4.5f * k, IM_COL32(0x08, 0x08, 0x0a, 0xff));
-        centred(d, ui, 44.f * k, sc.y * 0.5f - 70.f * k, white, "Your PS5 is too hot.");
-        centred(d, ui, 28.f * k, sc.y * 0.5f + 4.f * k, grey,
-                "Turn off your PS5 and wait until it cools down. Make sure there's enough space around your PS5 for "
-                "air to flow, and don't place it in a hot location.",
-                900.f * k);
+}
+
+// Text at `size` so that `fit` (the PS5's own line, measured) spans `width`.
+float ps5_size(ImFont* f, const char* fit, float width) {
+    const float at_one = f->CalcTextSizeA(1.f, FLT_MAX, 0.f, fit).x;
+    return at_one > 0.f ? width / at_one : 30.f * ps5_k();
+}
+
+// The top of the capitals at `size`, below the top of the line.
+float cap_offset(ImFont* f, float size) {
+    const ImFontGlyph* h = f->FindGlyph('H');
+    return h != nullptr ? h->Y0 * size / f->FontSize : size * 0.2f;
+}
+
+// Text with its capitals' top at y, its left at x.
+void ps5_text(ImDrawList* d, ImFont* f, float size, float x, float cap_top, ImU32 colour, const char* text) {
+    d->AddText(f, size, ImVec2{x, cap_top - cap_offset(f, size)}, colour, text);
+}
+
+float ps5_width(ImFont* f, float size, const char* text) { return f->CalcTextSizeA(size, FLT_MAX, 0.f, text).x; }
+
+// The screen's name, top left: 44 lines high in its face, at 98, 86.
+void ps5_title(ImDrawList* d, const char* title, float alpha) {
+    const float k = ps5_k();
+    ImFont* f = ps5_face();
+    const float size = ps5_size(f, "System Software Update", 492.f * k);
+    ps5_text(d, f, size, ps5_ox() + 98.f * k, ps5_oy() + 86.f * k, rgba(0xf4, 0xf2, 0xf4, alpha), title);
+}
+
+// A PS5 button, centred: 70 high; 331 wide, faint glass, white text without
+// the focus; 389 wide, near white, dark text, a thin ring a little way out,
+// with it.
+void ps5_button(ImDrawList* d, ImVec2 centre, const char* label, bool focus, bool down, float alpha,
+                float width = 0.f) {
+    const float k = ps5_k();
+    const float h = 70.f * k, w = width > 0.f ? width : (focus ? 389.f : 331.f) * k;
+    const ImVec2 a{centre.x - w * 0.5f, centre.y - h * 0.5f}, b{centre.x + w * 0.5f, centre.y + h * 0.5f};
+    if (focus) {
+        const float gap = 4.8f * k;
+        d->AddRect(ImVec2{a.x - gap, a.y - gap}, ImVec2{b.x + gap, b.y + gap}, rgba(0xff, 0xff, 0xff, 0.42f * alpha),
+                   h * 0.5f + gap, 0, 2.2f * k);
+        d->AddRectFilled(a, b, down ? rgba(0xc8, 0xc8, 0xd0, alpha) : rgba(0xf7, 0xf7, 0xff, alpha), h * 0.5f);
     } else {
-        centred(d, ui, 36.f * k, sc.y * 0.5f - 24.f * k, white, "Turning off your PS5…");
+        d->AddRectFilled(a, b, rgba(0xff, 0xff, 0xff, 0.085f * alpha), h * 0.5f);
     }
-    return true;
+    ImFont* f = ps5_medium();
+    const float size = ps5_size(f, "View Details", 168.f * k);
+    const float tw = ps5_width(f, size, label);
+    const float cap = f->FindGlyph('H') != nullptr ? (f->FindGlyph('H')->Y1 - f->FindGlyph('H')->Y0) * size / f->FontSize
+                                                   : size * 0.7f;
+    ps5_text(d, f, size, centre.x - tw * 0.5f, centre.y - cap * 0.5f,
+             focus ? rgba(0x3a, 0x39, 0x40, alpha) : rgba(0xff, 0xff, 0xff, alpha), label);
 }
 
-// A trophy, as the PS5 announces one at the screen's top right: its picture
-// (the game's), the bronze cup, and its name.
-bool ps5_trophy(const Step& s) {
-    constexpr double kShown = 6.5;
+// The no-entry sign before "Don't turn off your PS5".
+void ps5_no_sign(ImDrawList* d, ImVec2 c, float r, ImU32 colour) {
+    d->AddCircle(c, r - r * 0.1f, colour, 32, r * 0.2f);
+    d->AddLine(ImVec2{c.x - r * 0.62f, c.y - r * 0.62f}, ImVec2{c.x + r * 0.62f, c.y + r * 0.62f}, colour, r * 0.2f);
+}
+
+// The body: lines left-aligned as a block, the block centred, 62 apart, sized
+// as the PS5's "The PS5 system software will be updated." (542 wide).
+void ps5_body(ImDrawList* d, const char* const* lines, int count, float first_cap_top, float alpha) {
+    const ImVec2 sc = screen();
+    const float k = ps5_k();
+    ImFont* f = ps5_face();
+    const float size = ps5_size(f, "The PS5 system software will be updated.", 542.f * k);
+    float widest = 0.f;
+    for (int i = 0; i < count; i++)
+        widest = std::max(widest, ps5_width(f, size, lines[i]));
+    for (int i = 0; i < count; i++)
+        ps5_text(d, f, size, (sc.x - widest) * 0.5f, first_cap_top + i * 62.f * k, rgba(0xe7, 0xe6, 0xed, alpha),
+                 lines[i]);
+}
+
+// A notice in the PS5's manner (Temperature Alert, an update that failed):
+// the room, its name, the message, OK. Any button presses OK (after
+// `min_s`); `pressed` keeps when.
+void ps5_notice(const Step& s, double shown_at, const char* title, const char* const* lines, int count,
+                double min_s, double* pressed) {
     ImDrawList* d = canvas();
     const ImVec2 sc = screen();
-    const float k = sc.y / 1080.f;
-    const double in = std::min(1.0, s.t / 0.3), out = std::min(1.0, std::max(0.0, (kShown - s.t) / 0.3));
+    const float k = ps5_k();
+    d->AddRectFilled(ImVec2{0, 0}, sc, IM_COL32(0, 0, 0, 0xff));
+    ps5_room(d, kPs5Room, 1.f);
+    ps5_title(d, title, 1.f);
+    ps5_body(d, lines, count, ps5_oy() + 520.f * k - (count - 1) * 31.f * k, 1.f);
+    if (*pressed < 0.0 && s.press && s.t - shown_at > min_s)
+        *pressed = s.t;
+    const bool down = *pressed >= 0.0 && s.t - *pressed < 0.18;
+    ps5_button(d, ImVec2{sc.x * 0.5f, ps5_oy() + 953.f * k}, "OK", true, down, 1.f);
+}
+
+// Temperature Alert, as the PS5 shows it: OK (any button, or in a while by
+// itself) and the PS5 turns off: the screen fades to black and stays dark a
+// few seconds before the game comes back.
+bool ps5_too_hot(const Step& s) {
+    static double pressed = -1.0;
+    if (s.first)
+        pressed = -1.0;
+    static const char* const kLines[] = {
+        "Your PS5 is too hot. Turn off your PS5, and wait until the temperature goes down."};
+    if (pressed < 0.0 && s.t > 20.0)
+        pressed = s.t;
+    if (pressed < 0.0 || s.t - pressed < 0.25) {
+        ps5_notice(s, 0.0, "Temperature Alert", kLines, 1, 1.0, &pressed);
+        return true;
+    }
+    const double off = s.t - pressed - 0.25;
+    ImDrawList* d = canvas();
+    d->AddRectFilled(ImVec2{0, 0}, screen(), IM_COL32(0, 0, 0, 0xff));
+    if (off < 0.9) {
+        ps5_room(d, kPs5Room, static_cast<float>(1.0 - off / 0.9));
+        return true;
+    }
+    return off < 0.9 + 3.5;
+}
+
+// The trophy's chime: ours, in the manner of the PS5's (a soft glassy note
+// and a higher one ringing on over a breath of air), made here, not copied.
+std::vector<int16_t> trophy_chime(int rate) {
+    const int n = static_cast<int>(rate * 1.4);
+    std::vector<float> mix(n, 0.f);
+    struct Note {
+        double at, freq, decay, gain;
+    };
+    static const Note kNotes[] = {{0.000, 1174.7, 0.10, 0.35},  // D6, a soft tap
+                                  {0.060, 1760.0, 0.42, 0.55},  // A6, ringing
+                                  {0.060, 2637.0, 0.22, 0.14},  // E7 above it
+                                  {0.140, 3520.0, 0.30, 0.06}}; // a glint at the top
+    for (const Note& note : kNotes)
+        for (int i = static_cast<int>(note.at * rate); i < n; i++) {
+            const double t = static_cast<double>(i) / rate - note.at;
+            const double env = (1.0 - std::exp(-t / 0.003)) * std::exp(-t / note.decay);
+            const double tone = std::sin(2.0 * kPi * note.freq * t) + 0.35 * std::sin(2.0 * kPi * (note.freq + 2.7) * t) +
+                                0.12 * std::sin(2.0 * kPi * note.freq * 2.0 * t + 0.4);
+            mix[i] += static_cast<float>(note.gain * env * tone);
+        }
+    // Air: noise, smoothed, swelling and gone in a fifth of a second.
+    float smooth = 0.f;
+    std::srand(1234);
+    for (int i = 0; i < static_cast<int>(rate * 0.22); i++) {
+        const double t = static_cast<double>(i) / rate;
+        const float noise = static_cast<float>(std::rand() % 2001 - 1000) / 1000.f;
+        smooth += (noise - smooth) * 0.18f;
+        mix[i] += static_cast<float>(0.10 * std::sin(kPi * t / 0.22) * smooth);
+    }
+    float peak = 0.001f;
+    for (float v : mix)
+        peak = std::max(peak, std::fabs(v));
+    std::vector<int16_t> out(n);
+    for (int i = 0; i < n; i++)
+        out[i] = static_cast<int16_t>(std::lround(mix[i] / peak * 0.85f * 32767.f));
+    return out;
+}
+
+// A trophy, as the PS5 pops one up at the top right: the trophy's picture,
+// the bronze cup and its name, "Trophy earned!" under it; and its chime.
+void bronze_cup(ImDrawList* d, ImVec2 at, float s, ImU32 colour) {
+    // Bowl (wide at the top), its two handles, the stem and the foot.
+    d->PathLineTo(ImVec2{at.x - s * 0.36f, at.y});
+    d->PathLineTo(ImVec2{at.x + s * 0.36f, at.y});
+    d->PathArcTo(ImVec2{at.x, at.y + s * 0.02f}, s * 0.36f, 0.f, kPi, 14);
+    d->PathFillConvex(colour);
+    d->AddCircle(ImVec2{at.x - s * 0.36f, at.y + s * 0.14f}, s * 0.12f, colour, 12, s * 0.07f);
+    d->AddCircle(ImVec2{at.x + s * 0.36f, at.y + s * 0.14f}, s * 0.12f, colour, 12, s * 0.07f);
+    d->AddRectFilled(ImVec2{at.x - s * 0.05f, at.y + s * 0.34f}, ImVec2{at.x + s * 0.05f, at.y + s * 0.56f}, colour);
+    d->AddRectFilled(ImVec2{at.x - s * 0.22f, at.y + s * 0.56f}, ImVec2{at.x + s * 0.22f, at.y + s * 0.66f}, colour,
+                     s * 0.03f);
+}
+
+bool ps5_trophy(const Step& s) {
+    constexpr double kShown = 6.0;
+    if (s.first) {
+        static const std::vector<int16_t> chime = trophy_chime(48000);
+        audio_play_host_sound(chime.data(), static_cast<uint32_t>(chime.size()), 48000u, 0.55f);
+    }
+    // Measured from the PS5's own: 660 by 110, 24 in from the right, 38 down.
+    ImDrawList* d = canvas();
+    const ImVec2 sc = screen();
+    const float k = ps5_k();
+    const double in = std::min(1.0, s.t / 0.25), out = std::min(1.0, std::max(0.0, (kShown - s.t) / 0.35));
     const float a = static_cast<float>(std::min(in, out));
-    const float w = 470.f * k, h = 110.f * k;
-    const ImVec2 at{sc.x - w - 52.f * k + (1.f - a) * 30.f * k, 46.f * k};
+    const float w = 660.f * k, h = 110.f * k;
+    const ImVec2 at{ps5_ox() + 1920.f * k - w - 24.f * k, ps5_oy() + 38.f * k - (1.f - static_cast<float>(in)) * 10.f * k};
     const ImVec2 to{at.x + w, at.y + h};
-    shadow(d, at, to, 14.f * k, 18.f * k, 0.5f * a);
-    d->AddRectFilled(at, to, rgba(0x24, 0x25, 0x29, 0.96f * a), 14.f * k);
-    const float pic = 78.f * k;
-    const ImVec2 pa{at.x + 16.f * k, at.y + (h - pic) * 0.5f};
+    d->AddRectFilled(at, to, rgba(0x22, 0x22, 0x25, 0.92f * a), 10.f * k);
+    const float pic = 66.f * k;
+    const ImVec2 pa{at.x + 22.f * k, at.y + (h - pic) * 0.5f};
     if (ImTextureID id = picture("icon/window.png"); id != 0)
-        d->AddImageRounded(id, pa, ImVec2{pa.x + pic, pa.y + pic}, ImVec2{0, 0}, ImVec2{1, 1}, rgba(0xff, 0xff, 0xff, a),
-                           8.f * k);
-    // The bronze cup: bowl, stem, foot.
-    const ImU32 bronze = rgba(0xc9, 0x86, 0x4f, a);
-    const ImVec2 cup{pa.x + pic + 22.f * k, at.y + 42.f * k};
-    const float cw = 9.f * k;
-    d->PathArcTo(ImVec2{cup.x, cup.y - 4.f * k}, cw, 0.f, kPi, 12);
-    d->PathLineTo(ImVec2{cup.x - cw, cup.y - 10.f * k});
-    d->PathLineTo(ImVec2{cup.x + cw, cup.y - 10.f * k});
-    d->PathFillConvex(bronze);
-    d->AddRectFilled(ImVec2{cup.x - 1.5f * k, cup.y + 4.f * k}, ImVec2{cup.x + 1.5f * k, cup.y + 9.f * k}, bronze);
-    d->AddRectFilled(ImVec2{cup.x - 6.f * k, cup.y + 9.f * k}, ImVec2{cup.x + 6.f * k, cup.y + 12.f * k}, bronze,
-                     1.f * k);
-    ImFont* ui = g_faces.ui != nullptr ? g_faces.ui : ImGui::GetFont();
-    ImFont* bold = g_faces.bold != nullptr ? g_faces.bold : ImGui::GetFont();
-    d->AddText(ui, 22.f * k, ImVec2{cup.x + 18.f * k, at.y + 21.f * k}, rgba(0xc9, 0x86, 0x4f, a), "Bronze");
-    d->AddText(bold, 27.f * k, ImVec2{pa.x + pic + 13.f * k, at.y + 56.f * k}, rgba(0xff, 0xff, 0xff, a),
-               "This Isn't Happening");
+        d->AddImage(id, pa, ImVec2{pa.x + pic, pa.y + pic}, ImVec2{0, 0}, ImVec2{1, 1}, rgba(0xff, 0xff, 0xff, a));
+    d->AddRect(pa, ImVec2{pa.x + pic, pa.y + pic}, rgba(0xff, 0xff, 0xff, 0.3f * a), 0.f, 0, 1.2f * k);
+    ImFont* f = ps5_medium();
+    const float left = pa.x + pic + 22.f * k;
+    const float name_size = ps5_size(f, "1 down, lots more to go!", 330.f * k);
+    bronze_cup(d, ImVec2{left + 9.f * k, at.y + 30.f * k}, 24.f * k, rgba(0xc6, 0x7f, 0x52, a));
+    ps5_text(d, f, name_size, left + 26.f * k, at.y + 30.f * k, rgba(0xf4, 0xf4, 0xf6, a), "This Isn't Happening");
+    const float sub_size = ps5_size(f, "Trophy earned!", 168.f * k);
+    ps5_text(d, f, sub_size, left, at.y + 70.f * k, rgba(0xa4, 0xa4, 0xaa, a), "Trophy earned!");
     return s.t < kShown;
 }
 
-// A system software update to 14.20: the install screen, its bar creeping
-// up to 99%, and there it stops... then an error, and the game, as if none
-// of it was real.
+// System software 14.20: the PS5 asks to update; whichever button is
+// pressed, it restarts into the install, its bar creeps up to 99% and stops
+// there; then it can't update the system software (SU-42118-6, as a real
+// failed update says), OK, and the game, as if none of it was real.
 bool ps5_update(const Step& s) {
-    constexpr double kClimb = 11.0, kStuck = 4.0, kError = 3.5;
+    constexpr double kDark = 1.6, kClimb = 10.0, kStuck = 4.5;
+    static double pressed = -1.0, chosen = -1.0;
+    static int focus = 2;
+    if (s.first) {
+        pressed = chosen = -1.0;
+        focus = 2;
+    }
     ImDrawList* d = canvas();
     const ImVec2 sc = screen();
-    const float k = sc.y / 1080.f;
-    d->AddRectFilled(ImVec2{0, 0}, sc, IM_COL32(0x00, 0x00, 0x00, 0xff));
-    if (s.t < 0.8)
-        return true;  // dark, as it restarts into the update
-    ImFont* ui = g_faces.ui != nullptr ? g_faces.ui : ImGui::GetFont();
-    const double t = s.t - 0.8;
-    if (t > kClimb + kStuck) {
-        if (t > kClimb + kStuck + kError)
-            return false;
-        centred(d, ui, 40.f * k, sc.y * 0.5f - 70.f * k, kPs5White, "Can't update the system software.");
-        centred(d, ui, 28.f * k, sc.y * 0.5f, kPs5Grey, "An error has occurred. (CE-108255-1)");
+    const float k = ps5_k();
+    const double t = s.t;
+    if (chosen < 0.0 && ((s.press && t > 0.6) || t > 45.0))
+        chosen = t;
+    else if (chosen < 0.0)
+        focus = std::clamp(focus + sideways_press(), 0, 2);
+    const double asked = chosen < 0.0 ? 1e9 : chosen + 0.22;
+    d->AddRectFilled(ImVec2{0, 0}, sc, IM_COL32(0, 0, 0, 0xff));
+    if (t < asked) {
+        ps5_room(d, kPs5Room, 1.f);
+        ps5_title(d, "System Software Update", 1.f);
+        static const char* const kLines[] = {"The PS5 system software will be updated.",
+                                             "Your PS5 will restart and start the update.",
+                                             "Version: 26.07-14.20.00"};
+        ps5_body(d, kLines, 3, ps5_oy() + 408.f * k, 1.f);
+        static const char* const kButtons[] = {"View Details", "Cancel", "Update"};
+        for (int i = 0; i < 3; i++)
+            ps5_button(d, ImVec2{sc.x * 0.5f + (i - 1) * 438.f * k, ps5_oy() + 953.f * k}, kButtons[i], i == focus,
+                       i == focus && chosen >= 0.0, 1.f);
         return true;
     }
-    centred(d, ui, 40.f * k, sc.y * 0.5f - 120.f * k, kPs5White, "Updating System Software");
-    centred(d, ui, 26.f * k, sc.y * 0.5f - 62.f * k, kPs5Grey, "Version 14.20");
-    // Quick at first, then slower and slower: 99 and no further.
-    const double share = std::min(0.99, 0.99 * (1.0 - std::pow(1.0 - std::min(1.0, t / kClimb), 2.2)));
-    const float bw = 760.f * k, bh = 6.f * k;
-    const ImVec2 ba{(sc.x - bw) * 0.5f, sc.y * 0.5f + 10.f * k};
-    d->AddRectFilled(ba, ImVec2{ba.x + bw, ba.y + bh}, IM_COL32(0x3a, 0x3a, 0x3d, 0xff), bh * 0.5f);
-    d->AddRectFilled(ba, ImVec2{ba.x + bw * static_cast<float>(share), ba.y + bh}, kPs5White, bh * 0.5f);
-    char line[64];
-    std::snprintf(line, sizeof line, "Installing update file… (%d/2)", share < 0.42 ? 1 : 2);
-    d->AddText(ui, 24.f * k, ImVec2{ba.x, ba.y + 22.f * k}, kPs5Grey, line);
-    std::snprintf(line, sizeof line, "%d%%", static_cast<int>(share * 100.0));
-    const ImVec2 ps = text_size(ui, 24.f * k, line);
-    d->AddText(ui, 24.f * k, ImVec2{ba.x + bw - ps.x, ba.y + 22.f * k}, kPs5Grey, line);
-    centred(d, ui, 22.f * k, sc.y - 120.f * k, kPs5Grey,
-            "Don't turn off your PS5 or unplug the AC power cord while the update is being installed.");
-    return true;
+    if (t < asked + kDark)
+        return true;  // dark, restarting
+    const double u = t - asked - kDark;
+    if (u < kClimb + kStuck) {
+        const float in = static_cast<float>(std::min(1.0, u / 0.6));
+        ps5_room(d, kPs5Install, in);
+        ps5_motes(d, t, in);
+        ps5_title(d, "System Software Update", in);
+        ImFont* f = ps5_face();
+        const float oy = ps5_oy();
+        const float size = ps5_size(f, "Installing...", 212.f * k);
+        const ImU32 text = rgba(0xd2, 0xd0, 0xd6, in);
+        auto centred = [&](float cap_top, const char* line) {
+            ps5_text(d, f, size, (sc.x - ps5_width(f, size, line)) * 0.5f, cap_top, text, line);
+        };
+        centred(oy + 248.f * k, "After the installation is complete, your PS5 will automatically restart.");
+        centred(oy + 383.f * k, "Installing the update file…");
+        // Quick at first, slower and slower: 99 and no further.
+        const double share = std::min(0.99, 0.99 * (1.0 - std::pow(1.0 - std::min(1.0, u / kClimb), 2.4)));
+        char percent[16];
+        std::snprintf(percent, sizeof percent, "%d%%", static_cast<int>(share * 100.0));
+        centred(oy + 466.f * k, percent);
+        const float bw = 1068.f * k, by = oy + 538.f * k;
+        const float bx = (sc.x - bw) * 0.5f;
+        d->AddRectFilled(ImVec2{bx, by - 1.5f * k}, ImVec2{bx + bw, by + 1.5f * k}, rgba(0xff, 0xff, 0xff, 0.38f * in));
+        d->AddRectFilled(ImVec2{bx, by - 2.6f * k}, ImVec2{bx + bw * static_cast<float>(share), by + 2.6f * k},
+                         rgba(0xf4, 0xf4, 0xf6, in), 2.6f * k);
+        const char* warn = "Don't turn off your PS5. Don't insert or eject discs.";
+        const float icon = 41.f * k, gap = 17.f * k;
+        const float ww = ps5_width(f, size, warn), wx = (sc.x - ww - icon - gap) * 0.5f;
+        const ImFontGlyph* hg = f->FindGlyph('H');
+        const float cap = hg != nullptr ? (hg->Y1 - hg->Y0) * size / f->FontSize : size * 0.7f;
+        ps5_no_sign(d, ImVec2{wx + icon * 0.5f, oy + 676.f * k + cap * 0.5f}, icon * 0.5f, rgba(0xf0, 0xf0, 0xf2, in));
+        ps5_text(d, f, size, wx + icon + gap, oy + 676.f * k, text, warn);
+        return true;
+    }
+    static const char* const kError[] = {"Can't update the system software.", "SU-42118-6"};
+    const double shown_at = asked + kDark + kClimb + kStuck;
+    if (pressed < 0.0 && t - shown_at > 20.0)
+        pressed = t;
+    if (pressed < 0.0 || t - pressed < 0.25) {
+        ps5_notice(s, shown_at, "System Software Update", kError, 2, 1.0, &pressed);
+        return true;
+    }
+    return t - pressed < 0.9;
 }
 
 // --- DualSense -------------------------------------------------------------------
@@ -873,13 +1257,33 @@ bool g_wiped = false;
 
 void run_modal(const Effect& e) {
     std::fprintf(stderr, "[insanity] %s\n", e.name);
+    // The game held, as our menu holds it: no frames, but no hang either.
+    report_pause(true);
+    // ED_OWN_INSANITY_PRESS=s1,s2,... (testing): a press that many seconds in.
+    std::vector<double> presses;
+    if (const char* p = std::getenv("ED_OWN_INSANITY_PRESS"); p != nullptr)
+        for (const char* at = p; *at != '\0';) {
+            char* end = nullptr;
+            presses.push_back(std::strtod(at, &end));
+            at = *end == ',' ? end + 1 : end;
+            if (end == at && *at != '\0')
+                break;
+        }
+    size_t next_press = 0;
     const Uint64 start = SDL_GetTicksNS();
     for (bool first = true;; first = false) {
-        const Step s{static_cast<double>(SDL_GetTicksNS() - start) / 1e9, first, any_press()};
+        const double t = static_cast<double>(SDL_GetTicksNS() - start) / 1e9;
+        bool press = any_press();
+        if (next_press < presses.size() && t >= presses[next_press]) {
+            press = true;
+            next_press++;
+        }
+        const Step s{t, first, press};
         const bool more = e.step(s);
         if (!dol_aurora_ui_frame() || !more)
             break;
     }
+    report_pause(false);
 }
 
 }  // namespace
@@ -1036,6 +1440,12 @@ extern "C" void insanity_imgui_init(void) {
         bold = {{home() + "/.local/share/Steam/clientui/fonts/GoNotoKurrent-Bold.ttf", 0},
                 {"/usr/share/fonts/noto/NotoSans-Bold.ttf", 0}};
         break;
+    case kPS5:
+        // The PS5's own SST where it can be read; else, for a look at them
+        // on a Mac, Helvetica Neue's medium.
+        ui = {{"/System/Library/Fonts/HelveticaNeue.ttc", 10}};
+        bold = {{"/System/Library/Fonts/HelveticaNeue.ttc", 1}};
+        break;
     default:
         break;
     }
@@ -1048,6 +1458,12 @@ extern "C" void insanity_imgui_init(void) {
         mono.push_back(m);
     ui.push_back({res + "FiraSans-Regular.ttf", 0});
     bold.push_back({res + "FiraSans-Bold.ttf", 0});
+    // Light: the PS5's own where it is (its port), else the nearest this
+    // machine has.
+    std::vector<std::pair<std::string, int>> light = {{"/System/Library/Fonts/HelveticaNeue.ttc", 7},
+                                                      {"C:/Windows/Fonts/segoeuil.ttf", 0}};
+    light.insert(light.end(), ui.begin(), ui.end());
+    g_faces.light = add_face(light, 36.f);
     g_faces.ui = add_face(ui, 32.f);
     g_faces.bold = add_face(bold, 32.f);
     g_faces.mono = add_face(mono, 32.f);

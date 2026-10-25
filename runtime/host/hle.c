@@ -6397,12 +6397,16 @@ static int g_insanity_force = -1;
 static int g_insanity_once = -1;      // hle_play_game_insanity: until it starts
 static unsigned g_insanity_once_reads;
 static volatile bool g_insanity_recovered;  // hle_insanity_recovered: her line next
+// The game's mode at the last pad read (2 play, 12 "This isn't happening!"),
+// -1 before the game is up: insanity.cpp keeps a screen covered until 12.
+static volatile int g_game_mode_now = -1;
 
 static int player_insanity_effect(CPUState* cpu, u32* state);
 
 static void force_insanity(CPUState* cpu) {
     if (!sda_ready(cpu))
         return;
+    g_game_mode_now = (int)mem_read32(cpu, cpu->gpr[13] - 26240u);
     // After one of ours: "This isn't happening!", as after the game's own
     // (play asks for mode 12 while r13-24140 is set: 0x80113DEC, 0x80113E04).
     if (g_insanity_recovered) {
@@ -6432,6 +6436,8 @@ static void force_insanity(CPUState* cpu) {
 }
 
 void hle_insanity_recovered(void) { g_insanity_recovered = true; }
+
+int hle_game_mode(void) { return g_game_mode_now; }
 
 // One of the game's effects now (the debug menu): its test mode with it
 // forced, until the player has it.

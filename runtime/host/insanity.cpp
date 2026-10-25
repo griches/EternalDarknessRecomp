@@ -31,6 +31,7 @@
 #include <vector>
 
 extern "C" void hle_insanity_recovered(void);
+extern "C" int hle_game_mode(void);
 // audio.c: a sound of ours mixed into the game's as it goes out.
 extern "C" void audio_play_host_sound(const int16_t* samples, uint32_t count, uint32_t rate, float volume);
 
@@ -1309,6 +1310,10 @@ struct Effect {
     bool (*step)(const Step&);            // one frame of it; false once it is over
     bool (*after)(const Step&) = nullptr;  // a Modal's sequel over the game (a notification)
     bool (*available)() = nullptr;         // only while this holds (a DualSense in hand)
+    // It ends on a screen of its own (black, a system's): the game's picture
+    // stays covered until its "This isn't happening!" has begun, so not one
+    // frame of it shows between the two.
+    bool covers_after = false;
 };
 
 const Effect kEffects[] = {
@@ -1317,7 +1322,7 @@ const Effect kEffects[] = {
     {"Mac: spinning wait cursor", "The game stops answering: the picture holds, the beach ball spins.", kMac,
      Kind::Modal, mac_beach_ball},
     {"Mac: quit unexpectedly", "The game is gone and the Mac's crash box asks to reopen it.", kMac, Kind::Modal,
-     mac_quit_unexpectedly},
+     mac_quit_unexpectedly, nullptr, nullptr, true},
     {"PC: display driver crash", "The picture drops out twice, then Windows says its display driver recovered.",
      kWindows, Kind::Modal, win_driver_reset, win_driver_toast},
     {"PC: restart for updates", "Windows says it will restart in a minute to install updates.", kWindows,
@@ -1327,12 +1332,12 @@ const Effect kEffects[] = {
     {"Deck: not responding", "The game stops answering and Steam offers to force it to quit. Any button waits.",
      kDeck | kLinux, Kind::Modal, deck_not_responding},
     {"Linux: kernel panic", "The game crashes and takes Linux down with it: the console scrolls to a kernel panic.",
-     kDeck | kLinux, Kind::Modal, linux_kernel_panic},
+     kDeck | kLinux, Kind::Modal, linux_kernel_panic, nullptr, nullptr, true},
     {"PS5: too hot", "The PS5 warns it is too hot, says it is turning off, and fades to black.", kPS5, Kind::Modal,
-     ps5_too_hot},
+     ps5_too_hot, nullptr, nullptr, true},
     {"PS5: trophy", "A bronze trophy pops up: This Isn't Happening.", kPS5, Kind::Overlay, ps5_trophy},
     {"PS5: system update 14.20", "The PS5 installs system software 14.20... to 99%, then fails.", kPS5, Kind::Modal,
-     ps5_update},
+     ps5_update, nullptr, nullptr, true},
     {"DualSense: dread", "The controller's light bleeds red, a heartbeat in your hands, the triggers go stiff.",
      kEvery, Kind::Overlay, dualsense_dread, nullptr, dualsense_present},
 };
@@ -1519,13 +1524,26 @@ extern "C" void insanity_frame(void) {
     // One drawn over play: a frame of it each game frame.
     static bool (*over)(const Step&) = nullptr;
     static Uint64 over_start = 0;
+    // Black over the game after one that ends on a screen of its own, until
+    // the game's own "This isn't happening!" has begun (or a second and a
+    // half, if it does not come).
+    static Uint64 cover_from = 0;
+    if (cover_from != 0) {
+        if (hle_game_mode() == 12 || SDL_GetTicksNS() - cover_from > 1500000000ull)
+            cover_from = 0;
+        else
+            canvas()->AddRectFilled(ImVec2{0, 0}, screen(), IM_COL32(0, 0, 0, 0xff));
+    }
     if (over == nullptr && g_armed >= 0 && kEffects[g_armed].kind != Kind::Menu) {
         const Effect& e = kEffects[g_armed];
         g_armed = -1;
-        if (e.kind == Kind::Modal)
+        if (e.kind == Kind::Modal) {
             run_modal(e);
-        else
+            if (e.covers_after)
+                cover_from = SDL_GetTicksNS();
+        } else {
             std::fprintf(stderr, "[insanity] %s\n", e.name);
+        }
         over = e.kind == Kind::Overlay ? e.step : e.after;
         over_start = 0;
         if (over == nullptr) {

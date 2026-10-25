@@ -1161,9 +1161,9 @@ void build_debug() {
                                       " \u203a"};
     insane.enabled = !game_effect || hle_insanity_available();
     insane.note = !insane.enabled ? kNotFound
-                  : game_effect   ? "One of the game's own, at any sanity, when it next can (some only in certain "
-                                    "places or for certain characters; after ten seconds without it, it is "
-                                    "dropped): it plays as you resume. Left/Right picks which, A plays it."
+                  : game_effect   ? "One of the game's own, armed as you resume: it plays when its own moment comes "
+                                    "(some only in certain places or for certain characters; not armed within ten "
+                                    "seconds, it is dropped). Left/Right picks which, A arms it."
                                   : insanity::note(effect - kGameCount);
     insane.change = [effects](int dir) { cycle(effect, effects, dir); };
     insane.activate = [] {

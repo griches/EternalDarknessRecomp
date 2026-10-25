@@ -308,16 +308,152 @@ bool mac_quit_unexpectedly(const Step& s) {
     return true;
 }
 
+// --- Windows -------------------------------------------------------------------
+
+// A notification as Windows 11 shows one in its dark look, sliding in at the
+// screen's bottom right: the app's line, a bold title, the text, and buttons.
+// `glyph` draws the app's little icon at a point, `size` across.
+void win_toast(double t, double shown_for, const char* app, void (*glyph)(ImDrawList*, ImVec2, float),
+               const char* title, const char* body, const char* left_button, const char* right_button) {
+    ImDrawList* d = canvas();
+    const ImVec2 sc = screen();
+    const float k = dp();
+    const float w = 364.f * k;
+    ImFont* ui = g_faces.ui != nullptr ? g_faces.ui : ImGui::GetFont();
+    ImFont* bold = g_faces.bold != nullptr ? g_faces.bold : ImGui::GetFont();
+    const float pad = 16.f * k, wrap = w - 2.f * pad;
+    const ImVec2 body_size = text_size(ui, 14.f * k, body, wrap);
+    const float buttons = left_button != nullptr ? 32.f * k + 12.f * k : 0.f;
+    const float h = 40.f * k + 22.f * k + body_size.y + 16.f * k + buttons;
+    // In over a fifth of a second, out the same way.
+    const double in = std::min(1.0, t / 0.22), out = std::min(1.0, std::max(0.0, (shown_for - t) / 0.22));
+    const float slide = static_cast<float>(1.0 - std::pow(std::min(in, out), 3.0));
+    const ImVec2 a{sc.x - w - 12.f * k + slide * (w + 24.f * k), sc.y - h - 12.f * k};
+    const ImVec2 b{a.x + w, a.y + h};
+    const float round = 8.f * k;
+    shadow(d, a, b, round, 14.f * k, 0.45f);
+    d->AddRectFilled(a, b, rgba(0x2b, 0x2b, 0x2b, 0.98f), round);
+    d->AddRect(a, b, rgba(0xff, 0xff, 0xff, 0.09f), round, 0, 1.f);
+    glyph(d, ImVec2{a.x + pad + 8.f * k, a.y + 20.f * k}, 16.f * k);
+    d->AddText(ui, 12.f * k, ImVec2{a.x + pad + 24.f * k, a.y + 13.f * k}, rgba(0xff, 0xff, 0xff, 0.78f), app);
+    // The "..." and close marks at the top right.
+    const ImU32 mark = rgba(0xff, 0xff, 0xff, 0.7f);
+    const ImVec2 x{b.x - pad - 4.f * k, a.y + 20.f * k};
+    const float arm = 4.5f * k;
+    d->AddLine(ImVec2{x.x - arm, x.y - arm}, ImVec2{x.x + arm, x.y + arm}, mark, 1.f * k);
+    d->AddLine(ImVec2{x.x - arm, x.y + arm}, ImVec2{x.x + arm, x.y - arm}, mark, 1.f * k);
+    for (int i = -1; i <= 1; i++)
+        d->AddCircleFilled(ImVec2{x.x - 28.f * k + i * 5.f * k, x.y}, 1.2f * k, mark);
+    d->AddText(bold, 14.f * k, ImVec2{a.x + pad, a.y + 40.f * k}, rgba(0xff, 0xff, 0xff, 0.96f), title);
+    d->AddText(ui, 14.f * k, ImVec2{a.x + pad, a.y + 62.f * k}, rgba(0xff, 0xff, 0xff, 0.78f), body, nullptr,
+               wrap);
+    if (left_button != nullptr) {
+        const float bw = (w - 2.f * pad - 8.f * k) * 0.5f, by = b.y - pad - 32.f * k;
+        const char* labels[2] = {left_button, right_button};
+        for (int i = 0; i < 2; i++) {
+            const ImVec2 ba{a.x + pad + i * (bw + 8.f * k), by}, bb{ba.x + bw, by + 32.f * k};
+            d->AddRectFilled(ba, bb, rgba(0xff, 0xff, 0xff, 0.08f), 4.f * k);
+            d->AddRect(ba, bb, rgba(0xff, 0xff, 0xff, 0.07f), 4.f * k);
+            const ImVec2 ls = text_size(ui, 14.f * k, labels[i]);
+            d->AddText(ui, 14.f * k, ImVec2{ba.x + (bw - ls.x) * 0.5f, ba.y + (32.f * k - ls.y) * 0.5f},
+                       rgba(0xff, 0xff, 0xff, 0.92f), labels[i]);
+        }
+    }
+}
+
+// Windows Update's icon: two arrows chasing round a circle, in the accent blue.
+void glyph_update(ImDrawList* d, ImVec2 c, float size) {
+    const ImU32 blue = IM_COL32(0x4c, 0xc2, 0xff, 0xff);
+    const float r = size * 0.38f, w = size * 0.11f;
+    for (int half = 0; half < 2; half++) {
+        const float from = half * kPi + 0.35f, to = from + kPi - 0.7f;
+        d->PathArcTo(c, r, from, to, 12);
+        d->PathStroke(blue, 0, w);
+        const ImVec2 tip{c.x + std::cos(to) * r, c.y + std::sin(to) * r};
+        const ImVec2 along{-std::sin(to), std::cos(to)}, out{std::cos(to), std::sin(to)};
+        const float s = size * 0.16f;
+        d->AddTriangleFilled(ImVec2{tip.x + along.x * s, tip.y + along.y * s},
+                             ImVec2{tip.x + out.x * s, tip.y + out.y * s}, ImVec2{tip.x - out.x * s, tip.y - out.y * s},
+                             blue);
+    }
+}
+
+// A display: the screen and its stand, for the driver's message.
+void glyph_display(ImDrawList* d, ImVec2 c, float size) {
+    const ImU32 white = IM_COL32(0xe8, 0xe8, 0xe8, 0xff);
+    const float w = size * 0.42f, h = size * 0.28f;
+    d->AddRect(ImVec2{c.x - w, c.y - h - size * 0.06f}, ImVec2{c.x + w, c.y + h - size * 0.06f}, white,
+               size * 0.06f, 0, size * 0.08f);
+    d->AddLine(ImVec2{c.x - w * 0.5f, c.y + h + size * 0.12f}, ImVec2{c.x + w * 0.5f, c.y + h + size * 0.12f}, white,
+               size * 0.08f);
+}
+
+// The picture drops out, comes back, drops out again as the driver resets;
+// then Windows says so.
+bool win_driver_reset(const Step& s) {
+    static const double kBlack[][2] = {{0.0, 0.3}, {0.42, 1.7}, {1.82, 2.6}};
+    for (const auto& span : kBlack)
+        if (s.t >= span[0] && s.t < span[1])
+            canvas()->AddRectFilled(ImVec2{0, 0}, screen(), IM_COL32(0, 0, 0, 0xff));
+    return s.t < 2.6;
+}
+
+bool win_driver_toast(const Step& s) {
+    constexpr double kShown = 7.0;
+    win_toast(s.t, kShown, "Windows", glyph_display, "Display driver stopped responding and has recovered",
+              "Display driver stopped responding and has successfully recovered.", nullptr, nullptr);
+    return s.t < kShown;
+}
+
+bool win_update_toast(const Step& s) {
+    constexpr double kShown = 9.0;
+    win_toast(s.t, kShown, "Windows Update", glyph_update, "Restart required",
+              "Your device will restart in 1 minute to finish installing updates.", "Restart now", "Pick a time");
+    return s.t < kShown;
+}
+
+// Windows' arrow pointer, white edged in black, `scale` times its pixels.
+void win_arrow(ImDrawList* d, ImVec2 at, float scale, float alpha) {
+    static const ImVec2 kShape[] = {{0, 0}, {0, 17}, {4, 13}, {7, 19.5f}, {9.5f, 18.5f}, {6.5f, 12}, {12, 12}};
+    ImVec2 points[7];
+    for (int i = 0; i < 7; i++)
+        points[i] = ImVec2{at.x + kShape[i].x * scale, at.y + kShape[i].y * scale};
+    d->AddConcavePolyFilled(points, 7, rgba(0xff, 0xff, 0xff, alpha));
+    d->AddPolyline(points, 7, rgba(0, 0, 0, alpha), ImDrawFlags_Closed, std::max(1.f, scale * 0.9f));
+}
+
+// Someone else's pointer: it appears, wanders over the picture as if a hand
+// were on a mouse, stops, "clicks", and is gone.
+bool win_pointer(const Step& s) {
+    constexpr double kFor = 10.0;
+    static float seed = 0.f;
+    if (s.first)
+        seed = static_cast<float>(std::rand() % 1000) / 100.f;
+    const ImVec2 sc = screen();
+    const float t = static_cast<float>(s.t);
+    // Slow and uneven: a wander, with a pause in the middle.
+    const float walk = t < 4.f ? t : t < 6.f ? 4.f + (t - 4.f) * 0.08f : 4.16f + (t - 6.f);
+    const ImVec2 at{sc.x * (0.62f + 0.22f * std::sin(walk * 0.55f + seed) + 0.03f * std::sin(walk * 2.3f)),
+                    sc.y * (0.45f + 0.25f * std::sin(walk * 0.41f + seed * 1.7f) + 0.02f * std::cos(walk * 3.1f))};
+    const float alpha = t < 0.15f ? t / 0.15f : t > kFor - 0.1f ? 0.f : 1.f;
+    const bool clicking = t > kFor - 1.2f && t < kFor - 1.0f;
+    win_arrow(canvas(), at, (clicking ? 1.1f : 1.25f) * dp(), alpha);
+    return s.t < kFor;
+}
+
 // --- The effects ---------------------------------------------------------------
 
-enum class Kind { Modal, Menu };
+// Modal: the game held while it plays; Overlay: over the game as it plays;
+// Menu: in our menu, the next time it opens.
+enum class Kind { Modal, Overlay, Menu };
 
 struct Effect {
     const char* name;
     const char* note;
     unsigned platforms;
     Kind kind;
-    bool (*step)(const Step&);  // Modal: one frame of it; false once it is over
+    bool (*step)(const Step&);            // one frame of it; false once it is over
+    bool (*after)(const Step&) = nullptr;  // a Modal's sequel over the game (a notification)
 };
 
 const Effect kEffects[] = {
@@ -327,6 +463,12 @@ const Effect kEffects[] = {
      Kind::Modal, mac_beach_ball},
     {"Mac: quit unexpectedly", "The game is gone and the Mac's crash box asks to reopen it.", kMac, Kind::Modal,
      mac_quit_unexpectedly},
+    {"PC: display driver crash", "The picture drops out twice, then Windows says its display driver recovered.",
+     kWindows, Kind::Modal, win_driver_reset, win_driver_toast},
+    {"PC: restart for updates", "Windows says it will restart in a minute to install updates.", kWindows,
+     Kind::Overlay, win_update_toast},
+    {"PC: someone else's pointer", "A mouse pointer wanders across the picture by itself, clicks, and is gone.",
+     kWindows, Kind::Overlay, win_pointer},
 };
 constexpr int kEffectCount = sizeof kEffects / sizeof kEffects[0];
 
@@ -463,12 +605,35 @@ extern "C" void insanity_frame(void) {
         std::fprintf(stderr, "[insanity] test: effect %d of %d (%s)\n", test_effect, count(),
                      g_armed >= 0 ? kEffects[g_armed].name : "none");
     }
-    if (g_armed < 0 || kEffects[g_armed].kind != Kind::Modal || ImGui::GetCurrentContext() == nullptr)
+    if (ImGui::GetCurrentContext() == nullptr)
         return;
-    const Effect& e = kEffects[g_armed];
-    g_armed = -1;
-    run_modal(e);
-    hle_insanity_recovered();
+    // One drawn over play: a frame of it each game frame.
+    static bool (*over)(const Step&) = nullptr;
+    static Uint64 over_start = 0;
+    if (over == nullptr && g_armed >= 0 && kEffects[g_armed].kind != Kind::Menu) {
+        const Effect& e = kEffects[g_armed];
+        g_armed = -1;
+        if (e.kind == Kind::Modal)
+            run_modal(e);
+        else
+            std::fprintf(stderr, "[insanity] %s\n", e.name);
+        over = e.kind == Kind::Overlay ? e.step : e.after;
+        over_start = 0;
+        if (over == nullptr) {
+            hle_insanity_recovered();
+            return;
+        }
+    }
+    if (over == nullptr)
+        return;
+    const bool first = over_start == 0;
+    if (first)
+        over_start = SDL_GetTicksNS();
+    const Step s{static_cast<double>(SDL_GetTicksNS() - over_start) / 1e9, first, false};
+    if (!over(s)) {
+        over = nullptr;
+        hle_insanity_recovered();
+    }
 }
 
 extern "C" void insanity_imgui_init(void) {

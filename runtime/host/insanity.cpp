@@ -441,6 +441,168 @@ bool win_pointer(const Step& s) {
     return s.t < kFor;
 }
 
+// --- Steam Deck and Linux -------------------------------------------------------
+
+// Steam's own "not responding" box in its Deck look (dark slate, the focused
+// button light), over the held picture, with its button hints along the
+// bottom. Any button: Wait, and the game goes on.
+bool deck_not_responding(const Step& s) {
+    static double answered = -1.0;
+    if (s.first)
+        answered = -1.0;
+    if (s.t < 2.5)
+        return true;  // held: the game has stopped answering
+    if (answered < 0.0 && ((s.press && s.t > 3.2) || s.t > 25.0))
+        answered = s.t;
+    if (answered >= 0.0 && s.t > answered + 0.12)
+        return false;
+    ImDrawList* d = canvas();
+    const ImVec2 sc = screen();
+    const float k = dp();
+    const float fade = static_cast<float>(std::min(1.0, (s.t - 2.5) / 0.15));
+    d->AddRectFilled(ImVec2{0, 0}, sc, rgba(0x0e, 0x14, 0x1b, 0.72f * fade));
+    const float w = std::min(640.f * k, sc.x - 48.f * k), h = 236.f * k;
+    const ImVec2 a{(sc.x - w) * 0.5f, (sc.y - h) * 0.5f - 20.f * k}, b{a.x + w, a.y + h};
+    shadow(d, a, b, 4.f * k, 24.f * k, 0.6f * fade);
+    d->AddRectFilledMultiColor(a, b, rgba(0x2a, 0x2e, 0x36, fade), rgba(0x2a, 0x2e, 0x36, fade),
+                               rgba(0x1d, 0x20, 0x26, fade), rgba(0x1d, 0x20, 0x26, fade));
+    ImFont* bold = g_faces.bold != nullptr ? g_faces.bold : ImGui::GetFont();
+    ImFont* ui = g_faces.ui != nullptr ? g_faces.ui : ImGui::GetFont();
+    const float pad = 32.f * k;
+    d->AddText(bold, 26.f * k, ImVec2{a.x + pad, a.y + 28.f * k}, rgba(0xff, 0xff, 0xff, fade),
+               "Eternal Darkness is not responding");
+    d->AddText(ui, 17.f * k, ImVec2{a.x + pad, a.y + 72.f * k}, rgba(0xb8, 0xbc, 0xbf, fade),
+               "You can wait for it to respond, or force it to quit. Any progress since you last saved will be lost.",
+               nullptr, w - 2.f * pad);
+    const float bh = 44.f * k, bw = (w - 2.f * pad - 12.f * k) * 0.5f, by = b.y - pad - bh;
+    const char* labels[2] = {"Wait", "Force Quit"};
+    for (int i = 0; i < 2; i++) {
+        const ImVec2 ba{a.x + pad + i * (bw + 12.f * k), by}, bb{ba.x + bw, by + bh};
+        const bool focus = i == 0;
+        const bool down = focus && answered >= 0.0;
+        d->AddRectFilled(ba, bb, focus ? rgba(down ? 0xb0 : 0xdc, down ? 0xb2 : 0xde, down ? 0xb4 : 0xdf, fade)
+                                       : rgba(0x3d, 0x44, 0x50, fade),
+                         2.f * k);
+        const ImVec2 ls = text_size(ui, 17.f * k, labels[i]);
+        d->AddText(focus ? bold : ui, 17.f * k, ImVec2{ba.x + (bw - ls.x) * 0.5f, ba.y + (bh - ls.y) * 0.5f},
+                   focus ? rgba(0x0e, 0x14, 0x1b, fade) : rgba(0xdc, 0xde, 0xdf, fade), labels[i]);
+    }
+    // The hints bar: A Select, B Back.
+    const float bar = 44.f * k;
+    d->AddRectFilled(ImVec2{0, sc.y - bar}, sc, rgba(0x0e, 0x14, 0x1b, 0.92f * fade));
+    float x = sc.x - 24.f * k;
+    const std::pair<const char*, const char*> kHints[] = {{"east", "Back"}, {"south", "Select"}};
+    for (const auto& [button, label] : kHints) {
+        const ImVec2 ls = text_size(ui, 15.f * k, label);
+        x -= ls.x;
+        d->AddText(ui, 15.f * k, ImVec2{x, sc.y - bar + (bar - ls.y) * 0.5f}, rgba(0xdc, 0xde, 0xdf, fade), label);
+        const float icon = 24.f * k;
+        x -= icon + 8.f * k;
+        if (ImTextureID id = picture(std::string("ui/glyphs/xbox/") + button + ".png"); id != 0)
+            d->AddImage(id, ImVec2{x, sc.y - bar + (bar - icon) * 0.5f}, ImVec2{x + icon, sc.y - bar + (bar + icon) * 0.5f},
+                        ImVec2{0, 0}, ImVec2{1, 1}, rgba(0xff, 0xff, 0xff, fade));
+        x -= 28.f * k;
+    }
+    return true;
+}
+
+// The game falls over and takes Linux with it: the picture holds, then the
+// console's text, a segfault and an oops scrolling up to the kernel's panic
+// (its call trace through the game's gods), then nothing; then the game
+// again, as if none of it happened.
+bool linux_kernel_panic(const Step& s) {
+    static std::vector<std::string> lines;
+    if (s.first) {
+        const bool deck = platform() == kDeck;
+        const char* uname = deck ? "6.5.0-valve22-1-neptune-65" : "6.8.0-45-generic";
+        const char* hardware =
+            deck ? "Valve Jupiter/Jupiter, BIOS F7A0131 01/30/2024" : "To Be Filled By O.E.M. To Be Filled By O.E.M./B550M, BIOS P2.20 07/27/2021";
+        const std::string text[] = {
+            "EternalDarkness[4183]: segfault at 48 ip 000055d0c2b1e4a1 sp 00007ffd3c1e9a50 error 4 in "
+            "EternalDarkness[55d0c2a00000+4c2000] likely on CPU 6 (core 3, socket 0)",
+            "BUG: kernel NULL pointer dereference, address: 0000000000000048",
+            "#PF: supervisor read access in kernel mode",
+            "#PF: error_code(0x0000) - not-present page",
+            "PGD 0 P4D 0",
+            "Oops: 0000 [#1] PREEMPT SMP NOPTI",
+            std::string("CPU: 6 PID: 4183 Comm: EternalDarkness Not tainted ") + uname + " #1",
+            std::string("Hardware name: ") + hardware,
+            "RIP: 0010:sanity_drain+0x4e/0x1d0",
+            "Code: 48 8b 47 48 48 85 c0 74 2e 8b 50 10 85 d2 7e 27 <48> 8b 40 48 48 85 c0 74 1e 0f b7 50 0a",
+            "RSP: 0018:ffffb3c4c2a37d18 EFLAGS: 00010246",
+            "RAX: 0000000000000000 RBX: ffff9a5e0b2d8000 RCX: 0000000000000000",
+            "RDX: 0000000000000001 RSI: 0000000000000000 RDI: ffff9a5e0b2d8000",
+            "RBP: ffffb3c4c2a37d40 R08: 0000000000000000 R09: 0000000000000000",
+            "R10: 0000000000000000 R11: 0000000000000000 R12: ffff9a5e1e6f4c00",
+            "R13: 0000000000000000 R14: 0000000000000000 R15: 0000000000000000",
+            "FS:  00007f3c2d7fe6c0(0000) GS:ffff9a612ef80000(0000) knlGS:0000000000000000",
+            "CS:  0010 DS: 0000 ES: 0000 CR0: 0000000080050033",
+            "CR2: 0000000000000048 CR3: 000000011b5d2000 CR4: 0000000000350ee0",
+            "Call Trace:",
+            " <TASK>",
+            " ? __die+0x23/0x70",
+            " ? page_fault_oops+0x171/0x4e0",
+            " ? exc_page_fault+0x7f/0x180",
+            " ? asm_exc_page_fault+0x26/0x30",
+            " ? sanity_drain+0x4e/0x1d0",
+            " mantorok_whisper+0x1b2/0x3a0",
+            " ? ulyaoth_reach+0x9c/0x140",
+            " ? xellotath_dream+0x51/0x120",
+            " chattur_gha_bind+0x2e5/0x610",
+            " pious_augustus_ritual+0x41/0x90",
+            " __x64_sys_ioctl+0x94/0xd0",
+            " do_syscall_64+0x5d/0x90",
+            " entry_SYSCALL_64_after_hwframe+0x6e/0xd8",
+            " </TASK>",
+            "Modules linked in: amdgpu snd_hda_intel snd_intel_dspcfg snd_hda_codec drm_buddy gpu_sched "
+            "drm_display_helper hid_steam bluetooth cfg80211 nvme ccp xhci_pci",
+            "CR2: 0000000000000048",
+            "---[ end trace 0000000000000000 ]---",
+            "Kernel panic - not syncing: Fatal exception in interrupt",
+            "Kernel Offset: 0x2c000000 from 0xffffffff81000000 (relocation range: 0xffffffff80000000-0xffffffffbfffffff)",
+            "---[ end Kernel panic - not syncing: Fatal exception in interrupt ]---",
+        };
+        lines.clear();
+        double stamp = 4127.881203;
+        for (const std::string& line : text) {
+            char at[32];
+            std::snprintf(at, sizeof at, "[%11.6f] ", stamp);
+            lines.push_back(at + line);
+            stamp += 0.000005 + (std::rand() % 9) * 0.000001;
+            if (line.rfind("---[ end trace", 0) == 0)
+                stamp += 0.0208;
+        }
+    }
+    constexpr double kHeld = 1.2, kPerLine = 0.045, kStay = 6.0;
+    const double printed = (s.t - kHeld) / kPerLine;
+    const double end = kHeld + lines.size() * kPerLine + kStay;
+    if (s.t < kHeld)
+        return true;
+    ImDrawList* d = canvas();
+    const ImVec2 sc = screen();
+    d->AddRectFilled(ImVec2{0, 0}, sc, IM_COL32(0, 0, 0, 0xff));
+    if (s.t > end - 0.6)
+        return s.t < end;  // a moment of nothing before the game is back
+    ImFont* mono = g_faces.mono != nullptr ? g_faces.mono : ImGui::GetFont();
+    const float size = std::max(10.f, sc.y / 46.f);
+    const float line_h = size * 1.12f;
+    const int shown = std::min(static_cast<int>(lines.size()), static_cast<int>(printed) + 1);
+    // Wrapped as the console wraps, oldest scrolled off the top.
+    std::vector<std::pair<const char*, const char*>> rows;
+    const float width = sc.x - 2.f * size * 0.5f;
+    const float column = mono->CalcTextSizeA(size, FLT_MAX, 0.f, "M").x;
+    const size_t per_row = std::max<size_t>(20, static_cast<size_t>(width / column));
+    for (int i = 0; i < shown; i++)
+        for (size_t at = 0; at < lines[i].size(); at += per_row)
+            rows.emplace_back(lines[i].c_str() + at, lines[i].c_str() + std::min(lines[i].size(), at + per_row));
+    const int fit = static_cast<int>((sc.y - size) / line_h);
+    const int from = std::max(0, static_cast<int>(rows.size()) - fit);
+    for (int r = from; r < static_cast<int>(rows.size()); r++)
+        d->AddText(mono, size, ImVec2{size * 0.5f, size * 0.5f + (r - from) * line_h}, IM_COL32(0xaa, 0xaa, 0xaa, 0xff),
+                   rows[r].first, rows[r].second);
+    return true;
+}
+
 // --- The effects ---------------------------------------------------------------
 
 // Modal: the game held while it plays; Overlay: over the game as it plays;
@@ -469,6 +631,10 @@ const Effect kEffects[] = {
      Kind::Overlay, win_update_toast},
     {"PC: someone else's pointer", "A mouse pointer wanders across the picture by itself, clicks, and is gone.",
      kWindows, Kind::Overlay, win_pointer},
+    {"Deck: not responding", "The game stops answering and Steam offers to force it to quit. Any button waits.",
+     kDeck | kLinux, Kind::Modal, deck_not_responding},
+    {"Linux: kernel panic", "The game crashes and takes Linux down with it: the console scrolls to a kernel panic.",
+     kDeck | kLinux, Kind::Modal, linux_kernel_panic},
 };
 constexpr int kEffectCount = sizeof kEffects / sizeof kEffects[0];
 

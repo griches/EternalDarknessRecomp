@@ -1547,10 +1547,33 @@ void update_fps_counter() {
 
 // While a cutscene plays, the fast-forward prompt at the screen's bottom right
 // (in the letterbox bar): RB's icon (Tab's on the keyboard) and a
-// fast-forward sign, which brightens while it is held. Through ImGui, as the FPS counter.
+// fast-forward sign. It shows for the first two seconds of each cutscene, then
+// fades away; holding the button brings it back, bright, and it fades again a
+// second after the button is let go. Through ImGui, as the FPS counter.
 void update_fast_forward_prompt() {
+    constexpr Uint64 kShowMs = 2000, kAfterMs = 1000;
+    constexpr float kIdle = 0.6f, kFadeInS = 0.15f, kFadeOutS = 0.6f;
+    static bool shown = false;
+    static Uint64 idle_until = 0, bright_until = 0, last = 0;
+    static float level = 0.f;  // 0 gone, kIdle as it first shows, 1 while held
     const std::string file = controls::fast_forward_glyph();
-    if (file.empty() || ImGui::GetCurrentContext() == nullptr)
+    if (file.empty() || ImGui::GetCurrentContext() == nullptr) {
+        shown = false;
+        level = 0.f;
+        return;
+    }
+    const Uint64 now = SDL_GetTicks();
+    if (!shown)
+        idle_until = now + kShowMs, last = now;
+    shown = true;
+    const bool fast = controls::fast_forwarding();
+    if (fast)
+        bright_until = now + kAfterMs;
+    const float target = now < bright_until ? 1.f : now < idle_until ? kIdle : 0.f;
+    const float dt = static_cast<float>(now - last) / 1000.f;
+    last = now;
+    level = target > level ? std::min(target, level + dt / kFadeInS) : std::max(target, level - dt / kFadeOutS);
+    if (level <= 0.f)
         return;
     static std::map<std::string, ImTextureID> icons;  // 0: the file did not load
     auto it = icons.find(file);
@@ -1565,7 +1588,6 @@ void update_fast_forward_prompt() {
     if (it->second == 0)
         return;
     const float dp = overlay_dp();
-    const bool fast = controls::fast_forwarding();
     const ImVec2 screen = ImGui::GetMainViewport()->Size;
     const float icon = 44.f * dp;
     const float arrow = 14.f * dp;  // each triangle's width; height is icon / 2
@@ -1575,7 +1597,7 @@ void update_fast_forward_prompt() {
     const float sign_left = right - 2.f * arrow;
     const float icon_left = sign_left - gap - icon;
     ImDrawList* draw = ImGui::GetForegroundDrawList(ImGui::GetMainViewport());
-    const ImU32 alpha = fast ? 0xff : 0x99;
+    const ImU32 alpha = static_cast<ImU32>(std::lround(level * 255.f));
     draw->AddImage(it->second, ImVec2{icon_left, top}, ImVec2{icon_left + icon, top + icon},
                    ImVec2{0, 0}, ImVec2{1, 1}, IM_COL32(0xff, 0xff, 0xff, alpha));
     const float mid = top + icon / 2.f;

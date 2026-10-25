@@ -3599,6 +3599,8 @@ static bool game_menu_open(CPUState* cpu) {
 static u32 g_letterbox_height;
 static s32 g_scene_flag_offset;
 static bool sda_ready(const CPUState* cpu);
+static void hold_zero_sanity(CPUState* cpu);
+static void spawn_requested(CPUState* cpu);
 
 static bool cutscene_playing(CPUState* cpu) {
     if (g_movie_file != 0u)
@@ -3615,6 +3617,8 @@ static void hle_PADRead(CPUState* cpu) {
     controls_set_game_menu(game_menu_open(cpu));
     controls_set_cutscene(cutscene_playing(cpu));
     controls_note_frame(cpu->timebase / 675000ull);
+    hold_zero_sanity(cpu);
+    spawn_requested(cpu);
     u32 motor_mask = dol_platform_pad_read(state);
     if (camera_pad_buttons(cpu, state[0].button))
         state[0].stick_x = state[0].stick_y = 0;
@@ -5818,6 +5822,332 @@ static void find_letterbox(CPUState* cpu) {
     g_scene_flag_offset = (s16)(load & 0xFFFFu);
     g_letterbox_height = (high << 16) + (u32)(s32)(s16)(low & 0xFFFFu) + 0xBCu;
 }
+
+// The debug menu's Invincible (frontend.cpp). Every change to a character's
+// health goes through one function, fn(character, health) (the one the Action
+// Replay "unlimited health" code cuts out): the health is a halfword in the
+// character's stats. For the player's character (whose +52 is the player
+// object, as the game's own search for it compares) a lower health becomes
+// the health it has, so hits and the drain at zero sanity do nothing and
+// healing still works.
+static bool g_invincible;
+static bool g_health_found;
+static s16 g_health_stats_offset, g_health_offset;
+static unsigned g_health_blocked;
+
+// ED_HEALTH_LOG=1: each change to the player's health.
+static void hle_set_health(CPUState* cpu) {
+    static int log = -1;
+    if (log < 0)
+        log = getenv("ED_HEALTH_LOG") != NULL;
+    g_hle_passthrough = true;
+    if (!g_invincible && !log)
+        return;
+    const u32 character = cpu->gpr[3];
+    const u32 player = mem_read32(cpu, cpu->gpr[13] + (u32)(s32)g_camera_player_offset);
+    if (!guest_ram_range_valid(cpu, character, 56u) || player == 0u || mem_read32(cpu, character + 52u) != player)
+        return;
+    const u32 stats = mem_read32(cpu, character + (u32)(s32)g_health_stats_offset);
+    if (!guest_ram_range_valid(cpu, stats + (u32)(s32)g_health_offset, 2u))
+        return;
+    const s16 health = (s16)mem_read16(cpu, stats + (u32)(s32)g_health_offset);
+    const s16 wanted = (s16)cpu->gpr[4];
+    if (log)
+        fprintf(stderr, "[debug] player health %d -> %d (from 0x%08X)%s\n", health, wanted, cpu->lr,
+                g_invincible && wanted < health ? ", kept" : "");
+    if (!g_invincible || wanted >= health)
+        return;
+    cpu->gpr[4] = (u32)(s32)health;
+    if (g_health_blocked++ % 100u == 0u)
+        fprintf(stderr, "[debug] invincible: health stays at %d (the game set %d; %u so far)\n", health, wanted,
+                g_health_blocked);
+}
+
+// The setter (PAL, USA): stwu r1,-16(r1) ... lwz r3, stats(r3) ... bl set;
+// li r0, 1, where set reads and writes the health (lha r3, health(r30); sth
+// r31, health(r30)); and the search for the player's character: lwz r0,
+// 52(r3); cmplw r0, r31.
+static void find_health_setter(CPUState* cpu) {
+    const bool pal = strcmp(ED_GAME_ID, "GEDP01") == 0;
+    const u32 fn = pal ? 0x801F64FCu : 0x80201D88u;
+    const u32 load = mem_read32(cpu, fn + 0x18u);
+    const u32 bl = mem_read32(cpu, fn + 0x24u);
+    const u32 set = fn + 0x24u + (u32)(((s32)(bl << 6)) >> 6 & ~3);
+    const u32 read = mem_read32(cpu, set + 0x30u);
+    const u32 write = mem_read32(cpu, set + 0x34u);
+    HleDispatchEntry* entry = hle_dispatch_entry(fn);
+    if (mem_read32(cpu, fn) != 0x9421FFF0u || (load >> 16) != 0x8063u || (bl & 0xFC000003u) != 0x48000001u ||
+        mem_read32(cpu, fn + 0x28u) != 0x38000001u || (read >> 16) != 0xA87Eu || (write >> 16) != 0xB3FEu ||
+        (read & 0xFFFFu) != (write & 0xFFFFu) || mem_read32(cpu, fn - 0x198u) != 0x80030034u ||
+        mem_read32(cpu, fn - 0x194u) != 0x7C00F840u || g_camera_player_offset == 0 || entry == NULL ||
+        entry->intercept != NULL || entry->notify != NULL) {
+        fprintf(stderr, "[debug] the game's health not found: no Invincible\n");
+        return;
+    }
+    g_health_stats_offset = (s16)(load & 0xFFFFu);
+    g_health_offset = (s16)(read & 0xFFFFu);
+    entry->intercept = hle_set_health;
+    g_health_found = true;
+}
+
+void hle_set_invincible(bool on) {
+    if (on != g_invincible)
+        fprintf(stderr, "[debug] invincible %s\n", on ? "on" : "off");
+    g_invincible = on && g_health_found;
+}
+
+bool hle_invincible(void) { return g_invincible; }
+bool hle_invincible_available(void) { return g_health_found; }
+
+// The debug menu's Zero sanity: the player's sanity is 0 at every pad read
+// while it is on, so it stays empty whatever would fill it; off, it fills
+// again the game's own way. The game's stat setter, fn(character, stat,
+// value, notify), keeps sanity (stat 1) as a halfword in a block its actor
+// points to: bl actor (lwz r3, actor(r3); blr) ... lwz r3, block(r31); sth
+// r28, sanity(r3). The player's character is found as the game finds it: the
+// list from its getter (lwz r3, list(r13)), the first and each next at +4,
+// the one whose +52 is the player object.
+static bool g_zero_sanity;
+static bool g_sanity_found;
+static s16 g_sanity_actor_offset, g_sanity_block_offset, g_sanity_offset, g_character_list_offset;
+static u32 g_player_character;  // the last one found, while its +52 is still the player
+static unsigned g_sanity_emptied;
+
+static u32 player_character(CPUState* cpu) {
+    if (!sda_ready(cpu))
+        return 0u;
+    const u32 player = mem_read32(cpu, cpu->gpr[13] + (u32)(s32)g_camera_player_offset);
+    if (player == 0u)
+        return 0u;
+    if (guest_ram_range_valid(cpu, g_player_character, 56u) && mem_read32(cpu, g_player_character + 52u) == player)
+        return g_player_character;
+    u32 node = mem_read32(cpu, cpu->gpr[13] + (u32)(s32)g_character_list_offset);
+    for (int i = 0; i < 1024 && guest_ram_range_valid(cpu, node, 8u); i++) {
+        node = mem_read32(cpu, node + 4u);
+        if (guest_ram_range_valid(cpu, node, 56u) && mem_read32(cpu, node + 52u) == player)
+            return g_player_character = node;
+    }
+    return 0u;
+}
+
+static void hold_zero_sanity(CPUState* cpu) {
+    if (!g_zero_sanity)
+        return;
+    const u32 character = player_character(cpu);
+    if (character == 0u)
+        return;
+    const u32 actor = mem_read32(cpu, character + (u32)(s32)g_sanity_actor_offset);
+    if (!guest_ram_range_valid(cpu, actor + (u32)(s32)g_sanity_block_offset, 4u))
+        return;
+    const u32 sanity = mem_read32(cpu, actor + (u32)(s32)g_sanity_block_offset) + (u32)(s32)g_sanity_offset;
+    if (!guest_ram_range_valid(cpu, sanity, 2u))
+        return;
+    const s16 was = (s16)mem_read16(cpu, sanity);
+    if (was == 0)
+        return;
+    mem_write16(cpu, sanity, 0u);
+    if (g_sanity_emptied++ % 100u == 0u)
+        fprintf(stderr, "[debug] zero sanity: sanity %d -> 0 (%u so far)\n", was, g_sanity_emptied);
+}
+
+// The setter (PAL, USA) and the game's search for a character, beside the
+// health setter (find_health_setter): stwu ... lwz r3, 4(r3) (the first) ...
+// lwz r0, 52(r3); cmplw r0, r31 ... lwz r3, 4(r3) (the next).
+static void find_sanity(CPUState* cpu) {
+    const bool pal = strcmp(ED_GAME_ID, "GEDP01") == 0;
+    const u32 fn = pal ? 0x800354F8u : 0x800389E0u;
+    const u32 search = pal ? 0x801F6344u : 0x80201BD0u;
+    const u32 actor_bl = mem_read32(cpu, fn + 0x30u);
+    const u32 actor = fn + 0x30u + (u32)(((s32)(actor_bl << 6)) >> 6 & ~3);
+    const u32 block = mem_read32(cpu, fn + 0x1FCu), store = mem_read32(cpu, fn + 0x200u);
+    const u32 list_bl = mem_read32(cpu, search + 0x14u);
+    const u32 list = search + 0x14u + (u32)(((s32)(list_bl << 6)) >> 6 & ~3);
+    const u32 head = mem_read32(cpu, list + 0x0Cu);
+    if (!g_health_found || mem_read32(cpu, fn) != 0x9421FFD0u || (actor_bl & 0xFC000003u) != 0x48000001u ||
+        (mem_read32(cpu, actor) >> 16) != 0x8063u || mem_read32(cpu, actor + 4u) != 0x4E800020u ||
+        (block >> 16) != 0x807Fu || (store >> 16) != 0xB383u || (list_bl & 0xFC000003u) != 0x48000001u ||
+        mem_read32(cpu, search + 0x18u) != 0x80630004u || mem_read32(cpu, search + 0x20u) != 0x80030034u ||
+        mem_read32(cpu, search + 0x24u) != 0x7C00F840u || mem_read32(cpu, search + 0x30u) != 0x80630004u ||
+        (head >> 16) != 0x806Du || mem_read32(cpu, list + 0x10u) != 0x4E800020u) {
+        fprintf(stderr, "[debug] the game's sanity not found: no Zero sanity\n");
+        return;
+    }
+    g_sanity_actor_offset = (s16)(mem_read32(cpu, actor) & 0xFFFFu);
+    g_sanity_block_offset = (s16)(block & 0xFFFFu);
+    g_sanity_offset = (s16)(store & 0xFFFFu);
+    g_character_list_offset = (s16)(head & 0xFFFFu);
+    g_sanity_found = true;
+}
+
+void hle_set_zero_sanity(bool on) {
+    if (on != g_zero_sanity)
+        fprintf(stderr, "[debug] zero sanity %s\n", on ? "on" : "off");
+    g_zero_sanity = on && g_sanity_found;
+}
+
+bool hle_zero_sanity(void) { return g_zero_sanity; }
+bool hle_zero_sanity_available(void) { return g_sanity_found; }
+
+// The debug menu's Spawn enemy: one more of a creature already in the area,
+// beside the player, made as the area loader makes them (0x80041868): a
+// spawn record (init 0x80040E94: position, facing, type at +16, its model in
+// the area's model list at +20, flags at +40), create (0x8003121C), then the
+// room, register and add. The type, model and flags are copied from a
+// creature of that type here, so its model is one the area has loaded (the
+// game's own spawn helper, 0x8006D9B4, takes a model too and deletes the
+// creature when it has none). The menu asks; the game's thread spawns at its
+// next pad read. ED_SPAWN_TEST=type,after: the same, `after` pad reads in.
+#define SPAWN_INIT 0x80040E94u
+#define SPAWN_CREATE 0x8003121Cu
+#define SPAWN_SET_ROOM 0x801F64C8u
+#define SPAWN_REGISTER 0x801F5D18u
+#define SPAWN_ADD 0x801DCB58u
+#define SPAWN_DISTANCE 150.0f  // about 1.5 m
+static volatile int g_spawn_request = -1;
+static bool g_spawn_found;
+static s16 g_spawn_room_offset;  // the player's room, at r13 + this
+
+// The first living creature (class 2) of a type in the area, or 0.
+static u32 creature_of_type(CPUState* cpu, int type) {
+    if (!sda_ready(cpu))
+        return 0u;
+    u32 node = mem_read32(cpu, cpu->gpr[13] + (u32)(s32)g_character_list_offset);
+    for (int i = 0; i < 1024 && guest_ram_range_valid(cpu, node, 8u); i++) {
+        node = mem_read32(cpu, node + 4u);
+        if (!guest_ram_range_valid(cpu, node, 56u))
+            return 0u;
+        const u32 actor = mem_read32(cpu, node + (u32)(s32)g_sanity_actor_offset);
+        const u32 stats = mem_read32(cpu, node + (u32)(s32)g_health_stats_offset);
+        if (guest_ram_range_valid(cpu, actor, 160u) && guest_ram_range_valid(cpu, stats, 64u) &&
+            mem_read8(cpu, actor + 158u) == 2u && (s16)mem_read16(cpu, stats + (u32)(s32)g_health_offset) > 0 &&
+            (type < 0 || mem_read16(cpu, actor + 152u) == (u32)type))
+            return node;
+    }
+    return 0u;
+}
+
+// Beside the player: ahead (the turn at player +44, as camera.c reads it),
+// else the first of seven other directions whose way from the player is
+// clear in the game's collision, else where the player stands.
+static void spawn_place(CPUState* cpu, u32 player, float out[3]) {
+    float at[3];
+    for (int i = 0; i < 3; i++)
+        out[i] = at[i] = guest_read_f32(cpu, player + (u32)i * 4u);
+    const float qz = guest_read_f32(cpu, player + 52u), qw = guest_read_f32(cpu, player + 56u);
+    const float facing = isfinite(qz) && isfinite(qw) ? 2.0f * atan2f(qz, qw) - 1.5707963f : 0.0f;
+    static const float kTurns[8] = {0.0f, 0.785f, -0.785f, 1.571f, -1.571f, 2.356f, -2.356f, 3.142f};
+    for (int i = 0; i < 8; i++) {
+        const float a = facing + kTurns[i];
+        const float from[3] = {at[0], at[1], at[2] + 60.0f};
+        const float to[3] = {at[0] + cosf(a) * SPAWN_DISTANCE, at[1] + sinf(a) * SPAWN_DISTANCE, at[2] + 60.0f};
+        float hit[3];
+        if (!camera_collide(cpu, from, to, 30.0f, hit)) {
+            out[0] = to[0];
+            out[1] = to[1];
+            return;
+        }
+    }
+}
+
+static void spawn_requested(CPUState* cpu) {
+    static int test_type = -2, test_after;
+    if (test_type == -2) {
+        test_type = -1;
+        const char* t = getenv("ED_SPAWN_TEST");
+        if (t != NULL && sscanf(t, "%d,%d", &test_type, &test_after) < 2)
+            test_type = -1;
+    }
+    if (test_type >= 0 && test_after-- <= 0) {
+        g_spawn_request = test_type;
+        test_type = -1;
+    }
+    const int type = g_spawn_request;
+    if (type < 0 || !g_spawn_found)
+        return;
+    g_spawn_request = -1;
+    const u32 like = creature_of_type(cpu, type);
+    const u32 player = mem_read32(cpu, cpu->gpr[13] + (u32)(s32)g_camera_player_offset);
+    if (like == 0u || !guest_ram_range_valid(cpu, player, 64u)) {
+        fprintf(stderr, "[debug] spawn: no type %d here to copy\n", type);
+        return;
+    }
+    // The record below the stack, above the frames the calls make.
+    const u32 rec = (cpu->gpr[1] - 0x200u) & ~15u;
+    u32 made = 0, ignore = 0;
+    float at[3];
+    spawn_place(cpu, player, at);
+    if (!hle_guest_call(cpu, SPAWN_INIT, &rec, 1, 0.0, &ignore))
+        return;
+    for (u32 i = 0; i < 3u; i++)
+        guest_write_f32(cpu, rec + i * 4u, at[i]);
+    mem_write32(cpu, rec + 16u, (u32)type);
+    mem_write32(cpu, rec + 20u,
+                (u32)(s32)(s16)mem_read16(cpu, mem_read32(cpu, like + (u32)(s32)g_sanity_actor_offset) + 154u));
+    mem_write32(cpu, rec + 40u, mem_read32(cpu, like + 8u));
+    if (!hle_guest_call(cpu, SPAWN_CREATE, &rec, 1, 0.0, &made) || made == 0u) {
+        fprintf(stderr, "[debug] spawn: the game made no type %d\n", type);
+        return;
+    }
+    const u32 room_args[] = {made, mem_read32(cpu, cpu->gpr[13] + (u32)(s32)g_spawn_room_offset)};
+    const u32 add_args[] = {1u, made};
+    hle_guest_call(cpu, SPAWN_SET_ROOM, room_args, 2, 0.0, &ignore);
+    hle_guest_call(cpu, SPAWN_REGISTER, &made, 1, 0.0, &ignore);
+    hle_guest_call(cpu, SPAWN_ADD, add_args, 2, 0.0, &ignore);
+    fprintf(stderr, "[debug] spawned type %d (model %d, like 0x%08X) at %.0f %.0f %.0f: 0x%08X\n", type,
+            (s32)mem_read32(cpu, rec + 20u), like, at[0], at[1], at[2], made);
+}
+
+// The calls, as the area loader makes them (PAL; the USA's are not known):
+// the record's init stores -1 at +16 and the room from r13 at +44 (li r3,
+// -1; li r4, 0; stw r3, 16(r31) ... lwz r3, room(r13); stw r3, 44(r31)).
+static void find_spawn(CPUState* cpu) {
+    const u32 room = mem_read32(cpu, SPAWN_INIT + 0x44u);
+    if (strcmp(ED_GAME_ID, "GEDP01") != 0 || !g_sanity_found || mem_read32(cpu, SPAWN_INIT) != 0x9421FFF0u ||
+        mem_read32(cpu, SPAWN_INIT + 0x28u) != 0x907F0010u || (room >> 16) != 0x806Du ||
+        mem_read32(cpu, SPAWN_INIT + 0x48u) != 0x907F002Cu || mem_read32(cpu, SPAWN_CREATE) != 0x9421FFE0u ||
+        mem_read32(cpu, SPAWN_SET_ROOM) != 0x9421FFF0u || mem_read32(cpu, SPAWN_REGISTER) != 0x9421FFF0u ||
+        mem_read32(cpu, 0x80041868u) != 0x4BFEF9B5u || mem_read32(cpu, 0x800418CCu) != 0x481B444Du) {
+        fprintf(stderr, "[debug] the game's spawn not found: no Spawn enemy\n");
+        return;
+    }
+    g_spawn_room_offset = (s16)(room & 0xFFFFu);
+    g_spawn_found = true;
+}
+
+bool hle_spawn_available(void) { return g_spawn_found; }
+void hle_spawn(int type) { g_spawn_request = type; }
+
+// The creature types alive in the area now (not the player), with how many
+// of each: for the menu, while the game is paused.
+int hle_area_creatures(int* types, int* counts, int max) {
+    CPUState* cpu = &dolrecomp_cpu;
+    int n = 0;
+    if (!g_spawn_found || !sda_ready(cpu))
+        return 0;
+    u32 node = mem_read32(cpu, cpu->gpr[13] + (u32)(s32)g_character_list_offset);
+    for (int i = 0; i < 1024 && guest_ram_range_valid(cpu, node, 8u); i++) {
+        node = mem_read32(cpu, node + 4u);
+        if (!guest_ram_range_valid(cpu, node, 56u))
+            break;
+        const u32 actor = mem_read32(cpu, node + (u32)(s32)g_sanity_actor_offset);
+        const u32 stats = mem_read32(cpu, node + (u32)(s32)g_health_stats_offset);
+        if (!guest_ram_range_valid(cpu, actor, 160u) || !guest_ram_range_valid(cpu, stats, 64u) ||
+            mem_read8(cpu, actor + 158u) != 2u || (s16)mem_read16(cpu, stats + (u32)(s32)g_health_offset) <= 0)
+            continue;
+        const int type = (int)mem_read16(cpu, actor + 152u);
+        int k = 0;
+        while (k < n && types[k] != type)
+            k++;
+        if (k == n) {
+            if (n == max)
+                continue;
+            types[n] = type;
+            counts[n++] = 0;
+        }
+        counts[k]++;
+    }
+    return n;
+}
 #endif
 
 // PAL: 60 Hz from the start, without the game's 50/60 Hz question. Booting in
@@ -6058,6 +6388,9 @@ void hle_install(CPUState* cpu) {
     find_game_menu(cpu);
     find_letterbox(cpu);
     find_camera(cpu);
+    find_health_setter(cpu);
+    find_sanity(cpu);
+    find_spawn(cpu);
 #endif
     find_refresh_prompt(cpu);
     publish_codegen_options();

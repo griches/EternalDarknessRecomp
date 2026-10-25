@@ -54,6 +54,16 @@ void quickstate_request_save(const char* path);
 void quickstate_request_load(const char* path);
 const char* quickstate_boot_path(void);
 void hle_set_skip_intro(bool on);
+void hle_set_invincible(bool on);
+bool hle_invincible(void);
+bool hle_invincible_available(void);
+void hle_set_zero_sanity(bool on);
+bool hle_zero_sanity(void);
+bool hle_zero_sanity_available(void);
+bool hle_spawn_available(void);
+void hle_spawn(int type);
+int hle_area_creatures(int* types, int* counts, int max);
+bool controls_take_debug_request(void);
 }
 
 namespace {
@@ -258,7 +268,7 @@ std::string region_name(const std::string& id) {
 
 // --- Menu model -------------------------------------------------------------
 
-enum class Screen { Launcher, Play, Options, Controls, Mapping, InGame, Problem };
+enum class Screen { Launcher, Play, Options, Controls, Mapping, InGame, Problem, Debug };
 
 struct Row {
     std::string label;
@@ -970,6 +980,70 @@ void build_in_game() {
     g_rows.push_back(quit);
 }
 
+// The debug menu (LT, RT, L3 and R3 together in play): cheats for trying
+// things out. Its settings last until the game is closed.
+void build_debug() {
+    Row invincible{"Invincible", on_off(hle_invincible())};
+    invincible.enabled = hle_invincible_available();
+    invincible.note = invincible.enabled
+                          ? "Health never goes down: hits, and the drain at zero sanity, take none. Healing still works."
+                          : "Not found in this version of the game.";
+    invincible.change = [](int) { hle_set_invincible(!hle_invincible()); };
+    g_rows.push_back(invincible);
+
+    Row zero_sanity{"Zero sanity", on_off(hle_zero_sanity())};
+    zero_sanity.enabled = hle_zero_sanity_available();
+    zero_sanity.note = zero_sanity.enabled
+                           ? "Sanity empties and stays empty while on. Off, it fills again the game's own way."
+                           : "Not found in this version of the game.";
+    zero_sanity.change = [](int) { hle_set_zero_sanity(!hle_zero_sanity()); };
+    g_rows.push_back(zero_sanity);
+
+    // The creature types alive here (the game's own numbers: it names none),
+    // the choice kept while its type is still here.
+    static int chosen = -1;
+    static std::vector<int> types, counts;
+    types.assign(32, 0);
+    counts.assign(32, 0);
+    const int n = hle_area_creatures(types.data(), counts.data(), 32);
+    types.resize(n);
+    counts.resize(n);
+    // The commonest first: the area's usual enemy.
+    for (int i = 1; i < n; i++)
+        for (int j = i; j > 0 && (counts[j] > counts[j - 1] ||
+                                  (counts[j] == counts[j - 1] && types[j] < types[j - 1]));
+             j--) {
+            std::swap(types[j], types[j - 1]);
+            std::swap(counts[j], counts[j - 1]);
+        }
+    int at = 0;
+    for (int i = 0; i < n; i++)
+        if (types[i] == chosen)
+            at = i;
+    chosen = n > 0 ? types[at] : -1;
+    Row spawn{"Spawn enemy", n > 0 ? "\u2039 Type " + std::to_string(types[at]) + " \u00b7 " +
+                                         std::to_string(counts[at]) + " here \u203a"
+                                   : "None here"};
+    spawn.enabled = hle_spawn_available() && n > 0;
+    spawn.note = !hle_spawn_available() ? "Not found in this version of the game."
+                 : n == 0 ? "No enemies in this area: it makes another of one that is here."
+                          : "Another of the enemies in this area, beside you when the game resumes. Left/Right picks which.";
+    spawn.change = [at, n](int dir) {
+        if (n > 0)
+            chosen = types[(at + dir + n) % n];
+    };
+    spawn.activate = [] {
+        hle_spawn(chosen);
+        g_close = true;
+    };
+    g_rows.push_back(spawn);
+
+    Row resume{"Resume"};
+    resume.gap = true;
+    resume.activate = [] { g_close = true; };
+    g_rows.push_back(resume);
+}
+
 // The problem page (frontend_problem).
 std::string g_problem_heading;
 std::string g_problem_text;
@@ -1004,6 +1078,7 @@ void render() {
                           : g_screen == Screen::Controls ? "Controls"
                           : g_screen == Screen::Mapping  ? "Button Mapping"
                           : g_screen == Screen::Problem  ? g_problem_heading.c_str()
+                          : g_screen == Screen::Debug    ? "Debug"
                                                          : "Paused";
     g_doc->GetElementById("heading")->SetInnerRML(heading);
     std::string rml[2];
@@ -1042,7 +1117,8 @@ void render() {
     g_doc->GetElementById("note0")->SetInnerRML(note_page == 0 ? note : "");
     g_doc->GetElementById("note1")->SetInnerRML(note_page == 1 ? note : "");
     g_doc->GetElementById("hint")->SetInnerRML(
-        g_screen == Screen::InGame    ? "Up/Down choose &#183; Left/Right change &#183; A select &#183; B resume"
+        g_screen == Screen::InGame || g_screen == Screen::Debug
+            ? "Up/Down choose &#183; Left/Right change &#183; A select &#183; B resume"
         : g_screen == Screen::Problem ? "Up/Down choose &#183; A select"
                                       : "Up/Down choose &#183; Left/Right change &#183; A select &#183; B back");
     g_doc->SetClass("spread", spread);
@@ -1051,7 +1127,7 @@ void render() {
     // The mapping list is long: tighten the rows.
     g_doc->SetClass("compact", g_screen == Screen::Mapping);
     // Over the game the page lies on the dimmed, paused frame.
-    g_doc->SetClass("overlay", g_screen == Screen::InGame || g_screen == Screen::Problem ||
+    g_doc->SetClass("overlay", g_screen == Screen::InGame || g_screen == Screen::Problem || g_screen == Screen::Debug ||
                                    ((g_screen == Screen::Options ||
                                      g_screen == Screen::Controls ||
                                      g_screen == Screen::Mapping) &&
@@ -1068,6 +1144,7 @@ void build_rows() {
     case Screen::Mapping: build_mapping(); break;
     case Screen::InGame: build_in_game(); break;
     case Screen::Problem: build_problem(); break;
+    case Screen::Debug: build_debug(); break;
     }
     if (g_selected >= static_cast<int>(g_rows.size()))
         g_selected = 0;
@@ -1115,6 +1192,7 @@ void go_back() {
         g_selected = 0;
         break;
     case Screen::InGame:
+    case Screen::Debug:
         g_close = true;
         break;
     case Screen::Launcher:
@@ -1286,7 +1364,7 @@ bool run_menu() {
         if (pressed[kAccept]) {
             activate_selected();
             dirty = true;
-        } else if (pressed[kBack] || (pressed[kMenu] && g_screen == Screen::InGame)) {
+        } else if (pressed[kBack] || (pressed[kMenu] && (g_screen == Screen::InGame || g_screen == Screen::Debug))) {
             go_back();
             dirty = true;
         }
@@ -2271,6 +2349,28 @@ extern "C" void frontend_frame(void) {
     photo::frame(photo_start && photo::g_state == photo::State::Off);
     if (photo::g_state != photo::State::Off) {
         menu_was_held = true;
+        std::fill(std::begin(g_key_pressed), std::end(g_key_pressed), false);
+        return;
+    }
+    // LT, RT, L3 and R3 together: the debug menu. ED_DEBUG_MENU_TEST=hold_ms
+    // [,invincible][,zero_sanity]: when it opens (ED_PAD_SCRIPT can hold the
+    // four), the settings named go on and it closes hold_ms later.
+    if (controls_take_debug_request() && ensure_ui()) {
+        g_in_game = true;
+        g_screen = Screen::Debug;
+        g_selected = 0;
+        if (const char* t = std::getenv("ED_DEBUG_MENU_TEST"); t != nullptr) {
+            if (std::strstr(t, ",invincible") != nullptr)
+                hle_set_invincible(true);
+            if (std::strstr(t, ",zero_sanity") != nullptr)
+                hle_set_zero_sanity(true);
+            g_test_close_at = SDL_GetTicks() + static_cast<Uint64>(std::atoi(t));
+        }
+        report_pause(true);
+        if (!run_menu())
+            dol_aurora_request_quit();
+        report_pause(false);
+        menu_was_held = false;
         std::fill(std::begin(g_key_pressed), std::end(g_key_pressed), false);
         return;
     }

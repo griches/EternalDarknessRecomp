@@ -476,6 +476,32 @@ int live_value(SDL_Gamepad* pad, int n) {
     return 0;
 }
 
+// The debug menu (frontend.cpp): LT, RT, L3 and R3 held together. The game
+// does not see the four from then until they are let go, and the toggles
+// (sprint and creep on the stick clicks in Modern) are as they were before
+// the first of them went down.
+constexpr int kDebugCombo[4] = {kLT, kRT, kL3, kR3};
+std::atomic<bool> g_debug_request{false};
+bool g_debug_combo_was = false;
+bool g_toggled_before_combo[kActionCount];
+
+void check_debug_combo(SDL_Gamepad* pad) {
+    int down = 0;
+    for (int n : kDebugCombo)
+        down += native_value(pad, n) >= 128;
+    if (down == 0)
+        std::copy(std::begin(g_toggled), std::end(g_toggled), std::begin(g_toggled_before_combo));
+    const bool all = down == 4;
+    if (all && !g_debug_combo_was) {
+        std::copy(std::begin(g_toggled_before_combo), std::end(g_toggled_before_combo), std::begin(g_toggled));
+        for (int n : kDebugCombo)
+            g_held_over[n] = true;
+        g_debug_request.store(true, std::memory_order_relaxed);
+        std::fprintf(stderr, "[controls] debug menu combo at frame %llu\n", g_frame.load());
+    }
+    g_debug_combo_was = all;
+}
+
 // Input recording and replay (controls_record_start, ED_PAD_REPLAY): one
 // line a pad read, "frame button stick_x stick_y substick_x substick_y
 // trigger_l trigger_r analog_a analog_b cam_x cam_y aiming play", after a
@@ -625,6 +651,7 @@ bool read_pad(DolPadState* state) {
     if (key_down(SDL_SCANCODE_D)) x = 127;
     if (key_down(SDL_SCANCODE_W)) y = 127;
     if (key_down(SDL_SCANCODE_S)) y = -127;
+    check_debug_combo(pad);
     const Uint64 now = SDL_GetTicks();
     if (x != 0 || y != 0)
         g_still_since = 0;
@@ -1042,6 +1069,10 @@ extern "C" void controls_set_cutscene(bool playing) {
 
 extern "C" bool controls_fast_forward(void) {
     return controls::g_fast_forward.load(std::memory_order_relaxed);
+}
+
+extern "C" bool controls_take_debug_request(void) {
+    return controls::g_debug_request.exchange(false, std::memory_order_relaxed);
 }
 
 extern "C" void controls_set_game_menu(bool open) {

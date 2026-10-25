@@ -91,6 +91,9 @@ extern "C" {
 void controls_init(void);
 // Whether the game's pause menu is open (hle.c, each pad read).
 void controls_set_game_menu(bool open);
+// Once, after LT, RT, L3 and R3 were held together in play: the debug menu
+// (frontend.cpp).
+bool controls_take_debug_request(void);
 // Whether a cutscene is playing (hle.c, each pad read), and whether the player
 // is fast-forwarding it (RB or Tab held there): the game then runs at up to
 // four times speed.

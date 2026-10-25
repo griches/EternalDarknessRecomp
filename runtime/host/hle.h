@@ -15,6 +15,21 @@ void hle_install(CPUState* cpu);
 // Skip the intro movies (or not) from the next boot state on: the launcher's
 // New game without restarting the process.
 void hle_set_skip_intro(bool on);
+// The debug menu's Invincible (Aurora builds): the player's health never goes
+// down. Available once the game's health setter is found at boot.
+void hle_set_invincible(bool on);
+bool hle_invincible(void);
+bool hle_invincible_available(void);
+// Zero sanity: the player's sanity held at 0 while on.
+void hle_set_zero_sanity(bool on);
+bool hle_zero_sanity(void);
+bool hle_zero_sanity_available(void);
+// Spawn enemy: another of a creature type alive in the area (the player's
+// thread makes it at its next pad read), and the types there with how many
+// of each (types/counts up to max; returns how many types).
+bool hle_spawn_available(void);
+void hle_spawn(int type);
+int hle_area_creatures(int* types, int* counts, int max);
 // Once a game frame, at VIFlush (Aurora builds): FPS in the title and the
 // in-game menu. Needs the window, so with the GX thread the backend calls it on
 // the main thread instead (dol_aurora_set_frame_hook).

@@ -1539,8 +1539,11 @@ extern "C" void insanity_frame(void) {
         g_armed = -1;
         if (e.kind == Kind::Modal) {
             run_modal(e);
-            if (e.covers_after)
+            if (e.covers_after) {
+                // This frame too: it is the game's next, drawn as the effect ends.
                 cover_from = SDL_GetTicksNS();
+                canvas()->AddRectFilled(ImVec2{0, 0}, screen(), IM_COL32(0, 0, 0, 0xff));
+            }
         } else {
             std::fprintf(stderr, "[insanity] %s\n", e.name);
         }

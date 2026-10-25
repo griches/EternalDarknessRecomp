@@ -205,6 +205,67 @@ static void mix_host_sound(s16* output, u32 frames, u32 aid_rate) {
     }
 }
 
+// The last of what went out (the game's mix with ours, before muting), for
+// audio_play_stuck: a ring of stereo frames, g_recent_at the next to write.
+#define RECENT_FRAMES 4096u
+static s16 g_recent[RECENT_FRAMES * 2u];
+static u32 g_recent_at;
+
+// ED_PCM_OUT=path: append every chunk as raw s16 stereo at the AID rate,
+// to inspect the mix offline.
+static FILE* g_pcm_out;
+static int g_pcm_checked;
+// ED_PCM_WALL=1 too: silence written for the time nothing came (the game
+// held by a menu), so the file runs with the clock (to put under a
+// screen recording; the time it starts is logged).
+static int g_pcm_wall;
+static double g_pcm_last_s;
+
+// `frames` of stereo at `rate` on their way out: to ED_PCM_OUT's file, then
+// the speakers (silence when muted, nothing while fast-forwarding).
+static void send_out(s16* output, u32 frames, u32 rate) {
+    if (!g_pcm_checked) {
+        g_pcm_checked = 1;
+        const char* path = getenv("ED_PCM_OUT");
+        if (path != NULL && path[0] != '\0')
+            g_pcm_out = fopen(path, "wb");
+        g_pcm_wall = g_pcm_out != NULL && getenv("ED_PCM_WALL") != NULL;
+        if (g_pcm_wall) {
+            struct timespec now;
+            timespec_get(&now, TIME_UTC);
+            fprintf(stderr, "[audio] pcm out starts at %.3f, %u Hz\n", now.tv_sec + now.tv_nsec / 1e9, rate);
+        }
+    }
+    if (g_pcm_out != NULL && g_pcm_wall) {
+        struct timespec ts;
+        timespec_get(&ts, TIME_UTC);
+        const double now = ts.tv_sec + ts.tv_nsec / 1e9;
+        if (g_pcm_last_s != 0.0 && now - g_pcm_last_s > 0.1 && rate != 0u) {
+            static const s16 silence[16 * 2] = {0};
+            u64 gap = (u64)((now - g_pcm_last_s) * rate);
+            for (; gap >= 16u; gap -= 16u)
+                fwrite(silence, sizeof silence, 1, g_pcm_out);
+        }
+        // Past what this stretch covers, so a long one is not followed by
+        // silence for its own length.
+        const double after = now + (rate != 0u ? (double)frames / rate : 0.0);
+        g_pcm_last_s = after > g_pcm_last_s ? after : g_pcm_last_s;
+    }
+    if (g_pcm_out != NULL) {
+        fwrite(output, sizeof(s16) * 2u, frames, g_pcm_out);
+        if ((g_aid_chunks & 1023u) == 0u)
+            fflush(g_pcm_out);
+    }
+    static int mute = -1;  // ED_MUTE=1: keep pacing, send silence (test runs)
+    if (mute < 0)
+        mute = getenv("ED_MUTE") != NULL;
+    if (mute || g_muted)
+        memset(output, 0, sizeof(s16) * 2u * frames);
+    if (g_fast_forward)
+        return;
+    dol_platform_audio_push(output, frames);
+}
+
 void audio_poll(CPUState* cpu) {
     u32 physical = 0;
     if (!dol_audio_dma_poll(&g_audio_dma, &physical))
@@ -257,59 +318,51 @@ void audio_poll(CPUState* cpu) {
             g_ai_stream_control |= AICR_AIINT;
     }
     mix_host_sound(output, 8u, dol_audio_dma_sample_rate(&g_audio_dma));
+    for (u32 i = 0; i < 8u; i++, g_recent_at = (g_recent_at + 1u) % RECENT_FRAMES) {
+        g_recent[g_recent_at * 2u] = output[i * 2u];
+        g_recent[g_recent_at * 2u + 1u] = output[i * 2u + 1u];
+    }
     g_aid_chunks++;
     if (g_log && (g_aid_chunks <= 10u || g_aid_chunks % 400u == 0u))
         fprintf(stderr, "[audio] AID chunk %llu: source=%08x peak=%u\n",
                 (unsigned long long)g_aid_chunks, physical, peak);
-    // ED_PCM_OUT=path: append every chunk as raw s16 stereo at the AID rate,
-    // to inspect the mix offline.
-    static FILE* pcm_out;
-    static int pcm_checked;
-    // ED_PCM_WALL=1 too: silence written for the time nothing came (the game
-    // held by a menu), so the file runs with the clock (to put under a
-    // screen recording; the time it starts is logged).
-    static int pcm_wall;
-    static double pcm_last_s;
-    static u32 pcm_rate;
-    if (!pcm_checked) {
-        pcm_checked = 1;
-        const char* path = getenv("ED_PCM_OUT");
-        if (path != NULL && path[0] != '\0')
-            pcm_out = fopen(path, "wb");
-        pcm_wall = pcm_out != NULL && getenv("ED_PCM_WALL") != NULL;
-        if (pcm_wall) {
-            struct timespec now;
-            timespec_get(&now, TIME_UTC);
-            fprintf(stderr, "[audio] pcm out starts at %.3f, %u Hz\n", now.tv_sec + now.tv_nsec / 1e9,
-                    dol_audio_dma_sample_rate(&g_audio_dma));
-        }
-    }
-    if (pcm_out != NULL && pcm_wall) {
-        struct timespec ts;
-        timespec_get(&ts, TIME_UTC);
-        const double now = ts.tv_sec + ts.tv_nsec / 1e9;
-        pcm_rate = dol_audio_dma_sample_rate(&g_audio_dma);
-        if (pcm_last_s != 0.0 && now - pcm_last_s > 0.1 && pcm_rate != 0u) {
-            static const s16 silence[16 * 2] = {0};
-            u64 frames = (u64)((now - pcm_last_s) * pcm_rate);
-            for (; frames >= 16u; frames -= 16u)
-                fwrite(silence, sizeof silence, 1, pcm_out);
-        }
-        pcm_last_s = now;
-    }
-    if (pcm_out != NULL) {
-        fwrite(output, sizeof output, 1, pcm_out);
-        if ((g_aid_chunks & 1023u) == 0u)
-            fflush(pcm_out);
-    }
-    static int mute = -1;  // ED_MUTE=1: keep pacing, send silence (test runs)
-    if (mute < 0)
-        mute = getenv("ED_MUTE") != NULL;
-    if (mute || g_muted)
-        memset(output, 0, sizeof output);
-    if (g_fast_forward)
+    send_out(output, 8u, dol_audio_dma_sample_rate(&g_audio_dma));
+}
+
+// The game's sound stuck (insanity.cpp, a graphics card failing): the last
+// `loop_seconds` that went out, over and over for `seconds`, as a machine
+// that has hung buzzes. Sent at once; on the game thread, while it is held.
+void audio_play_stuck(double loop_seconds, double seconds) {
+    const u32 rate = dol_audio_dma_sample_rate(&g_audio_dma);
+    if (rate == 0u || seconds <= 0.0)
         return;
-    dol_platform_audio_push(output, 8u);
+    u32 loop = (u32)(loop_seconds * rate);
+    loop = loop < 64u ? 64u : loop > RECENT_FRAMES ? RECENT_FRAMES : loop;
+    // In a quiet place the loop is near silence: a buzz of its own under it.
+    u32 peak = 0;
+    for (u32 f = 0; f < loop; f++)
+        for (u32 c = 0; c < 2u; c++) {
+            const s16 v = g_recent[((g_recent_at + RECENT_FRAMES - loop + f) % RECENT_FRAMES) * 2u + c];
+            const u32 m = v == INT16_MIN ? 32768u : (u32)abs(v);
+            peak = m > peak ? m : peak;
+        }
+    const u32 total = (u32)(seconds * rate);
+    s16 chunk[256u * 2u];
+    for (u32 done = 0; done < total;) {
+        const u32 n = total - done < 256u ? total - done : 256u;
+        for (u32 i = 0; i < n; i++) {
+            const u32 at = (done + i) % loop;
+            const u32 frame = (g_recent_at + RECENT_FRAMES - loop + at) % RECENT_FRAMES;
+            for (u32 c = 0; c < 2u; c++) {
+                s32 v = g_recent[frame * 2u + c];
+                if (peak < 2000u)
+                    v += (s32)(at * 2u < loop ? 2600 : -2600) * (s32)(2000u - peak) / 2000;
+                chunk[i * 2u + c] = (s16)(v > 32767 ? 32767 : v < -32768 ? -32768 : v);
+            }
+        }
+        send_out(chunk, n, rate);
+        done += n;
+    }
 }
 
 bool audio_ai_interrupt_pending(void) {

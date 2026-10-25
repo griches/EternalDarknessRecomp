@@ -29,11 +29,18 @@
 #include <sys/stat.h>
 #include <utility>
 #include <vector>
+#ifdef _WIN32
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
 extern "C" void hle_insanity_recovered(void);
 extern "C" int hle_game_mode(void);
 // audio.c: a sound of ours mixed into the game's as it goes out.
 extern "C" void audio_play_host_sound(const int16_t* samples, uint32_t count, uint32_t rate, float volume);
+// audio.c: the last of the game's sound, stuck and repeating (a hung machine).
+extern "C" void audio_play_stuck(double loop_seconds, double seconds);
 
 namespace insanity {
 namespace {
@@ -427,21 +434,82 @@ void glyph_display(ImDrawList* d, ImVec2 c, float size) {
                size * 0.08f);
 }
 
-// The picture drops out, comes back, drops out again as the driver resets;
-// then Windows says so.
-bool win_driver_reset(const Step& s) {
-    static const double kBlack[][2] = {{0.0, 0.3}, {0.42, 1.7}, {1.82, 2.6}};
-    for (const auto& span : kBlack)
-        if (s.t >= span[0] && s.t < span[1])
-            canvas()->AddRectFilled(ImVec2{0, 0}, screen(), IM_COL32(0, 0, 0, 0xff));
-    return s.t < 2.6;
+// Windows' warning sign: a yellow triangle with a black "!".
+void glyph_warning(ImDrawList* d, ImVec2 c, float size) {
+    const float h = size * 0.86f, w = size * 0.5f;
+    const ImVec2 top{c.x, c.y - h * 0.5f}, left{c.x - w, c.y + h * 0.5f}, right{c.x + w, c.y + h * 0.5f};
+    d->AddTriangleFilled(top, right, left, IM_COL32(0xfc, 0xe1, 0x00, 0xff));
+    const ImU32 ink = IM_COL32(0x1a, 0x1a, 0x1a, 0xff);
+    d->AddLine(ImVec2{c.x, c.y - h * 0.14f}, ImVec2{c.x, c.y + h * 0.2f}, ink, size * 0.1f);
+    d->AddCircleFilled(ImVec2{c.x, c.y + h * 0.34f}, size * 0.06f, ink);
 }
 
+// The kernel driver Windows names when it resets one: the card's own maker's
+// (from the display adapter's name), else NVIDIA's.
+const char* display_driver() {
+#ifdef _WIN32
+    DISPLAY_DEVICEA device{};
+    device.cb = sizeof device;
+    for (DWORD i = 0; EnumDisplayDevicesA(nullptr, i, &device, 0); i++) {
+        if ((device.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE) == 0)
+            continue;
+        const std::string name = device.DeviceString;
+        if (name.find("AMD") != std::string::npos || name.find("Radeon") != std::string::npos)
+            return "amdkmdag";
+        if (name.find("Intel") != std::string::npos)
+            return "igfxn";
+        break;
+    }
+#endif
+    return "nvlddmkm";
+}
+
+// The driver gives out: the picture hangs with the sound stuck in a buzz,
+// then black for a few long seconds, the frozen picture flashing back torn
+// between, until the driver is back.
+bool win_driver_reset(const Step& s) {
+    if (s.first)
+        audio_play_stuck(0.04, 1.0);
+    static const double kBlack[][2] = {{1.0, 1.12}, {1.2, 4.4}, {4.48, 5.3}};
+    static const double kTorn[][2] = {{1.12, 1.2}, {4.4, 4.48}};
+    ImDrawList* d = canvas();
+    const ImVec2 sc = screen();
+    for (const auto& span : kBlack)
+        if (s.t >= span[0] && s.t < span[1])
+            d->AddRectFilled(ImVec2{0, 0}, sc, IM_COL32(0, 0, 0, 0xff));
+    for (int i = 0; i < 2; i++) {
+        if (s.t < kTorn[i][0] || s.t >= kTorn[i][1])
+            continue;
+        // Bands of the picture missing, as a half-sent frame.
+        static const float kBands[2][3][2] = {{{0.08f, 0.21f}, {0.47f, 0.52f}, {0.71f, 1.f}},
+                                              {{0.f, 0.33f}, {0.58f, 0.66f}, {0.86f, 0.9f}}};
+        for (const auto& band : kBands[i])
+            d->AddRectFilled(ImVec2{0, sc.y * band[0]}, ImVec2{sc.x, sc.y * band[1]}, IM_COL32(0, 0, 0, 0xff));
+    }
+    return s.t < 5.3;
+}
+
+// Then, over the game again: the screen coming back slowly, Windows' notice
+// in its own words (with the warning sign), and a flicker as it shows that
+// all is not well.
 bool win_driver_toast(const Step& s) {
-    constexpr double kShown = 7.0;
-    win_toast(s.t, kShown, "Windows", glyph_display, "Display driver stopped responding and has recovered",
-              "Display driver stopped responding and has successfully recovered.", nullptr, nullptr);
-    return s.t < kShown;
+    constexpr double kIn = 0.9, kShown = 9.0;
+    static std::string body;
+    if (s.first)
+        body = std::string("Display driver ") + display_driver() + " stopped responding and has successfully recovered.";
+    ImDrawList* d = canvas();
+    const ImVec2 sc = screen();
+    if (s.t < 0.7) {
+        const double dip = s.t > 0.18 && s.t < 0.26 ? 0.5 : 0.0;
+        const float black = static_cast<float>(std::min(1.0, 1.0 - s.t / 0.7 + dip));
+        d->AddRectFilled(ImVec2{0, 0}, sc, rgba(0, 0, 0, black));
+    }
+    if ((s.t >= 4.0 && s.t < 4.1) || (s.t >= 4.18 && s.t < 4.24))
+        d->AddRectFilled(ImVec2{0, 0}, sc, IM_COL32(0, 0, 0, 0xff));
+    if (s.t >= kIn)
+        win_toast(s.t - kIn, kShown, "Windows", glyph_warning, "Display driver stopped responding and has recovered",
+                  body.c_str(), nullptr, nullptr);
+    return s.t < kIn + kShown;
 }
 
 bool win_update_toast(const Step& s) {
@@ -478,6 +546,58 @@ bool win_pointer(const Step& s) {
     const bool clicking = t > kFor - 1.2f && t < kFor - 1.0f;
     win_arrow(canvas(), at, (clicking ? 1.1f : 1.25f) * dp(), alpha);
     return s.t < kFor;
+}
+
+// --- PC and Deck: the screen failing ----------------------------------------------
+
+// As you play, a few thin lines of pure colour appear down the screen, as a
+// failing panel's dead columns do: one, a while later another, then two side
+// by side, one only part of the way down; now and then one flickers; then
+// they go, one by one.
+bool screen_lines(const Step& s) {
+    struct Line {
+        float x;      // across, 0..1
+        int width;    // in pixels (of a 1080-line screen)
+        float from;   // down, 0..1, where it starts
+        ImU32 colour;
+        double at, until;
+        bool flickers;
+    };
+    static std::vector<Line> lines;
+    if (s.first) {
+        const float x = 0.12f + 0.76f * static_cast<float>(std::rand() % 1000) / 1000.f;
+        const float spread = static_cast<float>(std::rand() % 1000) / 1000.f;
+        lines = {
+            {x, 1, 0.f, IM_COL32(0xff, 0x2e, 0xd2, 0xff), 0.0, 12.6, false},
+            {std::fmod(x + 0.31f + 0.2f * spread, 1.f), 1, 0.f, IM_COL32(0x3c, 0xff, 0x5a, 0xff), 2.6, 13.4, true},
+            {std::fmod(x + 0.57f, 1.f), 1, 0.f, IM_COL32(0x40, 0xf0, 0xff, 0xff), 5.1, 11.8, false},
+            {std::fmod(x + 0.57f, 1.f), 1, 0.f, IM_COL32(0xff, 0xf2, 0x3c, 0xff), 5.1, 11.8, false},
+            {std::fmod(x + 0.13f + 0.1f * spread, 1.f), 2, 0.46f, IM_COL32(0xff, 0x2e, 0xd2, 0xff), 7.4, 13.9, false},
+        };
+    }
+    const ImVec2 sc = screen();
+    const float scale = ImGui::GetIO().DisplayFramebufferScale.x;
+    const float px = scale > 0.f ? 1.f / scale : 1.f;
+    const float unit = std::max(1.f, std::round(sc.y / px / 1080.f)) * px;
+    const unsigned frame = static_cast<unsigned>(s.t * 60.0);
+    ImDrawList* d = canvas();
+    for (size_t i = 0; i < lines.size(); i++) {
+        const Line& l = lines[i];
+        if (s.t < l.at || s.t >= l.until)
+            continue;
+        // Catching as it comes and as it goes: a few frames on and off.
+        const bool edge = s.t < l.at + 0.1 || s.t > l.until - 0.12;
+        if (edge && (frame / 2u + i) % 2u)
+            continue;
+        // Now and then gone for a moment.
+        if (l.flickers && (frame % 97u) < 3u)
+            continue;
+        float x = std::floor(l.x * sc.x / px) * px;
+        if (i == 3)
+            x += unit;  // beside the one before
+        d->AddRectFilled(ImVec2{x, sc.y * l.from}, ImVec2{x + l.width * unit, sc.y}, l.colour);
+    }
+    return s.t < 14.0;
 }
 
 // --- Steam Deck and Linux -------------------------------------------------------
@@ -1323,20 +1443,27 @@ const Effect kEffects[] = {
      Kind::Modal, mac_beach_ball},
     {"Mac: quit unexpectedly", "The game is gone and the Mac's crash box asks to reopen it.", kMac, Kind::Modal,
      mac_quit_unexpectedly, nullptr, nullptr, true},
-    {"PC: display driver crash", "The picture drops out twice, then Windows says its display driver recovered.",
+    {"PC: display driver crash",
+     "The picture hangs with the sound stuck, goes black for seconds, comes back slowly and flickers; Windows "
+     "warns its display driver stopped responding.",
      kWindows, Kind::Modal, win_driver_reset, win_driver_toast},
     {"PC: restart for updates", "Windows says it will restart in a minute to install updates.", kWindows,
      Kind::Overlay, win_update_toast},
     {"PC: someone else's pointer", "A mouse pointer wanders across the picture by itself, clicks, and is gone.",
      kWindows, Kind::Overlay, win_pointer},
+    {"PC: screen lines", "As you play, a few thin coloured lines appear down the screen, flicker, and go.",
+     kWindows, Kind::Overlay, screen_lines},
     {"Deck: not responding", "The game stops answering and Steam offers to force it to quit. Any button waits.",
      kDeck | kLinux, Kind::Modal, deck_not_responding},
+    {"Deck: screen lines", "As you play, a few thin coloured lines appear down the screen, flicker, and go.",
+     kDeck | kLinux, Kind::Overlay, screen_lines},
     {"Linux: kernel panic", "The game crashes and takes Linux down with it: the console scrolls to a kernel panic.",
      kDeck | kLinux, Kind::Modal, linux_kernel_panic, nullptr, nullptr, true},
     {"PS5: too hot", "The PS5 warns it is too hot, says it is turning off, and fades to black.", kPS5, Kind::Modal,
      ps5_too_hot, nullptr, nullptr, true},
     {"PS5: trophy", "A bronze trophy pops up: This Isn't Happening.", kPS5, Kind::Overlay, ps5_trophy},
-    {"PS5: system update 14.20", "The PS5 installs system software 14.20... to 99%, then fails.", kPS5, Kind::Modal,
+    {"PS5: system update 14.20", "The PS5 asks to update to 14.20, either button installs it to 100%, then the game.",
+     kPS5, Kind::Modal,
      ps5_update, nullptr, nullptr, true},
     {"DualSense: dread", "The controller's light bleeds red, a heartbeat in your hands, the triggers go stiff.",
      kEvery, Kind::Overlay, dualsense_dread, nullptr, dualsense_present},

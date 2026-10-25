@@ -27,6 +27,10 @@ void audio_set_muted(bool muted);
 // once: mono, `count` samples at `rate`, scaled by `volume`. The samples must
 // last until it has played.
 void audio_play_host_sound(const s16* samples, u32 count, u32 rate, float volume);
+// The game's sound stuck, as a hung machine's buzzes: the last `loop_seconds`
+// that went out, repeated for `seconds`, sent at once (on the game thread,
+// while it is held).
+void audio_play_stuck(double loop_seconds, double seconds);
 
 bool audio_mmio_contains(u32 address);
 u64  audio_mmio_read(u32 address, u8 size);

@@ -1112,23 +1112,58 @@ void build_debug() {
         int number;
         const char* name;
     };
-    static const GameEffect kGameEffects[] = {{20, "Empty inventory"}, {25, "TV video"},
-                                              {26, "Game reset (the quote)"}, {27, "Save erased"},
-                                              {28, "Blue screen"}, {34, "Shoots self"},
-                                              {36, "Spell goes wrong"}, {38, "Footstep trail"}};
+    // Every one the game names (its start functions, table 0x80243D8C); 0, 2,
+    // 3, 37 and 39-43 have none.
+    static const GameEffect kGameEffects[] = {{1, "Bleeding walls"},
+                                              {4, "TV shut off"},
+                                              {5, "Blood pool, ceiling drip"},
+                                              {6, "Target marker"},
+                                              {7, "Attack camera"},
+                                              {8, "Horror camera shake"},
+                                              {9, "Ammo pickup"},
+                                              {10, "Locked in room"},
+                                              {11, "Blood bath"},
+                                              {12, "Edward's ghost (cutscene)"},
+                                              {13, "Timeline visitation"},
+                                              {14, "Bug crawl"},
+                                              {15, "To be continued"},
+                                              {16, "Enemy one hit kill"},
+                                              {17, "Head of Shakespeare"},
+                                              {18, "Helpless battle"},
+                                              {19, "Illusions of grandeur"},
+                                              {20, "Empty inventory"},
+                                              {21, "Phantom creatures"},
+                                              {22, "Walk on ceiling"},
+                                              {23, "Zombie"},
+                                              {24, "TV mute"},
+                                              {25, "TV video"},
+                                              {26, "Game reset (the quote)"},
+                                              {27, "Save erased"},
+                                              {28, "Blue screen"},
+                                              {29, "Controller not found"},
+                                              {30, "Alex's phone call"},
+                                              {31, "TV volume"},
+                                              {32, "Shrink player"},
+                                              {33, "Expand player"},
+                                              {34, "Shoots self"},
+                                              {35, "Sinking feeling"},
+                                              {36, "Spell goes wrong"},
+                                              {38, "Footstep trail"}};
     constexpr int kGameCount = sizeof kGameEffects / sizeof kGameEffects[0];
     static int effect = 0;
     const int effects = kGameCount + insanity::count();
     effect = std::clamp(effect, 0, effects - 1);
     const bool game_effect = effect < kGameCount;
     Row insane{"Insanity effect", std::string("\u2039 ") +
-                                      (game_effect ? std::string("Game: ") + kGameEffects[effect].name
+                                      (game_effect ? std::string("Game ") + std::to_string(kGameEffects[effect].number) +
+                                                         ": " + kGameEffects[effect].name
                                                    : std::string("Recomp: ") + insanity::name(effect - kGameCount)) +
                                       " \u203a"};
     insane.enabled = !game_effect || hle_insanity_available();
     insane.note = !insane.enabled ? kNotFound
-                  : game_effect   ? "One of the game's own, when it next can (some only in certain places): it "
-                                    "plays as you resume. Left/Right picks which, A plays it."
+                  : game_effect   ? "One of the game's own, at any sanity, when it next can (some only in certain "
+                                    "places or for certain characters; after ten seconds without it, it is "
+                                    "dropped): it plays as you resume. Left/Right picks which, A plays it."
                                   : insanity::note(effect - kGameCount);
     insane.change = [effects](int dir) { cycle(effect, effects, dir); };
     insane.activate = [] {

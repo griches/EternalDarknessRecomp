@@ -6385,9 +6385,17 @@ static void request_insanity(CPUState* cpu) {
 // one per effect. With the master on, sanity counts as gone (0x80069B94
 // returns 6) and effects come readily (0x80069BF0, 0x8006ECEC); the random
 // pick (0x800697C0) takes the first effect whose word is set (0x8006DB68),
-// when the place has it. Effects by the game's names for them (0x8006B010):
-// 20 Empty Inventory, 25 TV Video, 26 Game Reset, 27 Save/Erase Game, 28 Blue
-// Screen Of Death, 34 Max Shoot Self, 36 Spell Cast Bust, 38 Footstep Trail.
+// when the place has it. Effects by the game's names for them (each start
+// function, table 0x80243D8C, copies its name in): 1 Bleeding Walls, 4 TV Shut
+// Off, 5 Blood Pool Ceiling Drip, 6 Target Marker, 7 Attack Camera, 8 Horror
+// Cam Shake, 9 Ammo Pickup, 10 Locked in Room, 11 Blood Bath, 12 Edwards Ghost
+// Cine, 13 Timeline Visitation, 14 Bug Crawl, 15 To be Continued, 16 Enemy One
+// Hit Kill, 17 Head of Shakespeare, 18 Helpless Battle, 19 Illusions of
+// Grandeur, 20 Empty Inventory, 21 Phantom Creatures, 22 Walk On Ceiling, 23
+// Zombie, 24 TV Mute, 25 TV Video, 26 Game Reset, 27 Save/Erase Game, 28 Blue
+// Screen Of Death, 29 Controller Not found, 30 Alex Phone Call, 31 TV Volume,
+// 32 Shrink Player, 33 Expand Player, 34 Max Shoot Self, 35 Sinking Feeling,
+// 36 Spell Cast Bust, 38 Footstep Trail (0, 2, 3, 37, 39-43 none).
 // ED_INSANITY_FORCE=N (testing): the test mode on, with N.
 #define INSANITY_TEST_MODE 24632u
 #define INSANITY_FORCE_LIST 0x8024DFC8u

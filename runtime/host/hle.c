@@ -5869,27 +5869,40 @@ static void hle_set_health(CPUState* cpu) {
                 g_health_blocked);
 }
 
-// The debug menu's One-hit kills, in the setter's inner part, fn(stats,
-// health): the outer one (above) passes the player's changes through it, and
-// the game's hits on enemies call it directly. A lower health for anyone's
-// stats but the player's becomes 0. ED_HEALTH_LOG=1: each such change.
+// The setter's inner part, fn(stats, health): the outer one (above) passes
+// the player's changes through it, and the game's hits (on enemies, and some
+// on the player) call it directly. Invincible keeps a lower health for the
+// player's stats here too; One-hit kills takes anyone else's to 0.
+// ED_HEALTH_LOG=1: each change.
 static void hle_set_health_inner(CPUState* cpu) {
     static int log = -1;
     if (log < 0)
         log = getenv("ED_HEALTH_LOG") != NULL;
     g_hle_passthrough = true;
-    if (!g_one_hit_kills && !log)
+    if (!g_one_hit_kills && !g_invincible && !log)
         return;
     const u32 stats = cpu->gpr[3];
     const u32 character = player_character(cpu);
-    if (!guest_ram_range_valid(cpu, stats + (u32)(s32)g_health_offset, 2u) || character == 0u ||
-        mem_read32(cpu, character + (u32)(s32)g_health_stats_offset) == stats)
+    if (!guest_ram_range_valid(cpu, stats + (u32)(s32)g_health_offset, 2u) || character == 0u)
         return;
+    const bool player = mem_read32(cpu, character + (u32)(s32)g_health_stats_offset) == stats;
     const s16 health = (s16)mem_read16(cpu, stats + (u32)(s32)g_health_offset);
     const s16 wanted = (s16)cpu->gpr[4];
     if (log)
-        fprintf(stderr, "[debug] stats 0x%08X health %d -> %d (from 0x%08X)\n", stats, health, wanted, cpu->lr);
-    if (!g_one_hit_kills || wanted >= health || wanted <= 0)
+        fprintf(stderr, "[debug] %sstats 0x%08X health %d -> %d (from 0x%08X)\n", player ? "player " : "", stats,
+                health, wanted, cpu->lr);
+    if (wanted >= health)
+        return;
+    if (player) {
+        if (!g_invincible)
+            return;
+        cpu->gpr[4] = (u32)(s32)health;
+        if (g_health_blocked++ % 100u == 0u)
+            fprintf(stderr, "[debug] invincible: health stays at %d (the game set %d directly; %u so far)\n", health,
+                    wanted, g_health_blocked);
+        return;
+    }
+    if (!g_one_hit_kills || wanted <= 0)
         return;
     cpu->gpr[4] = 0u;
     fprintf(stderr, "[debug] one-hit kill: stats 0x%08X health %d -> 0 (the game set %d)\n", stats, health, wanted);
@@ -6011,7 +6024,35 @@ static void hold_stat(CPUState* cpu, u32 character, int stat, s16 offset, int va
         fprintf(stderr, "[debug] stat %d held: %d -> %d (%u so far)\n", stat, was, value, g_stat_holds);
 }
 
+// Invincible's main part: the developers' own, a flag in the player's stats
+// (+8, 0x800) that the health setter obeys (no change) and the health getter
+// answers with 150. A grab in chapter 9 still killed with only the setters
+// held (above): its kill reads health through the getter after a change the
+// setters never saw. Set at each pad read while on (a new character, a state
+// load); taken off again, when Invincible goes off, only where it was set here.
+#define GOD_FLAG 0x800u
+static u32 g_god_stats;  // the stats it was set in, 0 when none
+
+static void hold_invincible(CPUState* cpu) {
+    if (!g_invincible && g_god_stats == 0u)
+        return;
+    const u32 character = player_character(cpu);
+    const u32 stats = character != 0u ? mem_read32(cpu, character + (u32)(s32)g_health_stats_offset) : 0u;
+    if (!g_invincible) {
+        if (stats == g_god_stats && guest_ram_range_valid(cpu, stats, 64u))
+            mem_write32(cpu, stats + 8u, mem_read32(cpu, stats + 8u) & ~GOD_FLAG);
+        g_god_stats = 0u;
+        return;
+    }
+    if (!guest_ram_range_valid(cpu, stats, 64u) || (mem_read32(cpu, stats + 8u) & GOD_FLAG) != 0u)
+        return;
+    mem_write32(cpu, stats + 8u, mem_read32(cpu, stats + 8u) | GOD_FLAG);
+    g_god_stats = stats;
+    fprintf(stderr, "[debug] invincible: the game's own flag set in stats 0x%08X\n", stats);
+}
+
 static void hold_stats(CPUState* cpu) {
+    hold_invincible(cpu);
     if (g_sanity_mode == 0 && !g_infinite_magick && !g_infinite_stamina)
         return;
     const u32 character = player_character(cpu);

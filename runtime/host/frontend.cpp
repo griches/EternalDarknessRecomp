@@ -1017,7 +1017,7 @@ void build_debug() {
     Row invincible{"Invincible", on_off(hle_invincible())};
     invincible.enabled = hle_invincible_available();
     invincible.note = invincible.enabled
-                          ? "Health never goes down: hits, and the drain at zero sanity, take none. Healing still works."
+                          ? "Nothing takes your health or kills you: hits, grabs and the drain at zero sanity do nothing."
                           : "Not found in this version of the game.";
     invincible.change = [](int) { hle_set_invincible(!hle_invincible()); };
     g_rows.push_back(invincible);

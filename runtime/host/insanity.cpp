@@ -603,6 +603,214 @@ bool linux_kernel_panic(const Step& s) {
     return true;
 }
 
+// --- PS5 ---------------------------------------------------------------------
+
+// The PS5's system look: white on near-black, light and airy type.
+const ImU32 kPs5White = IM_COL32(0xff, 0xff, 0xff, 0xff);
+const ImU32 kPs5Grey = IM_COL32(0xb4, 0xb4, 0xb4, 0xff);
+
+ImVec2 centred(ImDrawList* d, ImFont* f, float size, float y, ImU32 colour, const char* text, float wrap = 0.f) {
+    const ImVec2 sc = screen();
+    const ImVec2 ts = text_size(f, size, text, wrap);
+    const float x = wrap > 0.f ? (sc.x - wrap) * 0.5f : (sc.x - ts.x) * 0.5f;
+    if (wrap > 0.f) {
+        // Each wrapped line centred on its own.
+        const char* at = text;
+        const char* const text_end = text + std::strlen(text);
+        float line_y = y;
+        while (*at != '\0') {
+            const char* end = f->CalcWordWrapPositionA(size / f->FontSize, at, text_end, wrap);
+            if (end == at)
+                end = at + 1;
+            const ImVec2 ls = f->CalcTextSizeA(size, FLT_MAX, 0.f, at, end);
+            d->AddText(f, size, ImVec2{(sc.x - ls.x) * 0.5f, line_y}, colour, at, end);
+            line_y += size * 1.3f;
+            at = end;
+            while (*at == ' ')
+                at++;
+        }
+        return ImVec2{x, line_y};
+    }
+    d->AddText(f, size, ImVec2{x, y}, colour, text);
+    return ImVec2{x, y + ts.y};
+}
+
+// The PS5 warns that it is too hot, says it is turning off, and the screen
+// fades to black as it would; after a few seconds dark, the game again.
+bool ps5_too_hot(const Step& s) {
+    constexpr double kWarn = 6.5, kTurning = 2.5, kFade = 1.2, kDark = 3.0;
+    ImDrawList* d = canvas();
+    const ImVec2 sc = screen();
+    const float k = sc.y / 1080.f;  // the PS5 draws its notices for the screen, not a window
+    d->AddRectFilled(ImVec2{0, 0}, sc, IM_COL32(0x08, 0x08, 0x0a, 0xff));
+    const double t = s.t;
+    if (t > kWarn + kTurning + kFade) {
+        d->AddRectFilled(ImVec2{0, 0}, sc, IM_COL32(0, 0, 0, 0xff));  // off
+        return t < kWarn + kTurning + kFade + kDark;
+    }
+    ImFont* ui = g_faces.ui != nullptr ? g_faces.ui : ImGui::GetFont();
+    const float dim = t > kWarn + kTurning ? static_cast<float>(1.0 - (t - kWarn - kTurning) / kFade) : 1.f;
+    const ImU32 white = rgba(0xff, 0xff, 0xff, dim), grey = rgba(0xb4, 0xb4, 0xb4, dim);
+    if (t < kWarn) {
+        // The warning sign: a rounded triangle with its mark.
+        const ImVec2 c{sc.x * 0.5f, sc.y * 0.5f - 150.f * k};
+        const float r = 40.f * k;
+        d->AddTriangleFilled(ImVec2{c.x, c.y - r}, ImVec2{c.x + r * 1.1f, c.y + r * 0.8f}, ImVec2{c.x - r * 1.1f, c.y + r * 0.8f},
+                             white);
+        d->AddRectFilled(ImVec2{c.x - 3.5f * k, c.y - r * 0.45f}, ImVec2{c.x + 3.5f * k, c.y + r * 0.3f},
+                         IM_COL32(0x08, 0x08, 0x0a, 0xff), 2.f * k);
+        d->AddCircleFilled(ImVec2{c.x, c.y + r * 0.55f}, 4.5f * k, IM_COL32(0x08, 0x08, 0x0a, 0xff));
+        centred(d, ui, 44.f * k, sc.y * 0.5f - 70.f * k, white, "Your PS5 is too hot.");
+        centred(d, ui, 28.f * k, sc.y * 0.5f + 4.f * k, grey,
+                "Turn off your PS5 and wait until it cools down. Make sure there's enough space around your PS5 for "
+                "air to flow, and don't place it in a hot location.",
+                900.f * k);
+    } else {
+        centred(d, ui, 36.f * k, sc.y * 0.5f - 24.f * k, white, "Turning off your PS5…");
+    }
+    return true;
+}
+
+// A trophy, as the PS5 announces one at the screen's top right: its picture
+// (the game's), the bronze cup, and its name.
+bool ps5_trophy(const Step& s) {
+    constexpr double kShown = 6.5;
+    ImDrawList* d = canvas();
+    const ImVec2 sc = screen();
+    const float k = sc.y / 1080.f;
+    const double in = std::min(1.0, s.t / 0.3), out = std::min(1.0, std::max(0.0, (kShown - s.t) / 0.3));
+    const float a = static_cast<float>(std::min(in, out));
+    const float w = 470.f * k, h = 110.f * k;
+    const ImVec2 at{sc.x - w - 52.f * k + (1.f - a) * 30.f * k, 46.f * k};
+    const ImVec2 to{at.x + w, at.y + h};
+    shadow(d, at, to, 14.f * k, 18.f * k, 0.5f * a);
+    d->AddRectFilled(at, to, rgba(0x24, 0x25, 0x29, 0.96f * a), 14.f * k);
+    const float pic = 78.f * k;
+    const ImVec2 pa{at.x + 16.f * k, at.y + (h - pic) * 0.5f};
+    if (ImTextureID id = picture("icon/window.png"); id != 0)
+        d->AddImageRounded(id, pa, ImVec2{pa.x + pic, pa.y + pic}, ImVec2{0, 0}, ImVec2{1, 1}, rgba(0xff, 0xff, 0xff, a),
+                           8.f * k);
+    // The bronze cup: bowl, stem, foot.
+    const ImU32 bronze = rgba(0xc9, 0x86, 0x4f, a);
+    const ImVec2 cup{pa.x + pic + 22.f * k, at.y + 42.f * k};
+    const float cw = 9.f * k;
+    d->PathArcTo(ImVec2{cup.x, cup.y - 4.f * k}, cw, 0.f, kPi, 12);
+    d->PathLineTo(ImVec2{cup.x - cw, cup.y - 10.f * k});
+    d->PathLineTo(ImVec2{cup.x + cw, cup.y - 10.f * k});
+    d->PathFillConvex(bronze);
+    d->AddRectFilled(ImVec2{cup.x - 1.5f * k, cup.y + 4.f * k}, ImVec2{cup.x + 1.5f * k, cup.y + 9.f * k}, bronze);
+    d->AddRectFilled(ImVec2{cup.x - 6.f * k, cup.y + 9.f * k}, ImVec2{cup.x + 6.f * k, cup.y + 12.f * k}, bronze,
+                     1.f * k);
+    ImFont* ui = g_faces.ui != nullptr ? g_faces.ui : ImGui::GetFont();
+    ImFont* bold = g_faces.bold != nullptr ? g_faces.bold : ImGui::GetFont();
+    d->AddText(ui, 22.f * k, ImVec2{cup.x + 18.f * k, at.y + 21.f * k}, rgba(0xc9, 0x86, 0x4f, a), "Bronze");
+    d->AddText(bold, 27.f * k, ImVec2{pa.x + pic + 13.f * k, at.y + 56.f * k}, rgba(0xff, 0xff, 0xff, a),
+               "This Isn't Happening");
+    return s.t < kShown;
+}
+
+// A system software update to 14.20: the install screen, its bar creeping
+// up to 99%, and there it stops... then an error, and the game, as if none
+// of it was real.
+bool ps5_update(const Step& s) {
+    constexpr double kClimb = 11.0, kStuck = 4.0, kError = 3.5;
+    ImDrawList* d = canvas();
+    const ImVec2 sc = screen();
+    const float k = sc.y / 1080.f;
+    d->AddRectFilled(ImVec2{0, 0}, sc, IM_COL32(0x00, 0x00, 0x00, 0xff));
+    if (s.t < 0.8)
+        return true;  // dark, as it restarts into the update
+    ImFont* ui = g_faces.ui != nullptr ? g_faces.ui : ImGui::GetFont();
+    const double t = s.t - 0.8;
+    if (t > kClimb + kStuck) {
+        if (t > kClimb + kStuck + kError)
+            return false;
+        centred(d, ui, 40.f * k, sc.y * 0.5f - 70.f * k, kPs5White, "Can't update the system software.");
+        centred(d, ui, 28.f * k, sc.y * 0.5f, kPs5Grey, "An error has occurred. (CE-108255-1)");
+        return true;
+    }
+    centred(d, ui, 40.f * k, sc.y * 0.5f - 120.f * k, kPs5White, "Updating System Software");
+    centred(d, ui, 26.f * k, sc.y * 0.5f - 62.f * k, kPs5Grey, "Version 14.20");
+    // Quick at first, then slower and slower: 99 and no further.
+    const double share = std::min(0.99, 0.99 * (1.0 - std::pow(1.0 - std::min(1.0, t / kClimb), 2.2)));
+    const float bw = 760.f * k, bh = 6.f * k;
+    const ImVec2 ba{(sc.x - bw) * 0.5f, sc.y * 0.5f + 10.f * k};
+    d->AddRectFilled(ba, ImVec2{ba.x + bw, ba.y + bh}, IM_COL32(0x3a, 0x3a, 0x3d, 0xff), bh * 0.5f);
+    d->AddRectFilled(ba, ImVec2{ba.x + bw * static_cast<float>(share), ba.y + bh}, kPs5White, bh * 0.5f);
+    char line[64];
+    std::snprintf(line, sizeof line, "Installing update file… (%d/2)", share < 0.42 ? 1 : 2);
+    d->AddText(ui, 24.f * k, ImVec2{ba.x, ba.y + 22.f * k}, kPs5Grey, line);
+    std::snprintf(line, sizeof line, "%d%%", static_cast<int>(share * 100.0));
+    const ImVec2 ps = text_size(ui, 24.f * k, line);
+    d->AddText(ui, 24.f * k, ImVec2{ba.x + bw - ps.x, ba.y + 22.f * k}, kPs5Grey, line);
+    centred(d, ui, 22.f * k, sc.y - 120.f * k, kPs5Grey,
+            "Don't turn off your PS5 or unplug the AC power cord while the update is being installed.");
+    return true;
+}
+
+// --- DualSense -------------------------------------------------------------------
+
+// The DualSense in hand (a PS5's own, or one on a computer): its light bar
+// bleeds to red, a heartbeat in its motors, and its triggers go stiff.
+SDL_Gamepad* dualsense() {
+    int count = 0;
+    SDL_Gamepad* found = nullptr;
+    if (SDL_JoystickID* ids = SDL_GetGamepads(&count); ids != nullptr) {
+        for (int i = 0; i < count && found == nullptr; i++)
+            if (SDL_Gamepad* pad = SDL_GetGamepadFromID(ids[i]);
+                pad != nullptr && (platform() == kPS5 || SDL_GetGamepadType(pad) == SDL_GAMEPAD_TYPE_PS5))
+                found = pad;
+        SDL_free(ids);
+    }
+    return found;
+}
+
+bool dualsense_present() { return dualsense() != nullptr; }
+
+// SDL's DualSense output report (SDL_hidapi_ps5.c DS5EffectsState_t): the
+// triggers' effects, 11 bytes each from byte 10.
+void dualsense_triggers(SDL_Gamepad* pad, bool stiff) {
+    Uint8 report[47] = {};
+    report[0] = 0x04 | 0x08;  // right and left trigger effects
+    // 0x01: resistance from `start` with `force`; 0x05: off.
+    const Uint8 on[3] = {0x01, 0x00, 0xff}, off[3] = {0x05, 0x00, 0x00};
+    for (int side = 0; side < 2; side++)
+        std::memcpy(report + 10 + side * 11, stiff ? on : off, 3);
+    SDL_SendGamepadEffect(pad, report, sizeof report);
+}
+
+bool dualsense_dread(const Step& s) {
+    constexpr double kFor = 12.0;
+    SDL_Gamepad* pad = dualsense();
+    static bool stiff = false;
+    if (s.first)
+        stiff = false;
+    if (pad == nullptr)
+        return false;
+    const double t = s.t;
+    if (t >= kFor) {
+        SDL_SetGamepadLED(pad, 0x00, 0x00, 0x40);  // SDL's first player blue
+        SDL_RumbleGamepad(pad, 0, 0, 0);
+        if (stiff)
+            dualsense_triggers(pad, false);
+        return false;
+    }
+    // Red creeps in over six seconds, pulsing with the heart.
+    const double beat = std::fmod(t * (1.0 + t / kFor), 1.0);  // quickening
+    const double lub = beat < 0.12 ? 1.0 : beat > 0.24 && beat < 0.34 ? 0.7 : 0.0;
+    const double red = std::min(1.0, t / 6.0);
+    const double glow = 0.55 + 0.45 * lub;
+    SDL_SetGamepadLED(pad, static_cast<Uint8>(255 * red * glow), 0, static_cast<Uint8>(64 * (1.0 - red) * glow));
+    SDL_RumbleGamepad(pad, lub > 0.0 ? static_cast<Uint16>(0xffff * (0.35 + 0.4 * red) * lub) : 0, 0, 120);
+    // The triggers stiffen for the middle four seconds.
+    const bool want = t > 4.0 && t < 8.0;
+    if (want != stiff) {
+        stiff = want;
+        dualsense_triggers(pad, stiff);
+    }
+    return true;
+}
+
 // --- The effects ---------------------------------------------------------------
 
 // Modal: the game held while it plays; Overlay: over the game as it plays;
@@ -616,6 +824,7 @@ struct Effect {
     Kind kind;
     bool (*step)(const Step&);            // one frame of it; false once it is over
     bool (*after)(const Step&) = nullptr;  // a Modal's sequel over the game (a notification)
+    bool (*available)() = nullptr;         // only while this holds (a DualSense in hand)
 };
 
 const Effect kEffects[] = {
@@ -635,18 +844,23 @@ const Effect kEffects[] = {
      kDeck | kLinux, Kind::Modal, deck_not_responding},
     {"Linux: kernel panic", "The game crashes and takes Linux down with it: the console scrolls to a kernel panic.",
      kDeck | kLinux, Kind::Modal, linux_kernel_panic},
+    {"PS5: too hot", "The PS5 warns it is too hot, says it is turning off, and fades to black.", kPS5, Kind::Modal,
+     ps5_too_hot},
+    {"PS5: trophy", "A bronze trophy pops up: This Isn't Happening.", kPS5, Kind::Overlay, ps5_trophy},
+    {"PS5: system update 14.20", "The PS5 installs system software 14.20... to 99%, then fails.", kPS5, Kind::Modal,
+     ps5_update},
+    {"DualSense: dread", "The controller's light bleeds red, a heartbeat in your hands, the triggers go stiff.",
+     kEvery, Kind::Overlay, dualsense_dread, nullptr, dualsense_present},
 };
 constexpr int kEffectCount = sizeof kEffects / sizeof kEffects[0];
 
 // This machine's effects, as indexes into kEffects.
 const std::vector<int>& mine() {
-    static const std::vector<int> list = [] {
-        std::vector<int> out;
-        for (int i = 0; i < kEffectCount; i++)
-            if (kEffects[i].platforms & platform())
-                out.push_back(i);
-        return out;
-    }();
+    static std::vector<int> list;
+    list.clear();
+    for (int i = 0; i < kEffectCount; i++)
+        if ((kEffects[i].platforms & platform()) && (kEffects[i].available == nullptr || kEffects[i].available()))
+            list.push_back(i);
     return list;
 }
 

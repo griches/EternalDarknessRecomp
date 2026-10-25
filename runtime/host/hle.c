@@ -5834,7 +5834,7 @@ static void find_letterbox(CPUState* cpu) {
 // healing still works.
 static bool g_invincible;
 static bool g_one_hit_kills;  // any other character's lower health becomes 0
-static bool g_health_found, g_inner_health_found;
+static bool g_health_found, g_inner_health_found, g_part_damage_found;
 static u32 player_character(CPUState* cpu);
 static s16 g_health_stats_offset, g_health_offset;
 static unsigned g_health_blocked;
@@ -5908,6 +5908,31 @@ static void hle_set_health_inner(CPUState* cpu) {
     fprintf(stderr, "[debug] one-hit kill: stats 0x%08X health %d -> 0 (the game set %d)\n", stats, health, wanted);
 }
 
+// A hit's damage to one body part, fn(hit, hitter, base): the base, or three
+// times or half of it between creatures of opposed alignments. In the hit
+// code (0x80062E34) the caller takes it off the hit part's points (actor
+// block +234 + 2 x part) and clamps at 0: enemies are hurt part by part, and
+// their health (stats +48) never changes. One-hit kills: a hit by the player
+// on anyone else takes the whole part. ED_HEALTH_LOG=1: each call.
+#define PART_HIT_RETURN 0x80062E38u
+static void hle_part_damage(CPUState* cpu) {
+    static int log = -1;
+    if (log < 0)
+        log = getenv("ED_HEALTH_LOG") != NULL;
+    g_hle_passthrough = true;
+    if (!g_one_hit_kills && !log)
+        return;
+    const u32 me = player_character(cpu);
+    if (log)
+        fprintf(stderr, "[debug] part damage: hit 0x%08X%s by 0x%08X%s base %d (from 0x%08X)\n", cpu->gpr[3],
+                cpu->gpr[3] == me ? " (player)" : "", cpu->gpr[4], cpu->gpr[4] == me ? " (player)" : "",
+                (s16)cpu->gpr[5], cpu->lr);
+    if (g_one_hit_kills && cpu->lr == PART_HIT_RETURN && me != 0u && cpu->gpr[4] == me && cpu->gpr[3] != me) {
+        cpu->gpr[5] = 9999u;
+        fprintf(stderr, "[debug] one-hit kill: 0x%08X takes the whole part\n", cpu->gpr[3]);
+    }
+}
+
 // The setter (PAL, USA): stwu r1,-16(r1) ... lwz r3, stats(r3) ... bl set;
 // li r0, 1, where set reads and writes the health (lha r3, health(r30); sth
 // r31, health(r30)); and the search for the player's character: lwz r0,
@@ -5933,6 +5958,13 @@ static void find_health_setter(CPUState* cpu) {
     g_health_offset = (s16)(read & 0xFFFFu);
     entry->intercept = hle_set_health;
     g_health_found = true;
+    HleDispatchEntry* part = hle_dispatch_entry(0x800623B0u);
+    if (strcmp(ED_GAME_ID, "GEDP01") == 0 && mem_read32(cpu, 0x800623B0u) == 0x9421FFE0u &&
+        mem_read32(cpu, PART_HIT_RETURN - 4u) == 0x4BFFF57Du && part != NULL && part->intercept == NULL &&
+        part->notify == NULL) {
+        part->intercept = hle_part_damage;
+        g_part_damage_found = true;
+    }
     HleDispatchEntry* inner = hle_dispatch_entry(set);
     if (mem_read32(cpu, set) == 0x9421FFF0u && inner != NULL && inner->intercept == NULL && inner->notify == NULL) {
         inner->intercept = hle_set_health_inner;
@@ -5951,10 +5983,10 @@ bool hle_invincible(void) { return g_invincible; }
 void hle_set_one_hit_kills(bool on) {
     if (on != g_one_hit_kills)
         fprintf(stderr, "[debug] one-hit kills %s\n", on ? "on" : "off");
-    g_one_hit_kills = on && g_inner_health_found;
+    g_one_hit_kills = on && g_part_damage_found;
 }
 
-bool hle_one_hit_kills_available(void) { return g_inner_health_found; }
+bool hle_one_hit_kills_available(void) { return g_part_damage_found; }
 
 bool hle_one_hit_kills(void) { return g_one_hit_kills; }
 bool hle_invincible_available(void) { return g_health_found; }
@@ -6061,6 +6093,8 @@ static void watch_health(CPUState* cpu) {
         log = getenv("ED_HEALTH_LOG") != NULL;
     if (!log || !sda_ready(cpu))
         return;
+    static int listed;
+    const bool list = getenv("ED_HEALTH_LIST") != NULL && listed++ == 30;
     u32 node = mem_read32(cpu, cpu->gpr[13] + (u32)(s32)g_character_list_offset);
     for (int i = 0; i < 1024 && guest_ram_range_valid(cpu, node, 8u); i++) {
         node = mem_read32(cpu, node + 4u);
@@ -6068,18 +6102,114 @@ static void watch_health(CPUState* cpu) {
             break;
         const u32 stats = mem_read32(cpu, node + (u32)(s32)g_health_stats_offset);
         const u32 actor = mem_read32(cpu, node + (u32)(s32)g_sanity_actor_offset);
+        if (list && guest_ram_range_valid(cpu, stats, 64u) && guest_ram_range_valid(cpu, actor, 160u)) {
+            const u32 obj = mem_read32(cpu, node + 52u);
+            float pos[3] = {0, 0, 0};
+            if (guest_ram_range_valid(cpu, obj, 16u))
+                for (int j = 0; j < 3; j++)
+                    pos[j] = guest_read_f32(cpu, obj + (u32)j * 4u);
+            fprintf(stderr, "[list] %3d char 0x%08X type %u class %u stats 0x%08X health %d flags 0x%08X at %.0f %.0f %.0f\n",
+                    i, node, mem_read16(cpu, actor + 152u), mem_read8(cpu, actor + 158u), stats,
+                    (s16)mem_read16(cpu, stats + (u32)(s32)g_health_offset), mem_read32(cpu, stats + 8u), pos[0], pos[1],
+                    pos[2]);
+        }
         if (!guest_ram_range_valid(cpu, stats + (u32)(s32)g_health_offset, 2u) || !guest_ram_range_valid(cpu, actor, 160u))
             continue;
         const s16 health = (s16)mem_read16(cpu, stats + (u32)(s32)g_health_offset);
+        const u32 flags = mem_read32(cpu, stats + 8u);
+        static u32 had_flags[1024];
         if (seen[i] == node && had[i] != health)
             fprintf(stderr, "[watch] character 0x%08X (type %u, class %u, stats 0x%08X) health %d -> %d\n", node,
                     mem_read16(cpu, actor + 152u), mem_read8(cpu, actor + 158u), stats, had[i], health);
+        if (seen[i] == node && had_flags[i] != flags)
+            fprintf(stderr, "[watch] character 0x%08X (type %u) flags 0x%08X -> 0x%08X\n", node,
+                    mem_read16(cpu, actor + 152u), had_flags[i], flags);
         seen[i] = node;
         had[i] = health;
+        had_flags[i] = flags;
     }
+    // Characters that left the list.
+    static u32 last_set[1024];
+    static int last_count;
+    u32 now_set[1024];
+    int now_count = 0;
+    node = mem_read32(cpu, cpu->gpr[13] + (u32)(s32)g_character_list_offset);
+    for (int i = 0; i < 1024 && guest_ram_range_valid(cpu, node, 8u); i++) {
+        node = mem_read32(cpu, node + 4u);
+        if (!guest_ram_range_valid(cpu, node, 56u))
+            break;
+        now_set[now_count++] = node;
+    }
+    for (int a = 0; a < last_count; a++) {
+        int b = 0;
+        while (b < now_count && now_set[b] != last_set[a])
+            b++;
+        if (b == now_count)
+            fprintf(stderr, "[watch] character 0x%08X left the list\n", last_set[a]);
+    }
+    memcpy(last_set, now_set, sizeof(u32) * (size_t)now_count);
+    last_count = now_count;
+}
+
+// ED_DIFF_NEAREST=1 (testing): the nearest creature's character, actor and
+// actor+140 blocks compared each pad read; halfwords that change are logged.
+static void diff_nearest(CPUState* cpu) {
+    static int on = -1;
+    static u32 who, base[3];
+    static u8 copy[3][1024];
+    static const u32 kSize[3] = {64u, 1024u, 1024u};
+    if (on < 0)
+        on = getenv("ED_DIFF_NEAREST") != NULL;
+    if (!on || !sda_ready(cpu))
+        return;
+    const u32 me = player_character(cpu);
+    const u32 pobj = me != 0u ? mem_read32(cpu, me + 52u) : 0u;
+    if (!guest_ram_range_valid(cpu, pobj, 16u))
+        return;
+    float best = 1e30f;
+    u32 near = 0u, node = mem_read32(cpu, cpu->gpr[13] + (u32)(s32)g_character_list_offset);
+    for (int i = 0; i < 1024 && guest_ram_range_valid(cpu, node, 8u); i++) {
+        node = mem_read32(cpu, node + 4u);
+        if (!guest_ram_range_valid(cpu, node, 56u))
+            break;
+        const u32 actor = mem_read32(cpu, node + (u32)(s32)g_sanity_actor_offset);
+        const u32 obj = mem_read32(cpu, node + 52u);
+        if (!guest_ram_range_valid(cpu, actor, 160u) || mem_read8(cpu, actor + 158u) != 2u ||
+            !guest_ram_range_valid(cpu, obj, 16u))
+            continue;
+        const float dx = guest_read_f32(cpu, obj) - guest_read_f32(cpu, pobj);
+        const float dy = guest_read_f32(cpu, obj + 4u) - guest_read_f32(cpu, pobj + 4u);
+        if (dx * dx + dy * dy < best) {
+            best = dx * dx + dy * dy;
+            near = node;
+        }
+    }
+    if (near == 0u)
+        return;
+    const u32 actor = mem_read32(cpu, near + (u32)(s32)g_sanity_actor_offset);
+    const u32 now[3] = {near, actor, mem_read32(cpu, actor + 140u)};
+    for (int b = 0; b < 3; b++) {
+        if (!guest_ram_range_valid(cpu, now[b], kSize[b]))
+            continue;
+        if (near == who && now[b] == base[b])
+            for (u32 o = 0; o < kSize[b]; o += 2u) {
+                const u16 was = (u16)(copy[b][o] << 8 | copy[b][o + 1]);
+                const u16 is = (u16)mem_read16(cpu, now[b] + o);
+                if (was != is)
+                    fprintf(stderr, "[diff] 0x%08X %s+%u: %d -> %d\n", near, b == 0 ? "char" : b == 1 ? "actor" : "block",
+                            o, (s16)was, (s16)is);
+            }
+        for (u32 o = 0; o < kSize[b]; o++)
+            copy[b][o] = mem_read8(cpu, now[b] + o);
+        base[b] = now[b];
+    }
+    if (near != who)
+        fprintf(stderr, "[diff] nearest creature 0x%08X (%.0f away)\n", near, sqrtf(best));
+    who = near;
 }
 
 static void hold_stats(CPUState* cpu) {
+    diff_nearest(cpu);
     watch_health(cpu);
     hold_invincible(cpu);
     if (g_sanity_mode == 0 && !g_infinite_magick && !g_infinite_stamina)

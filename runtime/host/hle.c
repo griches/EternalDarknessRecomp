@@ -3603,6 +3603,10 @@ static void hold_stats(CPUState* cpu);
 static void apply_debug_views(CPUState* cpu);
 static void spawn_requested(CPUState* cpu);
 
+// Whether a cutscene plays (as the fast-forward prompt has it): set at each pad
+// read, read at each frame for the picture (hle_frame_boundary).
+static volatile bool g_cutscene_now;
+
 static bool cutscene_playing(CPUState* cpu) {
     if (g_movie_file != 0u)
         return true;
@@ -3616,7 +3620,8 @@ static void hle_PADRead(CPUState* cpu) {
     DolPadState state[4];
     memset(state, 0, sizeof state);
     controls_set_game_menu(game_menu_open(cpu));
-    controls_set_cutscene(cutscene_playing(cpu));
+    g_cutscene_now = cutscene_playing(cpu);
+    controls_set_cutscene(g_cutscene_now);
     controls_note_frame(cpu->timebase / 675000ull);
     hold_stats(cpu);
     apply_debug_views(cpu);
@@ -4588,7 +4593,18 @@ static bool continue_book_reload(CPUState* cpu);
 // widescreen option, and the in-game menu.
 void hle_frame_boundary(void) {
     report_frame();  // the hang watchdog's sign of life
-    aurora_hdr_set_movie(g_movie_file != 0u);
+    // Wherever fast-forward is offered (a movie, or a scene in the black bars,
+    // the Tome's chapter pages among them) the picture is shown as video is:
+    // its white at video's white, with no HDR highlights and no glow.
+    const bool as_video = g_movie_file != 0u || g_cutscene_now;
+    aurora_hdr_set_movie(as_video);
+    {
+        static int was = -1;
+        if ((int)as_video != was && getenv("ED_MOVIE_LOG") != NULL)
+            fprintf(stderr, "[movie] shown as video: %s (movie file 0x%08X) at frame %llu\n", as_video ? "yes" : "no",
+                    g_movie_file, (unsigned long long)(dolrecomp_cpu.timebase / 675000ull));
+        was = as_video;
+    }
     static int fps_env = -1;
     static unsigned frames;
     static struct timespec mark;

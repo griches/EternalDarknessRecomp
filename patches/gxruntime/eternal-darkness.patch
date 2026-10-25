@@ -5663,15 +5663,16 @@ index 7af8fca..4c14e34 100644
    else
 diff --git a/graphics/aurora/lib/gfx/glow.cpp b/graphics/aurora/lib/gfx/glow.cpp
 new file mode 100644
-index 0000000..81567b4
+index 0000000..5da6d0e
 --- /dev/null
 +++ b/graphics/aurora/lib/gfx/glow.cpp
-@@ -0,0 +1,862 @@
+@@ -0,0 +1,877 @@
 +#include "glow.hpp"
 +
 +#include "../webgpu/gpu_prof.hpp"
 +
 +#include <atomic>
++#include <chrono>
 +#include <cstdlib>
 +#include <cstring>
 +#include <algorithm>
@@ -5959,7 +5960,11 @@ index 0000000..81567b4
 +std::atomic<float> g_emitStrength{0.6f};
 +// A movie plays (set_movie): shown as video is, its white at SDR white, with
 +// no highlights or glow; the game's paper white made a bright movie glare.
++// The game sets it for every cutscene too, so the white eases between paper
++// and video white over kMovieEaseS rather than jumping as one starts or ends
++// (a scene often keeps moving across the switch, the Tome photo zooming in).
 +std::atomic<bool> g_movie{false};
++constexpr float kMovieEaseS = 0.4f;
 +// A menu page is shown (present_hdr with no glow): its white at the same
 +// video white, not the game's paper white (the parchment glared).
 +bool g_uiPage = false;
@@ -6261,11 +6266,21 @@ index 0000000..81567b4
 +  // where the surface's light is absolute (HDR10, Windows' scRGB).
 +  const float paper = g_paperNits.load(std::memory_order_relaxed);
 +  const float videoWhite = webgpu::hdr_absolute() ? 203.f : 100.f;
++  // The movie's share of the white, eased (0 the paper white, 1 video's).
++  static float s_movieMix = 0.f;
++  static auto s_last = std::chrono::steady_clock::now();
++  const auto now = std::chrono::steady_clock::now();
++  const float dt = std::min(std::chrono::duration<float>(now - s_last).count(), 0.25f);
++  s_last = now;
++  const float target = g_movie.load(std::memory_order_relaxed) ? 1.f : 0.f;
++  s_movieMix = target > s_movieMix ? std::min(target, s_movieMix + dt / kMovieEaseS)
++                                   : std::max(target, s_movieMix - dt / kMovieEaseS);
++  const float sceneWhite = paper + (std::min(paper, videoWhite) - paper) * s_movieMix;
 +  const float value[16]{s, g_threshold, g_knee, g_scene,
 +                        g_saturation, g_spread, g_cap, 0.f,
 +                        g_uiPage ? 1.f : 0.f, g_hdrGain, std::min(paper, videoWhite),
 +                        g_highlight.load(std::memory_order_relaxed),
-+                        g_movie.load(std::memory_order_relaxed) ? std::min(paper, videoWhite) : paper,
++                        sceneWhite,
 +                        g_peakNits.load(std::memory_order_relaxed),
 +                        g_blackLevel.load(std::memory_order_relaxed),
 +                        static_cast<float>(g_pattern.load(std::memory_order_relaxed))};

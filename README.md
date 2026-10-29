@@ -67,7 +67,8 @@ Two downloads, both DDS:
 | **[PAL supplement](https://drive.google.com/file/d/1BuoE0uL4K3xn5KfH8KYYtC6fk-6QiiiA/view)** by Eternal Darkness Recomp | What the pack misses on the European disc: the Jump to Game, Options and Language screens and the title menu's words, and highlights without hard edges | 13.2&nbsp;MB&nbsp;`.zip` |
 
 1. Unpack both. Each one gives you a folder.
-2. Put both folders in a folder called `textures` (make it if it isn't there):
+2. Put both folders in the `textures` folder (the game makes it on its first
+   start, with a note in it; Options > Graphics > HD textures says where):
    - Mac app: `~/Library/Application Support/Eternal Darkness/textures`
      (in Finder, **Go > Go to Folder** and paste the path)
    - Steam Deck, Linux and Windows: `textures` in the game's folder, next to
@@ -96,7 +97,7 @@ textures/
 
 Start the game and choose **New game** in the launcher. The defaults are
 already the best picture: your screen's own resolution, widescreen, HD textures
-on and sharp baked shadows. In **Options > Game**, **HD textures** should say
+on and sharp baked shadows. In **Options > Graphics**, **HD textures** should say
 **On**, and its note gives the number of textures it found.
 
 ### If something's wrong
@@ -189,7 +190,7 @@ action to a button, trigger or key (that layout is *Custom*).
 Eternal Darkness lights its rooms with pre-drawn light maps: the window light on
 the floors, the shadows under the furniture, the glow of the lamps. On the disc
 they are small and compressed, so at today's resolutions their edges break up
-into blocks and smears. With **Options > Game > Baked shadows: Sharp** (the
+into blocks and smears. With **Options > Graphics > Baked shadows: Sharp** (the
 default) each room's light maps are rebuilt four times larger as the room loads:
 the compression blocks are evened out and edges are doubled along their own
 direction, so light and shadow keep clean edges; the small maps on the walls are

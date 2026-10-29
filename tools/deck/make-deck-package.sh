@@ -105,6 +105,8 @@ cp -r "$SRC/res" "$OUT/res"
 cp "$SRC/seeds/dawn_cache_seed-deck.db" "$OUT/res/dawn_cache_seed.db"
 cp "$HERE/play.sh" "$OUT/play.sh"; chmod +x "$OUT/play.sh"
 cp "$HERE/README.txt" "$OUT/README.txt"
+mkdir -p "$OUT/textures"
+printf 'Put HD texture packs here: unpack each pack and put its folder in this one\nas it comes (Dolphin'\''s format: tex1_... .png or .dds files, in any\nsubfolders). Options > Graphics > HD textures then says how many it found.\n' > "$OUT/textures/PUT HD TEXTURE PACKS HERE.txt"
 # Every component's licence text (THIRD_PARTY.md lists them).
 "$SRC/tools/collect-licenses.sh" "$OUT/licenses" "$B" "$ZIGDIR"
 

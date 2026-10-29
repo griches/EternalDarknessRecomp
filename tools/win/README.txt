@@ -19,7 +19,7 @@ it reads what it needs from the disc.
 HD textures (recommended)
 -------------------------
 Download both, unpack them (7-Zip opens the .7z file), and put the two folders
-in a folder called "textures" in this folder.
+in the "textures" folder in this folder.
 
 - Eternal Darkness HD Texture Pack by Zombie (DDS, 2.9 GB .7z, on Mega):
   https://mega.nz/file/6m5TQToI#v09Y_gYdtZ24WTT6BlfCeM5uvw1nRs3QozcYZkUVVqg
@@ -28,7 +28,7 @@ in a folder called "textures" in this folder.
   https://www.bouncingball.mobi/eternaldarkness/files/ED-PAL-supplement-dds.zip?v=3
 
 Leave both folders as they are; the supplement wins where they overlap.
-Options > Game > HD textures turns them on and off.
+Options > Graphics > HD textures turns them on and off.
 
 Saves, settings and logs stay in this folder (saves\, settings.ini,
 ed-*.dolcard, logs\). To update, copy a new build over this folder: your

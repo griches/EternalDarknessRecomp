@@ -38,6 +38,9 @@ crlf "$HERE/play.bat" "$P/play.bat"
 crlf "$HERE/README.txt" "$P/README.txt"
 printf 'Put your own image of the European Eternal Darkness disc (GEDP01, .iso or\n.gcm) in this folder. Any file name works.\n' > "$work/disc.txt"
 crlf "$work/disc.txt" "$P/dump/PUT YOUR DISC HERE.txt"
+mkdir -p "$P/textures"
+printf 'Put HD texture packs here: unpack each pack and put its folder in this one\nas it comes (Dolphin'\''s format: tex1_... .png or .dds files, in any\nsubfolders). Options > Graphics > HD textures then says how many it found.\n' > "$work/textures.txt"
+crlf "$work/textures.txt" "$P/textures/PUT HD TEXTURE PACKS HERE.txt"
 
 # Licences: the shared collector over the build's fetched libraries, then what
 # only this package carries (SDL's prebuilt, the shader compiler, the runtime).

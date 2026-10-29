@@ -11,9 +11,12 @@ void texpack_init(void);
 #ifdef __cplusplus
 }
 #include <cstdint>
+#include <string>
 #include <vector>
 // Textures the pack offers (0: no pack).
 size_t texpack_count();
+// Where packs go (made, with a note, on the first start).
+std::string texpack_dir();
 // Images being read, or read and not yet taken by the renderer (photo mode
 // lets the game draw until there are none).
 bool texpack_busy();

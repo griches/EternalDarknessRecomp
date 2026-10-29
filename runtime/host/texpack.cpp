@@ -10,7 +10,7 @@
 // can sit side by side), or ED_TEXTURE_PACK=<folder>. When two files are the
 // same texture, one under a folder named with "supplement" or "override" wins
 // (a fix-up pack beside the main one), and otherwise the path that sorts last.
-// Options > Game > HD textures turns it off.
+// Options > Graphics > HD textures turns it off.
 #include "host/texpack.h"
 
 #include "gxruntime/aurora_backend.h"
@@ -351,9 +351,24 @@ std::string pack_dir() {
     std::error_code ec;
     const std::filesystem::path beside_res =
         std::filesystem::path(frontend_res_dir()).parent_path() / "textures";
-    if (std::filesystem::is_directory(beside_res, ec))
+    if (std::filesystem::is_directory(beside_res, ec) || !std::filesystem::is_directory("textures", ec))
         return beside_res.string();
     return "textures";
+}
+
+// The folder is there from the first start, with a note in it, so a player
+// sees where a pack goes (it was "make it if it isn't there").
+void make_pack_dir(const std::string& dir) {
+    std::error_code ec;
+    if (!std::filesystem::create_directories(dir, ec))
+        return;
+    if (FILE* f = std::fopen((std::filesystem::path(dir) / "PUT HD TEXTURE PACKS HERE.txt").string().c_str(), "w")) {
+        std::fputs("Put HD texture packs here: unpack each pack and put its folder in this one\n"
+                   "as it comes (Dolphin's format: tex1_... .png or .dds files, in any\n"
+                   "subfolders). Options > Graphics > HD textures then says how many it found.\n",
+                   f);
+        std::fclose(f);
+    }
 }
 
 }  // namespace
@@ -362,8 +377,11 @@ extern "C" void texpack_init(void) {
     g_log = std::getenv("ED_TEXPACK_LOG") != nullptr;
     g_dir = pack_dir();
     std::error_code ec;
-    if (!std::filesystem::is_directory(g_dir, ec))
+    if (!std::filesystem::is_directory(g_dir, ec)) {
+        if (const char* env = std::getenv("ED_TEXTURE_PACK"); env == nullptr || env[0] == '\0')
+            make_pack_dir(g_dir);
         return;
+    }
     size_t skipped = 0;
     for (auto it = std::filesystem::recursive_directory_iterator(
              g_dir, std::filesystem::directory_options::skip_permission_denied, ec);
@@ -404,6 +422,12 @@ extern "C" void texpack_init(void) {
 }
 
 size_t texpack_count() { return g.files.size(); }
+
+std::string texpack_dir() {
+    std::error_code ec;
+    const std::filesystem::path abs = std::filesystem::absolute(g_dir, ec);
+    return ec ? g_dir : abs.lexically_normal().string();
+}
 
 bool texpack_busy() {
     std::lock_guard<std::mutex> lock(g.mutex);

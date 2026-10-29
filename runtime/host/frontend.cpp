@@ -620,6 +620,23 @@ const char* const kNotes[kCount] = {
 
 void run_hdr_calibration(int first_step);
 
+// Where a texture pack goes, short enough for a note: the Mac's folder (in
+// Library, hidden) spelled out from ~, the PS5's fixed one, else the folder
+// every package ships.
+std::string pack_place() {
+#if defined(__PROSPERO__)
+    return "/data/homebrew/PPSA99314/textures";
+#elif defined(__APPLE__)
+    std::string dir = texpack_dir();
+    const char* home = std::getenv("HOME");
+    if (home != nullptr && home[0] != '\0' && dir.rfind(home, 0) == 0)
+        dir = "~" + dir.substr(std::strlen(home));
+    return dir;
+#else
+    return "the textures folder, in the game's folder";
+#endif
+}
+
 void build_options() {
     static const char* const kAspect[] = {"16:9", "4:3", "16:9", "16:9", "21:9", "32:9"};
     // Each resolution as the pixels it draws at, for the display shape in use:
@@ -789,7 +806,7 @@ void build_options() {
             if (which == kHdTextures)
                 r.note = available(which) ? "The texture pack in your textures folder (" +
                                                 std::to_string(texpack_count()) + " images)."
-                                          : "Put a Dolphin-format texture pack (tex1_*.png) in the textures folder.";
+                                          : "Put a texture pack (Dolphin's tex1_ files) in " + pack_place() + ".";
             r.change = [which](int dir) { change(which, dir); };
             g_rows.push_back(r);
         }

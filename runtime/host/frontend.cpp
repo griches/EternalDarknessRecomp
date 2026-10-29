@@ -2543,6 +2543,7 @@ extern "C" void frontend_frame(void) {
     update_fps_counter();
     update_fast_forward_prompt();
     insanity_frame();
+    controls::light_frame();
     update_cursor();
     static bool menu_was_held = false;
     bool held[kButtonCount];

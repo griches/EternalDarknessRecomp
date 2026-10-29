@@ -69,6 +69,8 @@ std::string fast_forward_glyph();
 bool fast_forwarding();
 // When a button or key last went down (SDL ticks, ms; 0 never).
 uint64_t last_press_ms();
+// Once a frame (frontend.cpp): the light bar's colour for a spell being cast.
+void light_frame();
 
 // Switch layout (Custom starts from the layout in use).
 void set_layout(int layout);
@@ -101,6 +103,9 @@ bool controls_take_debug_request(void);
 // four times speed.
 void controls_set_cutscene(bool playing);
 bool controls_fast_forward(void);
+// The alignment of the spell the player is casting (hle.c): 1 Chattur'gha,
+// 2 Ulyaoth, 3 Xel'lotath, 4 Mantorok; 0 when none is being cast.
+void controls_set_cast_alignment(int alignment);
 // The guest frame (timebase / 675000) of this pad read, for ED_PAD_SCRIPT.
 void controls_note_frame(unsigned long long frame);
 // Input recording, for replaying a stretch of play on another machine

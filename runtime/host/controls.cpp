@@ -1059,7 +1059,50 @@ void capture_key(int scancode) {
     save();
 }
 
+// The light bar in the colour of the spell being cast (hle.c tells us the
+// alignment, 1-4, as the player begins a cast, and 0 as it ends): the game's
+// own colours for them (its table at 0x80258F20), made bright enough for a
+// light, coming up quickly and fading back to SDL's first-player blue.
+std::atomic<int> g_cast_alignment{0};
+
+void light_frame() {
+    struct Rgb {
+        float r, g, b;
+    };
+    static const Rgb kRest = {0.f, 0.f, 64.f};
+    static const Rgb kAlignment[5] = {kRest,
+                                      {255.f, 0.f, 0.f},      // Chattur'gha
+                                      {40.f, 200.f, 255.f},   // Ulyaoth
+                                      {0.f, 255.f, 0.f},      // Xel'lotath
+                                      {255.f, 60.f, 200.f}};  // Mantorok
+    static Rgb shown = kRest, from = kRest, to = kRest;
+    static int target = 0;
+    static Uint64 since = 0;
+    const int want = std::clamp(g_cast_alignment.load(std::memory_order_relaxed), 0, 4);
+    const Uint64 now = SDL_GetTicks();
+    if (want != target) {
+        target = want;
+        from = shown;
+        to = kAlignment[want];
+        since = now;
+    }
+    // Up in an eighth of a second, back down over most of one.
+    const float span = target != 0 ? 125.f : 800.f;
+    const float t = std::min(1.f, static_cast<float>(now - since) / span);
+    if (since == 0 || (t >= 1.f && shown.r == to.r && shown.g == to.g && shown.b == to.b))
+        return;
+    shown = {from.r + (to.r - from.r) * t, from.g + (to.g - from.g) * t, from.b + (to.b - from.b) * t};
+    if (SDL_Gamepad* pad = g_pad; pad != nullptr)
+        SDL_SetGamepadLED(pad, static_cast<Uint8>(shown.r), static_cast<Uint8>(shown.g), static_cast<Uint8>(shown.b));
+}
+
 }  // namespace controls
+
+extern "C" void controls_set_cast_alignment(int alignment) {
+    static const char* const kNames[5] = {"none", "Chattur'gha", "Ulyaoth", "Xel'lotath", "Mantorok"};
+    if (controls::g_cast_alignment.exchange(alignment, std::memory_order_relaxed) != alignment && alignment != 0)
+        std::fprintf(stderr, "[controls] casting: %s\n", kNames[std::clamp(alignment, 0, 4)]);
+}
 
 extern "C" void controls_init(void) {
     using namespace controls;

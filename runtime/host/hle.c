@@ -6633,8 +6633,32 @@ static void install_pad_sound(CPUState* cpu) {
         fprintf(stderr, "[pad sound] the game's stream start not found: these sounds stay on the TV\n");
 }
 
+// The player's cast, for the light bar (controls.cpp): 0x801C54C0 is given
+// the spell's word as they begin one and 0 as it ends. Its alignment is the
+// one bit set in the word's low four (1 Chattur'gha, 2 Ulyaoth, 4 Xel'lotath,
+// 8 Mantorok), numbered 1-4 as the game's 0x801C7A98 numbers them.
+#define CAST_SPELL 0x801C54C0u
+#define SPELL_ALIGNMENT 0x801C7A98u
+
+static void note_cast(CPUState* cpu) {
+    const u32 bit = cpu->gpr[3] & 15u;
+    controls_set_cast_alignment(bit == 1u ? 1 : bit == 2u ? 2 : bit == 4u ? 3 : bit == 8u ? 4 : 0);
+}
+
+static void install_cast_light(CPUState* cpu) {
+    if (strcmp(ED_GAME_ID, "GEDP01") != 0)
+        return;
+    HleDispatchEntry* entry = hle_dispatch_entry(CAST_SPELL);
+    if (entry != NULL && entry->intercept == NULL && entry->notify == NULL &&
+        mem_read32(cpu, CAST_SPELL) == 0x9421FFF0u && mem_read32(cpu, SPELL_ALIGNMENT) == 0x5460073Eu)
+        entry->notify = note_cast;
+    else
+        fprintf(stderr, "[controls] the game's spell cast not found: no light bar for spells\n");
+}
+
 static void find_insanity(CPUState* cpu) {
     install_pad_sound(cpu);
+    install_cast_light(cpu);
     install_sound_log(cpu);
     if (strcmp(ED_GAME_ID, "GEDP01") != 0 || mem_read32(cpu, 0x80018808u) != 0x906D99B4u ||
         mem_read32(cpu, 0x8001880Cu) != 0x4E800020u || mem_read32(cpu, 0x80238810u + 7u * 8u) != 0x80112D98u ||

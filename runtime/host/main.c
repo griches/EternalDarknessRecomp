@@ -23,6 +23,7 @@
 #include "gxruntime/savestate.h"
 #include "host/audio.h"
 #include "host/dtk.h"
+#include "host/pad_sound.h"
 #include "game_data.h"
 #include "host/mmio.h"
 #include "host/hle.h"
@@ -736,6 +737,7 @@ int main(int argc, char** argv) {
     hle_install(&dolrecomp_cpu);
     dvd_open_image(iso_path);  // disc image backing the file system
     dtk_init(iso_path);        // disc music streams, read from the same image
+    pad_sound_init(iso_path);  // the door knocks, for the controller's speaker
     mmio_set_disc_present(dvd_image_ready());
     // The IPL leaves the disc header's first 0x20 bytes (game and maker code,
     // disc number, version, streaming) at 0x80000000, where DVDGetCurrentDiskID

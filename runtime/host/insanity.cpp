@@ -120,7 +120,7 @@ float raster_density() {
 }
 
 ImFont* add_face(const std::vector<std::pair<std::string, int>>& choices, float size) {
-    static const ImWchar kRanges[] = {0x0020, 0x00FF, 0x2010, 0x2027, 0x2190, 0x2193, 0};
+    static const ImWchar kRanges[] = {0x0020, 0x00FF, 0x2010, 0x2027, 0x2122, 0x2122, 0x2190, 0x2193, 0};
     static const float density = raster_density();
     for (const auto& [path, index] : choices)
         if (exists(path)) {
@@ -1194,87 +1194,81 @@ bool ps5_too_hot(const Step& s) {
     return off < 0.9 + 3.5;
 }
 
-// The trophy's chime: ours, in the manner of the PS5's (a soft glassy note
-// and a higher one ringing on over a breath of air), made here, not copied.
-std::vector<int16_t> trophy_chime(int rate) {
-    const int n = static_cast<int>(rate * 1.4);
+// The notice's tone: ours, a system alert in the PS5's manner (two soft
+// glassy notes, falling, over a breath of air), made here, not copied.
+std::vector<int16_t> notice_tone(int rate) {
+    const int n = static_cast<int>(rate * 1.1);
     std::vector<float> mix(n, 0.f);
     struct Note {
         double at, freq, decay, gain;
     };
-    static const Note kNotes[] = {{0.000, 1174.7, 0.10, 0.35},  // D6, a soft tap
-                                  {0.060, 1760.0, 0.42, 0.55},  // A6, ringing
-                                  {0.060, 2637.0, 0.22, 0.14},  // E7 above it
-                                  {0.140, 3520.0, 0.30, 0.06}}; // a glint at the top
+    static const Note kNotes[] = {{0.000, 1318.5, 0.16, 0.50},  // E6
+                                  {0.000, 2637.0, 0.07, 0.10},  // its octave, a touch
+                                  {0.120, 987.8, 0.34, 0.55},   // B5, left ringing
+                                  {0.120, 1975.5, 0.12, 0.08}};
     for (const Note& note : kNotes)
         for (int i = static_cast<int>(note.at * rate); i < n; i++) {
             const double t = static_cast<double>(i) / rate - note.at;
-            const double env = (1.0 - std::exp(-t / 0.003)) * std::exp(-t / note.decay);
-            const double tone = std::sin(2.0 * kPi * note.freq * t) + 0.35 * std::sin(2.0 * kPi * (note.freq + 2.7) * t) +
-                                0.12 * std::sin(2.0 * kPi * note.freq * 2.0 * t + 0.4);
+            const double env = (1.0 - std::exp(-t / 0.004)) * std::exp(-t / note.decay);
+            const double tone = std::sin(2.0 * kPi * note.freq * t) + 0.3 * std::sin(2.0 * kPi * (note.freq + 1.9) * t);
             mix[i] += static_cast<float>(note.gain * env * tone);
         }
-    // Air: noise, smoothed, swelling and gone in a fifth of a second.
+    // Air: noise, smoothed, swelling and gone in a sixth of a second.
     float smooth = 0.f;
-    std::srand(1234);
-    for (int i = 0; i < static_cast<int>(rate * 0.22); i++) {
+    std::srand(4321);
+    for (int i = 0; i < static_cast<int>(rate * 0.16); i++) {
         const double t = static_cast<double>(i) / rate;
         const float noise = static_cast<float>(std::rand() % 2001 - 1000) / 1000.f;
-        smooth += (noise - smooth) * 0.18f;
-        mix[i] += static_cast<float>(0.10 * std::sin(kPi * t / 0.22) * smooth);
+        smooth += (noise - smooth) * 0.15f;
+        mix[i] += static_cast<float>(0.07 * std::sin(kPi * t / 0.16) * smooth);
     }
     float peak = 0.001f;
     for (float v : mix)
         peak = std::max(peak, std::fabs(v));
     std::vector<int16_t> out(n);
     for (int i = 0; i < n; i++)
-        out[i] = static_cast<int16_t>(std::lround(mix[i] / peak * 0.85f * 32767.f));
+        out[i] = static_cast<int16_t>(std::lround(mix[i] / peak * 0.8f * 32767.f));
     return out;
 }
 
-// A trophy, as the PS5 pops one up at the top right: the trophy's picture,
-// the bronze cup and its name, "Trophy earned!" under it; and its chime.
-void bronze_cup(ImDrawList* d, ImVec2 at, float s, ImU32 colour) {
-    // Bowl (wide at the top), its two handles, the stem and the foot.
-    d->PathLineTo(ImVec2{at.x - s * 0.36f, at.y});
-    d->PathLineTo(ImVec2{at.x + s * 0.36f, at.y});
-    d->PathArcTo(ImVec2{at.x, at.y + s * 0.02f}, s * 0.36f, 0.f, kPi, 14);
-    d->PathFillConvex(colour);
-    d->AddCircle(ImVec2{at.x - s * 0.36f, at.y + s * 0.14f}, s * 0.12f, colour, 12, s * 0.07f);
-    d->AddCircle(ImVec2{at.x + s * 0.36f, at.y + s * 0.14f}, s * 0.12f, colour, 12, s * 0.07f);
-    d->AddRectFilled(ImVec2{at.x - s * 0.05f, at.y + s * 0.34f}, ImVec2{at.x + s * 0.05f, at.y + s * 0.56f}, colour);
-    d->AddRectFilled(ImVec2{at.x - s * 0.22f, at.y + s * 0.56f}, ImVec2{at.x + s * 0.22f, at.y + s * 0.66f}, colour,
-                     s * 0.03f);
-}
-
-bool ps5_trophy(const Step& s) {
-    constexpr double kShown = 6.0;
+// A system notice, as the PS5 slides one in at the top right (where its
+// trophies come: 660 wide, 24 in from the right, 38 down): an alert's
+// picture, a line in white and what it means in grey under it; its tone.
+bool ps5_modified_notice(const Step& s) {
+    constexpr double kShown = 7.5;
     if (s.first) {
-        static const std::vector<int16_t> chime = trophy_chime(48000);
-        audio_play_host_sound(chime.data(), static_cast<uint32_t>(chime.size()), 48000u, 0.55f);
+        static const std::vector<int16_t> tone = notice_tone(48000);
+        audio_play_host_sound(tone.data(), static_cast<uint32_t>(tone.size()), 48000u, 0.5f);
     }
-    // Measured from the PS5's own: 660 by 110, 24 in from the right, 38 down.
+    static const char* const kTitle = "Modified system software detected";
+    static const char* const kBody =
+        "This PS5\xE2\x84\xA2 console has been identified as modified. Some features may be restricted.";
     ImDrawList* d = canvas();
-    const ImVec2 sc = screen();
     const float k = ps5_k();
     const double in = std::min(1.0, s.t / 0.25), out = std::min(1.0, std::max(0.0, (kShown - s.t) / 0.35));
     const float a = static_cast<float>(std::min(in, out));
-    const float w = 660.f * k, h = 110.f * k;
-    const ImVec2 at{ps5_ox() + 1920.f * k - w - 24.f * k, ps5_oy() + 38.f * k - (1.f - static_cast<float>(in)) * 10.f * k};
-    const ImVec2 to{at.x + w, at.y + h};
-    d->AddRectFilled(at, to, rgba(0x22, 0x22, 0x25, 0.92f * a), 10.f * k);
-    const float pic = 66.f * k;
-    const ImVec2 pa{at.x + 22.f * k, at.y + (h - pic) * 0.5f};
-    if (ImTextureID id = picture("icon/window.png"); id != 0)
-        d->AddImage(id, pa, ImVec2{pa.x + pic, pa.y + pic}, ImVec2{0, 0}, ImVec2{1, 1}, rgba(0xff, 0xff, 0xff, a));
-    d->AddRect(pa, ImVec2{pa.x + pic, pa.y + pic}, rgba(0xff, 0xff, 0xff, 0.3f * a), 0.f, 0, 1.2f * k);
     ImFont* f = ps5_medium();
-    const float left = pa.x + pic + 22.f * k;
-    const float name_size = ps5_size(f, "1 down, lots more to go!", 330.f * k);
-    bronze_cup(d, ImVec2{left + 9.f * k, at.y + 30.f * k}, 24.f * k, rgba(0xc6, 0x7f, 0x52, a));
-    ps5_text(d, f, name_size, left + 26.f * k, at.y + 30.f * k, rgba(0xf4, 0xf4, 0xf6, a), "This Isn't Happening");
-    const float sub_size = ps5_size(f, "Trophy earned!", 168.f * k);
-    ps5_text(d, f, sub_size, left, at.y + 70.f * k, rgba(0xa4, 0xa4, 0xaa, a), "Trophy earned!");
+    // The trophy's two sizes (measured from the PS5's): its name's, its line's.
+    const float title_size = ps5_size(f, "1 down, lots more to go!", 330.f * k);
+    ImFont* body = ps5_regular();
+    const float body_size = ps5_size(body, "Trophy earned!", 168.f * k);
+    const float w = 660.f * k, pic = 66.f * k;
+    const float left = 22.f * k + pic + 22.f * k, wrap = w - left - 26.f * k;
+    const float body_h = body->CalcTextSizeA(body_size, FLT_MAX, wrap, kBody).y;
+    const float h = std::max(110.f * k, 30.f * k + title_size + 4.f * k + body_h + 22.f * k);
+    const ImVec2 at{ps5_ox() + 1920.f * k - w - 24.f * k, ps5_oy() + 38.f * k - (1.f - static_cast<float>(in)) * 10.f * k};
+    d->AddRectFilled(at, ImVec2{at.x + w, at.y + h}, rgba(0x22, 0x22, 0x25, 0.92f * a), 10.f * k);
+    // The alert: a white "!" in a ring on the system's blue.
+    const ImVec2 pa{at.x + 22.f * k, at.y + 22.f * k};
+    d->AddRectFilled(pa, ImVec2{pa.x + pic, pa.y + pic}, rgba(0x00, 0x5e, 0xc4, a), 12.f * k);
+    const ImVec2 c{pa.x + pic * 0.5f, pa.y + pic * 0.5f};
+    d->AddCircle(c, pic * 0.3f, rgba(0xff, 0xff, 0xff, a), 32, 3.2f * k);
+    d->AddRectFilled(ImVec2{c.x - 2.2f * k, c.y - pic * 0.17f}, ImVec2{c.x + 2.2f * k, c.y + pic * 0.05f},
+                     rgba(0xff, 0xff, 0xff, a), 1.5f * k);
+    d->AddCircleFilled(ImVec2{c.x, c.y + pic * 0.14f}, 2.8f * k, rgba(0xff, 0xff, 0xff, a), 12);
+    ps5_text(d, f, title_size, at.x + left, at.y + 30.f * k, rgba(0xf4, 0xf4, 0xf6, a), kTitle);
+    d->AddText(body, body_size, ImVec2{at.x + left, at.y + 30.f * k + title_size + 4.f * k - cap_offset(body, body_size)},
+               rgba(0xa4, 0xa4, 0xaa, a), kBody, nullptr, wrap);
     return s.t < kShown;
 }
 
@@ -1473,7 +1467,8 @@ const Effect kEffects[] = {
      kDeck | kLinux, Kind::Modal, linux_kernel_panic, nullptr, nullptr, true},
     {"PS5: too hot", "The PS5 warns it is too hot, says it is turning off, and fades to black.", kPS5, Kind::Modal,
      ps5_too_hot, nullptr, nullptr, true},
-    {"PS5: trophy", "A bronze trophy pops up: This Isn't Happening.", kPS5, Kind::Overlay, ps5_trophy},
+    {"PS5: modified console", "A system notice slides in: this PS5 has been identified as modified.", kPS5,
+     Kind::Overlay, ps5_modified_notice},
     {"PS5: system update 14.20", "The PS5 asks to update to 14.20, either button installs it to 100%, then the game.",
      kPS5, Kind::Modal,
      ps5_update, nullptr, nullptr, true},

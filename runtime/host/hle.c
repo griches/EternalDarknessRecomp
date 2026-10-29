@@ -23,6 +23,7 @@
 #include "host/quickstate.h"
 #include "host/sdk_map.h"
 #include "host/compat.h"
+#include "host/pad_sound.h"
 #include "host/settings.h"
 #ifdef ED_AURORA
 #include "gxruntime/aurora_backend.h"
@@ -6593,7 +6594,37 @@ static void install_sound_log(CPUState* cpu) {
     }
 }
 
+// The door knocks from the controller's speaker (pad_sound.c): the game's
+// stream start, 0x801A4884(stream, volume, ...), as the level scripts' fn126
+// (each door's knock, at the door) and fn114 (one, flat) call it for stream
+// 14. When the controller has it, the game is told no voice (-1, which both
+// ignore), so it is not heard from the TV as well.
+#define VOICE_START 0x801A4884u
+#define VOICE_FROM_FN126 0x80165178u
+#define VOICE_FROM_FN114 0x80164F34u
+
+static void hle_voice_start(CPUState* cpu) {
+    g_hle_passthrough = true;
+    if ((cpu->lr != VOICE_FROM_FN126 && cpu->lr != VOICE_FROM_FN114) ||
+        !pad_sound_stream(cpu->gpr[3] & 0xFFFFu, cpu->gpr[4] & 0xFFu))
+        return;
+    g_hle_passthrough = false;
+    cpu->gpr[3] = 0xFFFFFFFFu;
+}
+
+static void install_pad_sound(CPUState* cpu) {
+    if (!pad_sound_available() || strcmp(ED_GAME_ID, "GEDP01") != 0)
+        return;
+    HleDispatchEntry* entry = hle_dispatch_entry(VOICE_START);
+    if (entry != NULL && entry->intercept == NULL && entry->notify == NULL &&
+        mem_read32(cpu, VOICE_START) == 0x9421FFC0u && mem_read32(cpu, VOICE_FROM_FN126 - 4u) == 0x4803F711u)
+        entry->intercept = hle_voice_start;
+    else
+        fprintf(stderr, "[pad sound] the game's stream start not found: the knocks stay on the TV\n");
+}
+
 static void find_insanity(CPUState* cpu) {
+    install_pad_sound(cpu);
     install_sound_log(cpu);
     if (strcmp(ED_GAME_ID, "GEDP01") != 0 || mem_read32(cpu, 0x80018808u) != 0x906D99B4u ||
         mem_read32(cpu, 0x8001880Cu) != 0x4E800020u || mem_read32(cpu, 0x80238810u + 7u * 8u) != 0x80112D98u ||

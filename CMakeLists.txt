@@ -94,6 +94,7 @@ message(STATUS "Eternal Darkness ${ED_GAME_ID}: ${ED_CHUNK_COUNT} recompiled chu
 set(ED_HOST_SOURCES
     runtime/host/mmio.c
     runtime/host/dtk.c
+    runtime/host/pad_sound.c
     runtime/host/interrupt.c
     runtime/host/settings.c
     runtime/host/camera.c

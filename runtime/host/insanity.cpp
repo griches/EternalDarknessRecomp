@@ -109,13 +109,25 @@ struct Faces {
     ImFont* menu_title = nullptr;
 } g_faces;
 
+// Our screens are laid out for 1080 lines and drawn at that times the screen's
+// height (2 at 4K), so the faces are rasterized that much finer too, not
+// stretched from 1080p's: the output's height in pixels over 1080, 1 to 4.
+float raster_density() {
+    float h = 1080.f;
+    if (const SDL_DisplayMode* m = SDL_GetCurrentDisplayMode(SDL_GetPrimaryDisplay()); m != nullptr)
+        h = static_cast<float>(m->h) * (m->pixel_density > 0.f ? m->pixel_density : 1.f);
+    return std::clamp(std::ceil(h / 1080.f), 1.f, 4.f);
+}
+
 ImFont* add_face(const std::vector<std::pair<std::string, int>>& choices, float size) {
     static const ImWchar kRanges[] = {0x0020, 0x00FF, 0x2010, 0x2027, 0x2190, 0x2193, 0};
+    static const float density = raster_density();
     for (const auto& [path, index] : choices)
         if (exists(path)) {
             ImFontConfig config;
             config.FontNo = index;
-            config.OversampleH = 2;
+            config.RasterizerDensity = density;
+            config.OversampleH = density >= 2.f ? 1 : 2;
             if (ImFont* font = ImGui::GetIO().Fonts->AddFontFromFileTTF(path.c_str(), size, &config, kRanges))
                 return font;
         }
@@ -1651,6 +1663,12 @@ extern "C" void insanity_frame(void) {
     }
     if (ImGui::GetCurrentContext() == nullptr)
         return;
+    static bool atlas_logged = false;
+    if (!atlas_logged && ImGui::GetIO().Fonts->TexHeight > 0) {
+        atlas_logged = true;
+        std::fprintf(stderr, "[insanity] faces rasterized at %gx (font atlas %dx%d)\n", raster_density(),
+                     ImGui::GetIO().Fonts->TexWidth, ImGui::GetIO().Fonts->TexHeight);
+    }
     // One drawn over play: a frame of it each game frame.
     static bool (*over)(const Step&) = nullptr;
     static Uint64 over_start = 0;

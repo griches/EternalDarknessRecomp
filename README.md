@@ -148,6 +148,7 @@ folder, or the Mac app's
   besides the game's own memory-card saves (cards in slots A and B both work).
 - **A launcher**: Continue, New game or any save slot straight from the start,
   and Options for everything here.
+- **New insanity effects**: secret ones of the recomp's own, alongside the game's.
 - **Problem reports**: if the game stops responding, stops or crashes, it says
   so on screen and writes a report to `saves/reports/` to send.
 - **Debug menu**: hold LT, RT and both stick clicks together in play (L2, R2,

@@ -1619,8 +1619,11 @@ void menu_closed() {
 using namespace insanity;
 
 extern "C" bool insanity_take_roll(int level) {
-    // One roll in three, while none of ours is waiting.
-    if (g_armed >= 0 || mine().empty() || std::rand() % 3 != 0)
+    // One roll in three, while none of ours is waiting. Only below half
+    // sanity (level 2 and down): the game says "This isn't happening!" only
+    // there (0x80113E04 drops the request otherwise), and each of ours ends
+    // with it.
+    if (level < 2 || g_armed >= 0 || mine().empty() || std::rand() % 3 != 0)
         return false;
     g_armed = mine()[std::rand() % mine().size()];
     std::fprintf(stderr, "[insanity] the game's roll (sanity level %d): %s\n", level, kEffects[g_armed].name);

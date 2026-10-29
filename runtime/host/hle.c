@@ -6417,9 +6417,24 @@ static void force_insanity(CPUState* cpu) {
     g_game_mode_now = (int)mem_read32(cpu, cpu->gpr[13] - 26240u);
     // After one of ours: "This isn't happening!", as after the game's own
     // (play asks for mode 12 while r13-24140 is set: 0x80113DEC, 0x80113E04).
+    // Play drops the request when it cannot have it at once (in a fight, above
+    // half sanity...), so it is asked again at each pad read until mode 12
+    // comes, for ten seconds.
+    static unsigned line_reads;
     if (g_insanity_recovered) {
         g_insanity_recovered = false;
-        mem_write32(cpu, cpu->gpr[13] - 24140u, 1u);
+        line_reads = 600u;
+    }
+    if (line_reads != 0u) {
+        if (g_game_mode_now == 12) {
+            line_reads = 0u;
+        } else if (--line_reads == 0u) {
+            u32 level = 0;
+            hle_guest_call(cpu, 0x80068EA8u, NULL, 0, 0.0, &level);
+            fprintf(stderr, "[insanity] \"This isn't happening!\" not had in ten seconds (sanity level %u)\n", level);
+        } else {
+            mem_write32(cpu, cpu->gpr[13] - 24140u, 1u);
+        }
     }
     int effect = g_insanity_force;
     if (effect < 0 && g_insanity_once >= 0) {
@@ -6504,7 +6519,54 @@ static void hle_mode_switch(CPUState* cpu) {
     fprintf(stderr, "[debug] insanity screen %u asked for: %d instead\n", asked, g_insanity_swap);
 }
 
+// ED_SOUND_LOG=1 (testing): every sound the game starts, with who asked: the
+// game's 2D (id, volume), 3D and character-event sounds, its streams
+// (0x801A4884: /audio/stream/NNNN, as level scripts' fn126 and placed room
+// sounds play them), and MusyX under them (sndFXStartEx, synthFXStart and
+// synthStartSound ids; AddEmitter, under every 3D sound, its fx id in r7),
+// each with the frame and the return addresses up the stack.
+static void log_sound(CPUState* cpu, const char* kind, u32 id) {
+    u32 chain[4] = {cpu->lr, 0, 0, 0};
+    u32 sp = cpu->gpr[1];
+    for (int i = 1; i < 4 && guest_ram_range_valid(cpu, sp, 4u); i++) {
+        sp = mem_read32(cpu, sp);
+        if (!guest_ram_range_valid(cpu, sp + 4u, 4u))
+            break;
+        chain[i] = mem_read32(cpu, sp + 4u);
+    }
+    fprintf(stderr, "[sound] frame %llu %s %u (r3 0x%X r4 0x%X r5 0x%X r6 0x%X r7 0x%X) from 0x%08X < 0x%08X < 0x%08X < 0x%08X\n",
+            (unsigned long long)(cpu->timebase / 675000ull), kind, id, cpu->gpr[3], cpu->gpr[4], cpu->gpr[5],
+            cpu->gpr[6], cpu->gpr[7], chain[0], chain[1], chain[2], chain[3]);
+}
+static void log_sound_2d(CPUState* cpu) { log_sound(cpu, "2d", cpu->gpr[3]); }
+static void log_sound_3d(CPUState* cpu) { log_sound(cpu, "3d", cpu->gpr[3]); }
+static void log_sound_event(CPUState* cpu) { log_sound(cpu, "event", cpu->gpr[4]); }
+static void log_sound_fx(CPUState* cpu) { log_sound(cpu, "fx", cpu->gpr[3] & 0xFFFFu); }
+static void log_sound_emitter(CPUState* cpu) { log_sound(cpu, "emitter", cpu->gpr[7] & 0xFFFFu); }
+static void log_sound_synth_fx(CPUState* cpu) { log_sound(cpu, "synthfx", cpu->gpr[3] & 0xFFFFu); }
+static void log_sound_synth(CPUState* cpu) { log_sound(cpu, "synth", cpu->gpr[3] & 0xFFFFu); }
+static void log_sound_voice(CPUState* cpu) { log_sound(cpu, "voice", cpu->gpr[3] & 0xFFFFu); }
+
+static void install_sound_log(CPUState* cpu) {
+    if (getenv("ED_SOUND_LOG") == NULL || strcmp(ED_GAME_ID, "GEDP01") != 0)
+        return;
+    static const struct {
+        u32 address;
+        void (*notify)(CPUState*);
+    } kSounds[] = {{0x8019DB90u, log_sound_2d},    {0x8019F104u, log_sound_3d},      {0x800ABC34u, log_sound_event},
+                   {0x801AD078u, log_sound_fx},    {0x801BD348u, log_sound_emitter},
+                   {0x801ABFB8u, log_sound_synth_fx}, {0x801AA6C0u, log_sound_synth}, {0x801A4884u, log_sound_voice}};
+    for (size_t i = 0; i < sizeof kSounds / sizeof kSounds[0]; i++) {
+        HleDispatchEntry* entry = hle_dispatch_entry(kSounds[i].address);
+        if (entry != NULL && entry->intercept == NULL && entry->notify == NULL)
+            entry->notify = kSounds[i].notify;
+        else
+            fprintf(stderr, "[sound] 0x%08X not watched\n", kSounds[i].address);
+    }
+}
+
 static void find_insanity(CPUState* cpu) {
+    install_sound_log(cpu);
     if (strcmp(ED_GAME_ID, "GEDP01") != 0 || mem_read32(cpu, 0x80018808u) != 0x906D99B4u ||
         mem_read32(cpu, 0x8001880Cu) != 0x4E800020u || mem_read32(cpu, 0x80238810u + 7u * 8u) != 0x80112D98u ||
         mem_read32(cpu, 0x80238810u + 13u * 8u) != 0x80112D98u) {
@@ -6540,7 +6602,34 @@ static void find_insanity(CPUState* cpu) {
 bool hle_insanity_available(void) { return g_insanity_found; }
 void hle_play_insanity(int mode) { g_insanity_request = mode; }
 
+// ED_SOUND_PLAY=id,id,... (testing): each sound alone through the game's 2D
+// sound (0x8019DB90(id, volume 127)), three seconds apart from the tenth.
+static void play_test_sounds(CPUState* cpu) {
+    static const char* list;
+    static unsigned long long start;
+    static bool read;
+    if (!read) {
+        read = true;
+        list = getenv("ED_SOUND_PLAY");
+        start = cpu->timebase / 675000ull;
+    }
+    if (list == NULL || *list == '\0')
+        return;
+    const unsigned long long frame = cpu->timebase / 675000ull;
+    static int played;
+    if (frame < start + 600u + 180u * (unsigned)played)
+        return;
+    const u32 args[] = {(u32)strtoul(list, NULL, 10), 127u};
+    u32 r = 0;
+    const bool ok = hle_guest_call(cpu, 0x8019DB90u, args, 2, 0.0, &r);
+    fprintf(stderr, "[sound] test %u at %.2f s%s\n", args[0], (double)(frame - start) / 60.0, ok ? "" : " (call failed)");
+    played++;
+    const char* next = strchr(list, ',');
+    list = next != NULL ? next + 1 : "";
+}
+
 static void hold_stats(CPUState* cpu) {
+    play_test_sounds(cpu);
     force_insanity(cpu);
     log_game_mode(cpu);
     request_insanity(cpu);

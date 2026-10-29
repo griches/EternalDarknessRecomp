@@ -6597,10 +6597,11 @@ static void install_sound_log(CPUState* cpu) {
 // Sounds from the controller's speaker (pad_sound.c), at the game's stream
 // start, 0x801A4884(stream, volume, ...): the door knock, stream 14, as the
 // level scripts' fn126 (each door's, at the door) and fn114 (one, flat) start
-// it, and the muttering, 595-599, as the character sounds start it (event
-// 61). The knock is then not started (-1, a voice both scripts ignore); the
-// muttering is, silent, as the character's voice keeps its handle for the
-// game to time the next by.
+// it, and the muttering, 595-599, and the voice on the phone, 479, as the
+// character sounds start them (event 61; the script's ed64(0, 479, ...)). The
+// knock is then not started (-1, a voice both scripts ignore); the others
+// are, silent, as the character's voice keeps its handle for the game to
+// time what follows by.
 #define VOICE_START 0x801A4884u
 #define VOICE_FROM_FN126 0x80165178u
 #define VOICE_FROM_FN114 0x80164F34u
@@ -6610,7 +6611,7 @@ static void hle_voice_start(CPUState* cpu) {
     g_hle_passthrough = true;
     const u32 stream = cpu->gpr[3] & 0xFFFFu;
     const bool knock = stream == 14u && (cpu->lr == VOICE_FROM_FN126 || cpu->lr == VOICE_FROM_FN114);
-    const bool mutter = stream >= 595u && stream <= 599u && cpu->lr == VOICE_FROM_CHARACTER;
+    const bool mutter = ((stream >= 595u && stream <= 599u) || stream == 479u) && cpu->lr == VOICE_FROM_CHARACTER;
     if ((!knock && !mutter) || !pad_sound_stream(stream, cpu->gpr[4] & 0xFFu))
         return;
     if (mutter) {

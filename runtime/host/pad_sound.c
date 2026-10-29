@@ -1,7 +1,8 @@
 // Sounds from the controller's own speaker (pad_sound.h): the door knock,
-// /audio/stream/0014, and the muttering of a character losing their mind,
+// /audio/stream/0014, the muttering of a character losing their mind,
 // 0595-0599 (the character sound picker 0x80047558 gives them for event 61 by
-// sanity level). Each is a stream of its own on the disc: Nintendo DSP ADPCM
+// sanity level), and the voice on the line when Alex answers the phone that
+// rings in the lobby, 0479 (the one script to play it: ed64(0, 479, ...)). Each is a stream of its own on the disc: Nintendo DSP ADPCM
 // with the standard 0x60-byte header (big-endian: samples, nibbles, rate, ...,
 // 16 coefficients at 0x1C, history at 0x40), then 8-byte frames of 14
 // samples. They are read and decoded once here; when the game starts one
@@ -26,7 +27,7 @@ typedef struct {
     u32 frames, rate;
 } PadSound;
 
-static PadSound g_sounds[] = {{14u}, {595u}, {596u}, {597u}, {598u}, {599u}};
+static PadSound g_sounds[] = {{14u}, {479u}, {595u}, {596u}, {597u}, {598u}, {599u}};
 #define PAD_SOUNDS (sizeof g_sounds / sizeof g_sounds[0])
 static bool g_any;
 
@@ -89,7 +90,7 @@ void pad_sound_init(const char* disc_image_path) {
     }
     fclose(f);
     if (g_any)
-        fprintf(stderr, "[pad sound] the door knock and the muttering go to the controller's speaker\n");
+        fprintf(stderr, "[pad sound] the door knock, the muttering and the phone's voice go to the controller's speaker\n");
 #else
     (void)disc_image_path;
     (void)decode_dsp;

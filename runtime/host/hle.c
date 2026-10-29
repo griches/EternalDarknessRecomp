@@ -6318,6 +6318,8 @@ static int player_insanity_effect(CPUState* cpu, u32* state);
 
 // ED_MODE_LOG=1 (testing): each change of the game's mode (PAL: the word at
 // r13-26240; the main loop runs the mode table's function for it each frame).
+static u32 game_effects_ready(CPUState* cpu, u32 count, u32 level);
+
 static void log_game_mode(CPUState* cpu) {
     static int on = -1;
     static u32 was = 0xFFFFFFFFu;
@@ -6341,6 +6343,10 @@ static void log_game_mode(CPUState* cpu) {
     if (effect != effect_was || state != state_was)
         fprintf(stderr, "[mode] insanity effect %d (stage %u) at frame %llu\n", effect, state,
                 (unsigned long long)(cpu->timebase / 675000ull));
+    if (effect_was == -2 && mode == GAME_MODE_PLAY && g_insanity_found)
+        fprintf(stderr, "[mode] the game's effects ready at sanity level 0/1/2/3: %u/%u/%u/%u\n",
+                game_effects_ready(cpu, 44u, 0u), game_effects_ready(cpu, 44u, 1u), game_effects_ready(cpu, 44u, 2u),
+                game_effects_ready(cpu, 44u, 3u));
     effect_was = effect;
     state_was = state;
 }
@@ -6474,10 +6480,32 @@ void hle_play_game_insanity(int effect) {
 #ifdef ED_AURORA
 // The game rolls an insanity effect: 0x800697C0(count, level) returns the
 // record picked, or 0 for none. Some rolls go to the recomp's own effects
-// (insanity.cpp): the game is told none, and one of ours is armed.
+// (insanity.cpp): the game is told none, and one of ours is armed. Only a
+// roll the game would have had an effect for: one of its first `count`
+// records ready (stage 3, +10), not spent (+24 bit 3) and of a tier (+4) the
+// sanity level allows. Ours stand in for some of the game's, never add to
+// them (once its effects are spent, most of its rolls come to nothing).
+static u32 game_effects_ready(CPUState* cpu, u32 count, u32 level) {
+    const u32 records = mem_read32(cpu, cpu->gpr[13] - 25476u);
+    u32 ready = 0;
+    for (u32 i = 0; i < count && i < INSANITY_EFFECTS && guest_ram_range_valid(cpu, records + 36u * i, 36u); i++) {
+        const u32 record = records + 36u * i;
+        if (mem_read16(cpu, record + 10u) == 3u && (mem_read32(cpu, record + 24u) & 8u) == 0u &&
+            mem_read8(cpu, record + 4u) <= level)
+            ready++;
+    }
+    return ready;
+}
+
 static void hle_insanity_roll(CPUState* cpu) {
     g_hle_passthrough = true;
-    if (g_insanity_force >= 0 || g_insanity_once >= 0 || !insanity_take_roll((int)(cpu->gpr[4] & 0xFFu)))
+    if (g_insanity_force >= 0 || g_insanity_once >= 0 || !sda_ready(cpu))
+        return;
+    const u32 count = cpu->gpr[3] & 0xFFu, level = cpu->gpr[4] & 0xFFu;
+    const u32 ready = game_effects_ready(cpu, count, level);
+    if (getenv("ED_MODE_LOG") != NULL)
+        fprintf(stderr, "[insanity] the game rolls at sanity level %u: %u of its %u effects ready\n", level, ready, count);
+    if (ready == 0u || !insanity_take_roll((int)level))
         return;
     g_hle_passthrough = false;
     cpu->gpr[3] = 0u;

@@ -11,11 +11,17 @@
 // same texture, one under a folder named with "supplement" or "override" wins
 // (a fix-up pack beside the main one), and otherwise the path that sorts last.
 // Options > Graphics > HD textures turns it off.
+//
+// The recomp's own pictures go in the same way, whether or not a pack is there
+// and HD textures is on: the game's controller error banner (its insanity
+// effect 29), redone for the machine it runs on (res/insanity, made by
+// tools/ui/make_controller_error.py). They win over a pack's.
 #include "host/texpack.h"
 
 #include "gxruntime/aurora_backend.h"
 #include "host/buttons.h"
 #include "host/frontend.h"
+#include "host/insanity.h"
 #include "host/settings.h"
 
 #include <SDL3/SDL_cpuinfo.h>
@@ -230,7 +236,8 @@ void build_mips(Loaded& img) {
 // pthread_cond_destroy blocks while a thread waits on the condition, which
 // kept the process alive after quitting on Linux).
 struct Shared {
-    std::unordered_map<Key, std::string, KeyHash> files;  // read-only after init
+    std::unordered_map<Key, std::string, KeyHash> files;    // read-only after init
+    std::unordered_map<Key, std::string, KeyHash> builtin;  // the recomp's own, likewise
     std::mutex mutex;
     std::condition_variable cv;
     std::deque<Key> queue;
@@ -284,7 +291,8 @@ void loader() {
             g.queue.pop_front();
         }
         Loaded img;
-        const std::string& path = g.files.at(key);
+        const auto own = g.builtin.find(key);
+        const std::string& path = own != g.builtin.end() ? own->second : g.files.at(key);
         bool ok = is_dds(path) ? load_dds(path, &img)
                                : load_png_rgba(path, &img.rgba, &img.width, &img.height);
         // A GPU without BC textures (none this runs on, so far) keeps the original.
@@ -313,15 +321,14 @@ void loader() {
         else
             g.failed.insert(key);
         if (g_log)
-            std::fprintf(stderr, "[texpack] %s %s\n", ok ? "loaded" : "FAILED",
-                         g.files.at(key).c_str());
+            std::fprintf(stderr, "[texpack] %s %s\n", ok ? "loaded" : "FAILED", path.c_str());
     }
 }
 
 int lookup(uint32_t format, uint32_t width, uint32_t height, uint64_t hash, uint8_t** out_rgba,
            uint32_t* out_width, uint32_t* out_height, uint32_t* out_mips, uint32_t* out_format) {
     const Key key{format, width, height, hash};
-    if (g.files.find(key) == g.files.end())
+    if (g.builtin.find(key) == g.builtin.end() && (!g_settings.hd_textures || g.files.find(key) == g.files.end()))
         return 0;
     std::lock_guard<std::mutex> lock(g.mutex);
     if (auto it = g.ready.find(key); it != g.ready.end()) {
@@ -343,7 +350,29 @@ int lookup(uint32_t format, uint32_t width, uint32_t height, uint64_t hash, uint
     return 2;
 }
 
-uint64_t generation() { return g_settings.hd_textures && !g.files.empty() ? 1u : 0u; }
+// 0 when there is nothing to put in; another value when the pack goes on or
+// off, so the renderer asks again.
+uint64_t generation() {
+    return (g.builtin.empty() ? 0u : 1u) | (g_settings.hd_textures && !g.files.empty() ? 2u : 0u);
+}
+
+// The recomp's own: the controller error banner for this machine.
+void add_builtin() {
+    char name[64];
+    std::snprintf(name, sizeof name, "/insanity/controller-error-%s.png", insanity_platform_name());
+    const std::string path = frontend_res_dir() + name;
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(path, ec))
+        return;
+    g.builtin.emplace(Key{14u, 596u, 50u, 0xf238cd2e013b429aull}, path);
+    // ED_TEXPACK_OWN_TEST=<w>x<h>_<hash>_<fmt> (testing): the banner on that
+    // texture too, to see it in place without the effect.
+    unsigned w = 0, h = 0, fmt = 0;
+    unsigned long long hash = 0;
+    if (const char* t = std::getenv("ED_TEXPACK_OWN_TEST");
+        t != nullptr && std::sscanf(t, "%ux%u_%16llx_%u", &w, &h, &hash, &fmt) == 4)
+        g.builtin.emplace(Key{fmt, w, h, hash}, path);
+}
 
 std::string pack_dir() {
     if (const char* env = std::getenv("ED_TEXTURE_PACK"); env != nullptr && env[0] != '\0')
@@ -376,15 +405,16 @@ void make_pack_dir(const std::string& dir) {
 extern "C" void texpack_init(void) {
     g_log = std::getenv("ED_TEXPACK_LOG") != nullptr;
     g_dir = pack_dir();
+    add_builtin();
     std::error_code ec;
-    if (!std::filesystem::is_directory(g_dir, ec)) {
+    const bool folder = std::filesystem::is_directory(g_dir, ec);
+    if (!folder)
         if (const char* env = std::getenv("ED_TEXTURE_PACK"); env == nullptr || env[0] == '\0')
             make_pack_dir(g_dir);
-        return;
-    }
     size_t skipped = 0;
-    for (auto it = std::filesystem::recursive_directory_iterator(
-             g_dir, std::filesystem::directory_options::skip_permission_denied, ec);
+    for (auto it = folder ? std::filesystem::recursive_directory_iterator(
+                                g_dir, std::filesystem::directory_options::skip_permission_denied, ec)
+                          : std::filesystem::recursive_directory_iterator();
          !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
         if (!it->is_regular_file(ec))
             continue;
@@ -407,9 +437,9 @@ extern "C" void texpack_init(void) {
                 found->second = std::move(path);
         }
     }
-    std::fprintf(stderr, "[texpack] %zu textures in %s (%zu skipped)\n", g.files.size(),
-                 g_dir.c_str(), skipped);
-    if (g.files.empty())
+    if (folder)
+        std::fprintf(stderr, "[texpack] %zu textures in %s (%zu skipped)\n", g.files.size(), g_dir.c_str(), skipped);
+    if (g.files.empty() && g.builtin.empty())
         return;
     // PNG decoding is the slow part and must not hold up a frame: two loaders,
     // or one on a machine of 8 threads or fewer (the Steam Deck), where they
@@ -436,7 +466,7 @@ bool texpack_busy() {
 
 bool texpack_read_rgba(uint32_t format, uint32_t width, uint32_t height, uint64_t hash,
                        std::vector<uint8_t>* rgba, uint32_t* out_width, uint32_t* out_height) {
-    if (generation() == 0)
+    if (!g_settings.hd_textures || g.files.empty())
         return false;
     const auto it = g.files.find(Key{format, width, height, hash});
     if (it == g.files.end())

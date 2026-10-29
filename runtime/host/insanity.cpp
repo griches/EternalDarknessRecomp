@@ -1709,6 +1709,16 @@ extern "C" void insanity_frame(void) {
     }
 }
 
+extern "C" const char* insanity_platform_name(void) {
+    switch (platform()) {
+    case kMac: return "mac";
+    case kWindows: return "windows";
+    case kDeck: return "deck";
+    case kPS5: return "ps5";
+    default: return "linux";
+    }
+}
+
 extern "C" void insanity_imgui_init(void) {
     const std::string res = frontend_res_dir() + "/fonts/";
     std::vector<std::pair<std::string, int>> ui, bold, mono;

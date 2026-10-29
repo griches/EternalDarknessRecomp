@@ -21,6 +21,10 @@ void insanity_frame(void);
 // Before ImGui's first frame (frontend_imgui_init): the system's own faces.
 void insanity_imgui_init(void);
 
+// The machine the game runs on, as the effects know it: "mac", "windows",
+// "linux", "deck" or "ps5" (ED_INSANITY_PLATFORM shows another's).
+const char* insanity_platform_name(void);
+
 #ifdef __cplusplus
 }
 

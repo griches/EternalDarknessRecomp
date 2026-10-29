@@ -6622,8 +6622,15 @@ static void hle_voice_start(CPUState* cpu) {
     cpu->gpr[3] = 0xFFFFFFFFu;
 }
 
+// Installed with the other hooks, before main reads the sounds from the disc
+// (pad_sound_init comes after hle_install): where a controller's speaker can
+// be reached at all, then, and each start asks pad_sound_stream.
 static void install_pad_sound(CPUState* cpu) {
-    if (!pad_sound_available() || strcmp(ED_GAME_ID, "GEDP01") != 0)
+#if !defined(__PROSPERO__)
+    if (!pad_sound_available())
+        return;
+#endif
+    if (strcmp(ED_GAME_ID, "GEDP01") != 0)
         return;
     HleDispatchEntry* entry = hle_dispatch_entry(VOICE_START);
     if (entry != NULL && entry->intercept == NULL && entry->notify == NULL &&

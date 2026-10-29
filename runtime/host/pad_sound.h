@@ -5,9 +5,10 @@
 
 #include <stdbool.h>
 
-// Sounds from the controller's own speaker (pad_sound.c): the door knocks, the
-// level scripts' stream 14, played by the DualSense instead of the TV where
-// the machine can reach its speaker (the PS5, so far).
+// Sounds from the controller's own speaker (pad_sound.c): the door knocks (the
+// level scripts' stream 14) and the muttering of a character losing their mind
+// (595-599), played by the DualSense instead of the TV where the machine can
+// reach its speaker (the PS5, so far).
 
 // Read and decode those streams from the disc image (after dvd_open_image).
 void pad_sound_init(const char* disc_image_path);

@@ -1,9 +1,11 @@
-// Sounds from the controller's own speaker (pad_sound.h). The door knock is a
-// stream of its own on the disc, /audio/stream/0014: Nintendo DSP ADPCM with
-// the standard 0x60-byte header (big-endian: samples, nibbles, rate, ..., 16
-// coefficients at 0x1C, history at 0x40), then 8-byte frames of 14 samples.
-// It is read and decoded once here; when a level script starts it (hle.c),
-// the PS5 port's pad_speaker_play plays it on player 1's DualSense.
+// Sounds from the controller's own speaker (pad_sound.h): the door knock,
+// /audio/stream/0014, and the muttering of a character losing their mind,
+// 0595-0599 (the character sound picker 0x80047558 gives them for event 61 by
+// sanity level). Each is a stream of its own on the disc: Nintendo DSP ADPCM
+// with the standard 0x60-byte header (big-endian: samples, nibbles, rate, ...,
+// 16 coefficients at 0x1C, history at 0x40), then 8-byte frames of 14
+// samples. They are read and decoded once here; when the game starts one
+// (hle.c), the PS5 port's pad_speaker_play plays it on player 1's DualSense.
 #include "host/pad_sound.h"
 
 #include "gxruntime/dvd.h"
@@ -18,10 +20,15 @@
 bool pad_speaker_play(const int16_t* samples, uint32_t count, uint32_t rate, float volume);
 #endif
 
-#define KNOCK_STREAM 14u
+typedef struct {
+    u32 stream;
+    s16* pcm;
+    u32 frames, rate;
+} PadSound;
 
-static s16* g_knock;
-static u32 g_knock_frames, g_knock_rate;
+static PadSound g_sounds[] = {{14u}, {595u}, {596u}, {597u}, {598u}, {599u}};
+#define PAD_SOUNDS (sizeof g_sounds / sizeof g_sounds[0])
+static bool g_any;
 
 static u32 be32(const u8* p) { return (u32)p[0] << 24 | (u32)p[1] << 16 | (u32)p[2] << 8 | p[3]; }
 static s16 be16(const u8* p) { return (s16)(p[0] << 8 | p[1]); }
@@ -63,35 +70,46 @@ static bool decode_dsp(const u8* data, u32 size, s16** out, u32* frames, u32* ra
 
 void pad_sound_init(const char* disc_image_path) {
 #if defined(__PROSPERO__)
-    u32 start = 0, length = 0;
-    const s32 entry = dvd_path_to_entrynum("/audio/stream/0014");
-    if (disc_image_path == NULL || entry < 0 || !dvd_entry_info(entry, &start, &length) || length > (1u << 22))
+    FILE* f = disc_image_path != NULL ? fopen(disc_image_path, "rb") : NULL;
+    if (f == NULL)
         return;
-    FILE* f = fopen(disc_image_path, "rb");
-    u8* data = f != NULL ? (u8*)malloc(length) : NULL;
-    const bool read = data != NULL && fseek(f, (long)start, SEEK_SET) == 0 && fread(data, 1, length, f) == length;
-    if (f != NULL)
-        fclose(f);
-    if (read && decode_dsp(data, length, &g_knock, &g_knock_frames, &g_knock_rate))
-        fprintf(stderr, "[pad sound] the door knock (stream %u, %.2f s) goes to the controller's speaker\n",
-                KNOCK_STREAM, (double)g_knock_frames / g_knock_rate);
-    free(data);
+    for (size_t i = 0; i < PAD_SOUNDS; i++) {
+        PadSound* s = &g_sounds[i];
+        char path[32];
+        snprintf(path, sizeof path, "/audio/stream/%04u", s->stream);
+        u32 start = 0, length = 0;
+        const s32 entry = dvd_path_to_entrynum(path);
+        if (entry < 0 || !dvd_entry_info(entry, &start, &length) || length > (1u << 22))
+            continue;
+        u8* data = (u8*)malloc(length);
+        if (data != NULL && fseek(f, (long)start, SEEK_SET) == 0 && fread(data, 1, length, f) == length &&
+            decode_dsp(data, length, &s->pcm, &s->frames, &s->rate))
+            g_any = true;
+        free(data);
+    }
+    fclose(f);
+    if (g_any)
+        fprintf(stderr, "[pad sound] the door knock and the muttering go to the controller's speaker\n");
 #else
     (void)disc_image_path;
     (void)decode_dsp;
 #endif
 }
 
-bool pad_sound_available(void) { return g_knock != NULL; }
+bool pad_sound_available(void) { return g_any; }
 
 bool pad_sound_stream(u32 stream, u32 volume) {
-    if (stream != KNOCK_STREAM || g_knock == NULL)
-        return false;
+    for (size_t i = 0; i < PAD_SOUNDS; i++) {
+        const PadSound* s = &g_sounds[i];
+        if (s->stream != stream || s->pcm == NULL)
+            continue;
 #if defined(__PROSPERO__)
-    const float v = volume >= 127u ? 1.f : (float)volume / 127.f;
-    return pad_speaker_play(g_knock, g_knock_frames, g_knock_rate, v);
+        const float v = volume >= 127u ? 1.f : (float)volume / 127.f;
+        return pad_speaker_play(s->pcm, s->frames, s->rate, v);
 #else
-    (void)volume;
-    return false;
+        (void)volume;
+        return false;
 #endif
+    }
+    return false;
 }

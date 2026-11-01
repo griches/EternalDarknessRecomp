@@ -130,6 +130,10 @@ else()
     add_executable(EternalDarkness ${ED_HOST_SOURCES} ${ED_DISC_SOURCES})
     set(ED_HOST_TARGET EternalDarkness)
 endif()
+if(WIN32)
+    # File names in UTF-8 everywhere, so non-ASCII folder and user names work.
+    target_sources(EternalDarkness PRIVATE tools/win/utf8.manifest)
+endif()
 # The generated chunks are huge switch-heavy units: no warnings, and keep the
 # optimiser from spending minutes on each.
 set_source_files_properties(${ED_CHUNKS} "${ED_GENERATED_DIR}/generated.c"

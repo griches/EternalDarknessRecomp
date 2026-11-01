@@ -1635,7 +1635,11 @@ extern "C" void frontend_init(int argc, char** argv) {
 extern "C" bool frontend_run_launcher(const char* default_iso, char* iso_out,
                                       size_t iso_cap) {
     if (!ensure_ui()) {
-        snprintf(iso_out, iso_cap, "%s", default_iso != nullptr ? default_iso : "");
+        // No menus to choose with: still find the disc, whatever it is called.
+        const std::vector<Disc> discs =
+            scan_discs(g_settings.disc[0] != '\0' ? g_settings.disc : default_iso);
+        snprintf(iso_out, iso_cap, "%s",
+                 !discs.empty() ? discs[0].path.c_str() : default_iso != nullptr ? default_iso : "");
         return true;
     }
     g_discs = scan_discs(g_settings.disc[0] != '\0' ? g_settings.disc : default_iso);

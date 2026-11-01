@@ -982,11 +982,11 @@ void ps5_motes(ImDrawList* d, double t, float alpha) {
         const float x = left ? sc.x * 0.36f * u * u : sc.x * (1.f - 0.24f * u * u);
         const float drift = static_cast<float>(std::fmod(t * (3.f + 5.f * v) * k, 260.f * k));
         const float y = sc.y * (0.55f + 0.45f * std::sqrt(v)) - drift + 120.f * k * w;
-        const bool near = i % 8 == 0;
-        const float r = near ? (5.f + 9.f * w) * k : (1.f + 3.2f * w * w) * k;
+        const bool close_up = i % 8 == 0;
+        const float r = close_up ? (5.f + 9.f * w) * k : (1.f + 3.2f * w * w) * k;
         const float twinkle = 0.55f + 0.45f * std::sin(static_cast<float>(t) * (0.4f + v) + i);
-        const float a = alpha * twinkle * (near ? 0.16f : 0.55f + 0.35f * w);
-        if (near)
+        const float a = alpha * twinkle * (close_up ? 0.16f : 0.55f + 0.35f * w);
+        if (close_up)
             for (int ring = 3; ring >= 1; ring--)
                 d->AddCircleFilled(ImVec2{x, y}, r * ring / 3.f, rgba(0xd6, 0xa8, 0x5c, a * 0.5f), 20);
         else

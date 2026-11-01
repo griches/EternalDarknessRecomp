@@ -1171,6 +1171,10 @@ static void hle_DVDReadAsyncPrio(CPUState* cpu) {
     u32 callback = hle_arg_u32(cpu, 4);
 
     u32 start = mem_read32(cpu, fi + DVD_FI_STARTADDR);
+    // A state saved during a movie opens nothing when it is loaded: the movie's
+    // own reads say it is playing (it is shown as video, and can fast-forward).
+    if (g_movie_file == 0u && dvd_in_directory("/fmv", start))
+        g_movie_file = fi;
     if (g_dvd_log)
         fprintf(stderr, "[dvd] read fi=0x%08X disc=0x%08X+0x%X len=0x%X (file 0x%X) addr=0x%08X "
                         "cb=0x%08X lr=0x%08X frame=%llu\n",
@@ -7250,7 +7254,7 @@ void hle_state_loaded(CPUState* cpu) {
     for (u32 i = 0; i < g_callback_count; i++)
         delay_callback(cpu, (g_callback_read + i) % HLE_CALLBACK_QUEUE_CAPACITY);
     unstick_disc_streams(cpu);
-    g_movie_file = 0u;  // a state saved during a movie: the next one sets it
+    g_movie_file = 0u;  // a movie in the state says so with its next read
 #ifdef ED_AURORA
     g_book.loaded = -1;  // the state's ARAM holds a book of either shape
     g_book.active = false;

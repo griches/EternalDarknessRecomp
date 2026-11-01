@@ -819,7 +819,7 @@ void build_options() {
     controls_row.section = "IV \u00b7 Controls";
     controls_row.page = 1;
     controls_row.note = "Left and right: the button layout. A: vibration, hold or toggle, "
-                        "stick deadzone and button mapping.";
+                        "stick deadzone, look inversion and button mapping.";
     controls_row.activate = [] {
         g_screen = Screen::Controls;
         g_selected = 0;
@@ -911,6 +911,14 @@ void build_controls() {
         settings_save();
     };
     g_rows.push_back(deadzone);
+
+    Row invert{"Invert first-person look", on_off(g_settings.invert_first_person)};
+    invert.note = "On: pushing up looks down, in the First person camera only.";
+    invert.change = [](int) {
+        g_settings.invert_first_person = !g_settings.invert_first_person;
+        settings_save();
+    };
+    g_rows.push_back(invert);
 
     g_rows.push_back(vibration_row());
 

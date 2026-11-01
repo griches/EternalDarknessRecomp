@@ -1267,7 +1267,8 @@ static void first_person(Vec3 eye, Vec3 target, Vec3 focus, Vec3 player, Vec3 k,
         } else if (!still) {
             const float dt = 1.0f / 60.0f;
             g_fp_yaw = remainderf(g_fp_yaw - g_stick_x * YAW_RATE * dt, 2.0f * PI);
-            g_fp_pitch = clampf(g_fp_pitch + g_stick_y * PITCH_RATE * dt, -1.2f, 1.2f);
+            const float look_y = g_settings.invert_first_person ? -g_stick_y : g_stick_y;
+            g_fp_pitch = clampf(g_fp_pitch + look_y * PITCH_RATE * dt, -1.2f, 1.2f);
         }
         float px = g_s_pivot.x, py = g_s_pivot.y, pz = g_s_pivot.z;
         spring(&px, &g_s_pivot_v.x, head.x, SMOOTH_FOLLOW, 3000.0f);

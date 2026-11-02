@@ -29,7 +29,8 @@ typedef struct {
 
 static PadSound g_sounds[] = {{14u}, {479u}, {595u}, {596u}, {597u}, {598u}, {599u}};
 #define PAD_SOUNDS (sizeof g_sounds / sizeof g_sounds[0])
-static bool g_any;
+static bool g_any;      // the controller's speaker plays them (the PS5)
+static bool g_decoded;  // read and decoded (every machine: insanity.cpp's whispers)
 
 static u32 be32(const u8* p) { return (u32)p[0] << 24 | (u32)p[1] << 16 | (u32)p[2] << 8 | p[3]; }
 static s16 be16(const u8* p) { return (s16)(p[0] << 8 | p[1]); }
@@ -70,7 +71,6 @@ static bool decode_dsp(const u8* data, u32 size, s16** out, u32* frames, u32* ra
 }
 
 void pad_sound_init(const char* disc_image_path) {
-#if defined(__PROSPERO__)
     FILE* f = disc_image_path != NULL ? fopen(disc_image_path, "rb") : NULL;
     if (f == NULL)
         return;
@@ -85,16 +85,28 @@ void pad_sound_init(const char* disc_image_path) {
         u8* data = (u8*)malloc(length);
         if (data != NULL && fseek(f, (long)start, SEEK_SET) == 0 && fread(data, 1, length, f) == length &&
             decode_dsp(data, length, &s->pcm, &s->frames, &s->rate))
-            g_any = true;
+            g_decoded = true;
         free(data);
     }
     fclose(f);
+#if defined(__PROSPERO__)
+    g_any = g_decoded;
     if (g_any)
         fprintf(stderr, "[pad sound] the door knock, the muttering and the phone's voice go to the controller's speaker\n");
-#else
-    (void)disc_image_path;
-    (void)decode_dsp;
 #endif
+}
+
+bool pad_sound_pcm(u32 stream, const s16** pcm, u32* frames, u32* rate) {
+    for (size_t i = 0; i < PAD_SOUNDS; i++) {
+        const PadSound* s = &g_sounds[i];
+        if (s->stream != stream || s->pcm == NULL)
+            continue;
+        *pcm = s->pcm;
+        *frames = s->frames;
+        *rate = s->rate;
+        return true;
+    }
+    return false;
 }
 
 bool pad_sound_available(void) { return g_any; }

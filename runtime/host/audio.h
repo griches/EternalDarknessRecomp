@@ -31,6 +31,10 @@ void audio_play_host_sound(const s16* samples, u32 count, u32 rate, float volume
 // that went out, repeated for `seconds`, sent at once (on the game thread,
 // while it is held).
 void audio_play_stuck(double loop_seconds, double seconds);
+// The rate sound goes out at, and stereo frames at it sent straight out at
+// the effects volume (a whisper while the game is held, a little a frame).
+u32 audio_out_rate(void);
+void audio_send_frames(s16* stereo, u32 frames);
 
 bool audio_mmio_contains(u32 address);
 u64  audio_mmio_read(u32 address, u8 size);

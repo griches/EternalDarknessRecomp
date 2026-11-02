@@ -365,6 +365,22 @@ void audio_play_stuck(double loop_seconds, double seconds) {
     }
 }
 
+// The rate sound goes out at (0 before the game has started its own).
+u32 audio_out_rate(void) { return dol_audio_dma_sample_rate(&g_audio_dma); }
+
+// Stereo frames of the host's own at audio_out_rate, straight out at the
+// effects volume (insanity.cpp: a whisper while the game is held, sent a
+// little at a time as the held frames pass).
+void audio_send_frames(s16* stereo, u32 frames) {
+    const u32 rate = dol_audio_dma_sample_rate(&g_audio_dma);
+    if (rate == 0u || frames == 0u)
+        return;
+    if (g_settings.effects_volume < 100)
+        for (u32 i = 0; i < frames * 2u; i++)
+            stereo[i] = (s16)((s32)stereo[i] * g_settings.effects_volume / 100);
+    send_out(stereo, frames, rate);
+}
+
 bool audio_ai_interrupt_pending(void) {
     return (g_ai_stream_control & (AICR_AIINT | AICR_AIINTMSK)) ==
            (AICR_AIINT | AICR_AIINTMSK);

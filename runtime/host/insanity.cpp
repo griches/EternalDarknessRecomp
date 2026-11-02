@@ -41,6 +41,11 @@ extern "C" int hle_game_mode(void);
 extern "C" void audio_play_host_sound(const int16_t* samples, uint32_t count, uint32_t rate, float volume);
 // audio.c: the last of the game's sound, stuck and repeating (a hung machine).
 extern "C" void audio_play_stuck(double loop_seconds, double seconds);
+// audio.c: the rate sound goes out at; stereo frames at it, straight out.
+extern "C" uint32_t audio_out_rate(void);
+extern "C" void audio_send_frames(int16_t* stereo, uint32_t frames);
+// pad_sound.c: a stream's decoded sound (the muttering, 595-599).
+extern "C" bool pad_sound_pcm(uint32_t stream, const int16_t** pcm, uint32_t* frames, uint32_t* rate);
 
 namespace insanity {
 namespace {
@@ -259,7 +264,8 @@ ImVec2 pointer() {
 
 // The spinning wait cursor: a glossy disc of colour bands turning, the
 // picture held still under it, as an app that has stopped answering.
-void draw_beach_ball(ImDrawList* d, ImVec2 c, float r, float turn) {
+// `blood` (0-1) drains its colours to dark reds.
+void draw_beach_ball(ImDrawList* d, ImVec2 c, float r, float turn, float blood = 0.f) {
     static const ImU32 kBands[] = {IM_COL32(0x2f, 0x8c, 0xf2, 0xff), IM_COL32(0x2c, 0xc1, 0xd8, 0xff),
                                    IM_COL32(0x5c, 0xc8, 0x3c, 0xff), IM_COL32(0xf6, 0xd3, 0x2b, 0xff),
                                    IM_COL32(0xf5, 0x8f, 0x23, 0xff), IM_COL32(0xea, 0x3e, 0x3e, 0xff),
@@ -286,12 +292,22 @@ void draw_beach_ball(ImDrawList* d, ImVec2 c, float r, float turn) {
             const float a = to + 0.9f * k;
             d->PathLineTo(ImVec2{c.x + std::cos(a) * r * k, c.y + std::sin(a) * r * k});
         }
-        d->PathFillConcave(kBands[band]);
+        ImU32 colour = kBands[band];
+        if (blood > 0.f) {
+            const float to_r = band % 2 == 0 ? 0x8a : 0x52, to_g = band % 2 == 0 ? 0x0c : 0x04;
+            const auto mix = [&](int shift, float to) {
+                const float from = static_cast<float>((colour >> shift) & 0xffu);
+                return static_cast<ImU32>(from + (to - from) * blood) << shift;
+            };
+            colour = mix(IM_COL32_R_SHIFT, to_r) | mix(IM_COL32_G_SHIFT, to_g) | mix(IM_COL32_B_SHIFT, to_g) |
+                     (colour & IM_COL32_A_MASK);
+        }
+        d->PathFillConcave(colour);
     }
     // Gloss: a soft light up and left, a darker rim.
     for (int i = 6; i >= 1; i--)
         d->AddCircleFilled(ImVec2{c.x - r * 0.28f, c.y - r * 0.32f}, r * 0.12f * i,
-                           IM_COL32(0xff, 0xff, 0xff, 0x0c), 32);
+                           IM_COL32(0xff, 0xff, 0xff, static_cast<int>(0x0c * (1.f - 0.7f * blood))), 32);
     d->AddCircle(c, r, IM_COL32(0, 0, 0, 0x60), 48, std::max(1.f, r * 0.06f));
 }
 
@@ -301,10 +317,79 @@ struct Step {
     bool press;    // a button or key, pressed this frame
 };
 
+// A whisper while the game is held (no sound of its own goes out then): one
+// of the muttering voices of a mind going (streams 595-599), sent out a frame
+// at a time as the held frames pass, fading away by `fade_end`.
+struct Whisper {
+    const int16_t* pcm = nullptr;
+    uint32_t count = 0, rate = 0;
+    double start = 0.0, fade_end = 0.0, sent = 0.0;  // seconds; `sent` into the sound
+
+    void begin(double t, double end) {
+        static unsigned pick = 0;
+        static const uint32_t kStreams[] = {599u, 597u, 598u, 596u, 595u};
+        pcm = nullptr;
+        for (int i = 0; i < 5 && pcm == nullptr; i++)
+            if (!pad_sound_pcm(kStreams[(pick + i) % 5], &pcm, &count, &rate))
+                pcm = nullptr;
+        pick++;
+        start = t;
+        fade_end = end;
+        sent = 0.0;
+    }
+
+    // Up to a little past `t`; nothing after the fade (or the sound) ends.
+    void pump(double t) {
+        const uint32_t out = audio_out_rate();
+        if (pcm == nullptr || out == 0u || rate == 0u)
+            return;
+        const double length = static_cast<double>(count) / rate;
+        const double until = std::min({t - start + 0.08, fade_end - start, length});
+        int16_t chunk[256 * 2];
+        while (sent < until) {
+            const uint32_t n = static_cast<uint32_t>(std::min(256.0, std::ceil((until - sent) * out)));
+            if (n == 0u)
+                break;
+            for (uint32_t i = 0; i < n; i++) {
+                const double at = sent + static_cast<double>(i) / out;
+                const double pos = at * rate;
+                const uint32_t a = std::min(static_cast<uint32_t>(pos), count - 1u), b = std::min(a + 1u, count - 1u);
+                const double f = pos - std::floor(pos);
+                const double v = pcm[a] + (pcm[b] - pcm[a]) * f;
+                // In softly, out over the last 0.35 s before the fade's end.
+                const double gain = 0.85 * std::min(1.0, at / 0.15) *
+                                    std::clamp((fade_end - start - at) / 0.35, 0.0, 1.0);
+                const int16_t sample = static_cast<int16_t>(std::clamp(v * gain, -32768.0, 32767.0));
+                chunk[i * 2] = sample;
+                chunk[i * 2 + 1] = sample;
+            }
+            audio_send_frames(chunk, n);
+            sent += static_cast<double>(n) / out;
+        }
+    }
+};
+
+// It hangs, then it is not the Mac's: the ball slows and stops, its colours
+// drain to blood, something whispers; then her line, as the game's own end.
 bool mac_beach_ball(const Step& s) {
+    constexpr double kHang = 1.8, kSlow = 2.0, kEnd = 4.4;
+    constexpr double kSpin = 2.0 * kPi * 0.9;  // radians a second at first
+    static Whisper whisper;
+    static bool whispering = false;
+    if (s.first)
+        whispering = false;
+    if (!whispering && s.t >= kHang) {
+        whisper.begin(s.t, kEnd);
+        whispering = true;
+    }
+    if (whispering)
+        whisper.pump(s.t);
+    const double u = std::clamp(s.t - kHang, 0.0, kSlow);
+    const double turn = kSpin * (std::min(s.t, kHang) + u - u * u / (2.0 * kSlow));
+    const float blood = static_cast<float>(std::clamp((s.t - kHang) / 1.4, 0.0, 1.0));
     const float r = 14.f * dp();
-    draw_beach_ball(canvas(), pointer(), r, static_cast<float>(s.t * 2.0 * kPi * 0.9));
-    return s.t < 5.5;
+    draw_beach_ball(canvas(), pointer(), r, static_cast<float>(turn), blood);
+    return s.t < kEnd;
 }
 
 // A push button as the Mac draws one in dark mode (the default one blue).
@@ -616,21 +701,39 @@ bool screen_lines(const Step& s) {
 
 // Steam's own "not responding" box in its Deck look (dark slate, the focused
 // button light), over the held picture, with its button hints along the
-// bottom. Any button: Wait, and the game goes on.
+// bottom. Then it is not Steam's: its words change under you, something
+// whispers, and Force Quit is Wait too. Any button: Wait, and the game goes on.
 bool deck_not_responding(const Step& s) {
+    constexpr double kHeld = 1.5, kTurn = 2.7, kTimeout = 7.5;
     static double answered = -1.0;
-    if (s.first)
+    static Whisper whisper;
+    static bool whispering = false;
+    if (s.first) {
         answered = -1.0;
-    if (s.t < 2.5)
+        whispering = false;
+    }
+    if (s.t < kHeld)
         return true;  // held: the game has stopped answering
-    if (answered < 0.0 && ((s.press && s.t > 3.2) || s.t > 25.0))
+    if (!whispering && s.t >= kTurn) {
+        whisper.begin(s.t, kTimeout + 0.12);
+        whispering = true;
+    }
+    if (answered < 0.0 && ((s.press && s.t > kTurn + 0.5) || s.t > kTimeout)) {
         answered = s.t;
+        whisper.fade_end = std::min(whisper.fade_end, s.t + 0.12);
+    }
+    if (whispering)
+        whisper.pump(s.t);
     if (answered >= 0.0 && s.t > answered + 0.12)
         return false;
     ImDrawList* d = canvas();
     const ImVec2 sc = screen();
     const float k = dp();
-    const float fade = static_cast<float>(std::min(1.0, (s.t - 2.5) / 0.15));
+    const float fade = static_cast<float>(std::min(1.0, (s.t - kHeld) / 0.15));
+    // The change: a flicker of the words, as if rewritten.
+    const bool turned = s.t >= kTurn;
+    const double since = s.t - kTurn;
+    const float words = turned && since < 0.25 ? static_cast<float>(std::fabs(std::cos(since * 40.0))) : 1.f;
     d->AddRectFilled(ImVec2{0, 0}, sc, rgba(0x0e, 0x14, 0x1b, 0.72f * fade));
     const float w = std::min(640.f * k, sc.x - 48.f * k), h = 236.f * k;
     const ImVec2 a{(sc.x - w) * 0.5f, (sc.y - h) * 0.5f - 20.f * k}, b{a.x + w, a.y + h};
@@ -642,11 +745,13 @@ bool deck_not_responding(const Step& s) {
     const float pad = 32.f * k;
     d->AddText(bold, 26.f * k, ImVec2{a.x + pad, a.y + 28.f * k}, rgba(0xff, 0xff, 0xff, fade),
                "Eternal Darkness is not responding");
-    d->AddText(ui, 17.f * k, ImVec2{a.x + pad, a.y + 72.f * k}, rgba(0xb8, 0xbc, 0xbf, fade),
-               "You can wait for it to respond, or force it to quit. Any progress since you last saved will be lost.",
+    d->AddText(ui, 17.f * k, ImVec2{a.x + pad, a.y + 72.f * k}, rgba(0xb8, 0xbc, 0xbf, fade * words),
+               turned ? "You can wait for it to respond. It has been waiting for you."
+                      : "You can wait for it to respond, or force it to quit. Any progress since you last saved "
+                        "will be lost.",
                nullptr, w - 2.f * pad);
     const float bh = 44.f * k, bw = (w - 2.f * pad - 12.f * k) * 0.5f, by = b.y - pad - bh;
-    const char* labels[2] = {"Wait", "Force Quit"};
+    const char* labels[2] = {"Wait", turned ? "Wait" : "Force Quit"};
     for (int i = 0; i < 2; i++) {
         const ImVec2 ba{a.x + pad + i * (bw + 12.f * k), by}, bb{ba.x + bw, by + bh};
         const bool focus = i == 0;
@@ -656,7 +761,7 @@ bool deck_not_responding(const Step& s) {
                          2.f * k);
         const ImVec2 ls = text_size(ui, 17.f * k, labels[i]);
         d->AddText(focus ? bold : ui, 17.f * k, ImVec2{ba.x + (bw - ls.x) * 0.5f, ba.y + (bh - ls.y) * 0.5f},
-                   focus ? rgba(0x0e, 0x14, 0x1b, fade) : rgba(0xdc, 0xde, 0xdf, fade), labels[i]);
+                   focus ? rgba(0x0e, 0x14, 0x1b, fade) : rgba(0xdc, 0xde, 0xdf, fade * words), labels[i]);
     }
     // The hints bar: A Select, B Back.
     const float bar = 44.f * k;
@@ -1445,7 +1550,8 @@ struct Effect {
 const Effect kEffects[] = {
     {"Save states wiped", "Next time our menu opens, its save slots are deleted one by one. They come back.",
      kEvery, Kind::Menu, nullptr},
-    {"Mac: spinning wait cursor", "The game stops answering: the picture holds, the beach ball spins.", kMac,
+    {"Mac: spinning wait cursor",
+     "The game stops answering: the picture holds, the beach ball spins, slows, bleeds red, something whispers.", kMac,
      Kind::Modal, mac_beach_ball},
     {"Mac: quit unexpectedly", "The game is gone and the Mac's crash box asks to reopen it.", kMac, Kind::Modal,
      mac_quit_unexpectedly, nullptr, nullptr, true},
@@ -1459,7 +1565,8 @@ const Effect kEffects[] = {
      kWindows, Kind::Overlay, win_pointer},
     {"PC: screen lines", "As you play, a few thin coloured lines appear down the screen, flicker, and go.",
      kWindows, Kind::Overlay, screen_lines},
-    {"Deck: not responding", "The game stops answering and Steam offers to force it to quit. Any button waits.",
+    {"Deck: not responding",
+     "The game stops answering and Steam offers to force it to quit, until its words change. Any button waits.",
      kDeck | kLinux, Kind::Modal, deck_not_responding},
     {"Deck: screen lines", "As you play, a few thin coloured lines appear down the screen, flicker, and go.",
      kDeck | kLinux, Kind::Overlay, screen_lines},

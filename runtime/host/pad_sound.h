@@ -21,4 +21,8 @@ bool pad_sound_available(void);
 // controller plays it, and the game's own should stay silent.
 bool pad_sound_stream(u32 stream, u32 volume);
 
+// A stream's decoded sound (mono), on any machine: the muttering for the
+// recomp's own insanity effects (insanity.cpp). False if not read.
+bool pad_sound_pcm(u32 stream, const s16** pcm, u32* frames, u32* rate);
+
 #endif

@@ -37,6 +37,11 @@ std::string key_label(int action);
 // connected controller's family; text where there is no icon.
 std::string pad_glyphs(int action);
 std::string key_glyph(int action);
+// The mouse button or wheel direction bound to an action, as a name and icon.
+std::string mouse_label(int action);
+std::string mouse_glyph(int action);
+// A mouse button was bound in the last half second (its release is not a click).
+bool mouse_bound_recently();
 // "Xbox controller", "DualSense", ... or "No controller".
 std::string controller_name();
 

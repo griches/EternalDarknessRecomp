@@ -953,11 +953,14 @@ void build_mapping() {
     for (int a = 0; a < controls::kActionCount; a++) {
         Row r{controls::action_name(a)};
         if (controls::capturing() && controls::capture_action() == a) {
-            r.value = "Press a button or key...";
-            r.note = "Waiting for a controller button, trigger or key (Esc cancels).";
+            r.value = "Press a button, key or mouse button...";
+            r.note = "Waiting for a controller button, trigger, key, mouse button or wheel (Esc cancels).";
         } else {
-            r.value_rml = controls::pad_glyphs(a) + "<span class=\"sep\"></span>" +
-                          controls::key_glyph(a);
+            // A column each for the controller, the key and the mouse, so the
+            // icons line up down the page whatever each row holds.
+            r.value_rml = "<span class=\"col col-pad\">" + controls::pad_glyphs(a) +
+                          "</span><span class=\"col col-key\">" + controls::key_glyph(a) +
+                          "</span><span class=\"col col-mouse\">" + controls::mouse_glyph(a) + "</span>";
             r.note = std::string("Select to rebind (switches to Custom). Layout: ") +
                      controls::layout_name(controls::layout()) + ".";
         }
@@ -1438,6 +1441,10 @@ public:
                 render();
             }
         } else if (event.GetId() == Rml::EventId::Click) {
+            // The left button that was just bound lets go as a click: not
+            // a choice of row (it would start binding again).
+            if (controls::mouse_bound_recently())
+                return;
             g_selected = index;
             activate_selected();
             build_rows();
@@ -1726,11 +1733,13 @@ extern "C" bool frontend_run_launcher(const char* default_iso, char* iso_out,
                        g_discs[g_disc].path == g_settings.disc);
     g_screen = Screen::Launcher;
     g_selected = g_disc_on_main && disc_playable() ? 1 : 0;
-    // ED_MENU_OPEN=options or controls[,row] (testing): the launcher opens on
+    // ED_MENU_OPEN=options, controls or mapping[,row] (testing): the launcher opens on
     // that page, at that row.
     if (const char* page = std::getenv("ED_MENU_OPEN"); page != nullptr) {
         g_options_return = Screen::Launcher;
-        g_screen = std::strncmp(page, "controls", 8) == 0 ? Screen::Controls : Screen::Options;
+        g_screen = std::strncmp(page, "controls", 8) == 0  ? Screen::Controls
+                   : std::strncmp(page, "mapping", 7) == 0 ? Screen::Mapping
+                                                           : Screen::Options;
         const char* comma = std::strchr(page, ',');
         g_selected = comma != nullptr ? std::atoi(comma + 1) : 0;
     }

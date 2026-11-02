@@ -222,6 +222,31 @@ img.glyph {
 	vertical-align: middle;
 }
 
+/* Button mapping's columns (controller, key, mouse): fixed widths, centred. */
+.col {
+	display: inline-block;
+	text-align: center;
+	vertical-align: middle;
+}
+
+.col-pad {
+	min-width: 80dp;
+}
+
+.col-key,
+.col-mouse {
+	min-width: 52dp;
+	margin-left: 10dp;
+}
+
+.col img.glyph {
+	margin: 0 2dp;
+}
+
+.col .keycap {
+	margin-left: 0;
+}
+
 .sep {
 	display: inline-block;
 	width: 18dp;

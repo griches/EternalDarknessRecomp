@@ -52,7 +52,12 @@ const char* const kNativeIds[kNativeCount] = {
 struct Binding {
     int pad[2];  // up to two controller inputs (kNone when unused)
     int key;     // SDL scancode (0 when none)
+    int mouse;   // a mouse button (1 left, 2 middle, 3 right, 4 back, 5 forward,
+                 // 6.. more), a wheel direction (kWheelUp..), or 0
 };
+
+// The wheel as buttons for a binding, after the 31 buttons SDL can report.
+enum { kWheelUp = 32, kWheelDown, kWheelLeft, kWheelRight, kMouseLimit };
 
 // GameCube output of each action.
 const unsigned short kGcButton[kActionCount] = {
@@ -78,6 +83,11 @@ constexpr int kKeys[kActionCount] = {
     SDL_SCANCODE_Q, SDL_SCANCODE_E, SDL_SCANCODE_R, SDL_SCANCODE_RETURN,
     SDL_SCANCODE_UP, SDL_SCANCODE_DOWN, SDL_SCANCODE_LEFT, SDL_SCANCODE_RIGHT,
 };
+
+// The mouse, the same in every layout until it is rebound: the left button
+// attacks, the right targets, the middle acts (looks closely, opens), the
+// side buttons reload (back) and quickcast (forward).
+constexpr int kMouse[kActionCount] = {1, 2, 0, 5, 4, 0, 3, 0, 0, 0, 0, 0};
 
 // GameCube positions, as Aurora maps a controller by default.
 const int kOriginalPad[kActionCount][2] = {
@@ -125,6 +135,8 @@ SDL_Gamepad* g_pad = nullptr;
 
 int g_capture = -1;         // action waiting for an input, or -1
 Uint64 g_capture_deadline = 0;
+unsigned g_capture_mouse = 0;  // g_mouse_presses when the capture began
+Uint64 g_mouse_bound_at = 0;
 bool g_capture_armed = false;  // every input released since capture began
 
 // The controller inputs an action reads now: the Tome's while it is open
@@ -283,17 +295,76 @@ void drive_virtual_pad() {
 // Tome: anywhere but play, where a click would act): the left button is A,
 // the right B, and the wheel steps up and down. Not while the mouse turns the
 // first person view, nor when the pointer is outside the window.
-std::atomic<int> g_wheel{0};
+std::atomic<int> g_wheel{0};  // menus: notches waiting, + up
+// In play: each wheel direction's notches waiting (up, down, left, right);
+// and for capturing a binding, a count of presses and notches, and the last.
+std::atomic<int> g_notches[4];
+std::atomic<unsigned> g_mouse_presses{0};
+std::atomic<int> g_mouse_last{0};
 
 bool SDLCALL wheel_watch(void*, SDL_Event* event) {
-    if (event->type == SDL_EVENT_MOUSE_WHEEL && event->wheel.y != 0.0f)
-        g_wheel.fetch_add(event->wheel.y > 0.0f ? 1 : -1, std::memory_order_relaxed);
+    if (event->type == SDL_EVENT_MOUSE_WHEEL) {
+        // Whole notches (a trackpad's scroll adds up to them), as the wheel
+        // turns: a flipped (natural scrolling) report is turned back.
+        const int flip = event->wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -1 : 1;
+        const int y = event->wheel.integer_y * flip, x = event->wheel.integer_x * flip;
+        if (y != 0) {
+            g_wheel.fetch_add(y > 0 ? 1 : -1, std::memory_order_relaxed);
+            g_notches[y > 0 ? 0 : 1].fetch_add(1, std::memory_order_relaxed);
+            g_mouse_last.store(y > 0 ? kWheelUp : kWheelDown, std::memory_order_relaxed);
+            g_mouse_presses.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (x != 0) {
+            g_notches[x > 0 ? 3 : 2].fetch_add(1, std::memory_order_relaxed);
+            g_mouse_last.store(x > 0 ? kWheelRight : kWheelLeft, std::memory_order_relaxed);
+            g_mouse_presses.fetch_add(1, std::memory_order_relaxed);
+        }
+    } else if (event->type == SDL_EVENT_MOUSE_BUTTON_DOWN && event->button.button >= 1 &&
+               event->button.button < kWheelUp) {
+        g_mouse_last.store(event->button.button, std::memory_order_relaxed);
+        g_mouse_presses.fetch_add(1, std::memory_order_relaxed);
+    }
     return true;
 }
 
-void mouse_to_pad(DolPadState& s) {
+void watch_mouse() {
     static const bool watching = SDL_AddEventWatch(wheel_watch, nullptr);
     (void)watching;
+}
+
+// In play, the mouse's bound buttons and wheel, read once a pad read: each
+// wheel notch holds its direction for four reads and lets go for two.
+SDL_MouseButtonFlags g_mouse_buttons = 0;
+bool g_wheel_held[4];
+
+void read_play_mouse(bool in_play) {
+    watch_mouse();
+    static int frames[4];
+    g_mouse_buttons = in_play && SDL_GetMouseFocus() != nullptr ? SDL_GetMouseState(nullptr, nullptr) : 0;
+    for (int d = 0; d < 4; d++) {
+        if (!in_play) {
+            g_notches[d].store(0, std::memory_order_relaxed);
+            frames[d] = 0;
+        } else if (frames[d] == 0 && g_notches[d].load(std::memory_order_relaxed) > 0) {
+            g_notches[d].fetch_sub(1, std::memory_order_relaxed);
+            frames[d] = 6;
+        }
+        g_wheel_held[d] = frames[d] > 2;
+        if (frames[d] > 0)
+            frames[d]--;
+    }
+}
+
+bool mouse_down(int input) {
+    if (input >= 1 && input < kWheelUp)
+        return (g_mouse_buttons & SDL_BUTTON_MASK(input)) != 0;
+    if (input >= kWheelUp && input < kMouseLimit)
+        return g_wheel_held[input - kWheelUp];
+    return false;
+}
+
+void mouse_to_pad(DolPadState& s) {
+    watch_mouse();
     static int wheel_frames = 0, wheel_dir = 0;
     const bool menus = g_game_menu.load(std::memory_order_relaxed) || hle_game_mode() != 2;
     if (!menus || camera_mouse_look() || SDL_GetMouseFocus() == nullptr) {
@@ -407,7 +478,7 @@ const char* native_name(int n) {
 void load_preset(int layout) {
     const int (*table)[2] = layout == kModern ? kModernPad : kOriginalPad;
     for (int a = 0; a < kActionCount; a++)
-        g_bindings[a] = {{table[a][0], table[a][1]}, kKeys[a]};
+        g_bindings[a] = {{table[a][0], table[a][1]}, kKeys[a], kMouse[a]};
 }
 
 int native_from_id(const std::string& id) {
@@ -434,6 +505,8 @@ std::string serialize() {
                 first = false;
             }
         out += ':' + std::to_string(g_bindings[a].key);
+        if (g_bindings[a].mouse > 0)
+            out += ":m" + std::to_string(g_bindings[a].mouse);
     }
     return out;
 }
@@ -459,7 +532,13 @@ void parse(const char* text) {
                 action = a;
         if (action < 0)
             continue;
-        Binding b{{kNone, kNone}, std::atoi(item.c_str() + colon + 1)};
+        // A saved layout from before the mouse keeps the mouse's defaults.
+        Binding b{{kNone, kNone}, std::atoi(item.c_str() + colon + 1), kMouse[action]};
+        if (const size_t m = item.find(":m", colon + 1); m != std::string::npos) {
+            b.mouse = std::atoi(item.c_str() + m + 2);
+            if (b.mouse < 0 || b.mouse >= kMouseLimit)
+                b.mouse = 0;
+        }
         const std::string pads = item.substr(eq + 1, colon - eq - 1);
         const size_t plus = pads.find('+');
         b.pad[0] = native_from_id(pads.substr(0, plus));
@@ -741,6 +820,9 @@ bool read_pad(DolPadState* state) {
         g_still_since = now;
     if (g_toggled[kSprint] && g_still_since != 0 && now - g_still_since > 300)
         g_toggled[kSprint] = false;
+    // The mouse's bindings in play only; the game's menus have their own
+    // (mouse_to_pad).
+    read_play_mouse(!g_game_menu.load(std::memory_order_relaxed) && !tome && hle_game_mode() == 2);
     for (int a = 0; a < kActionCount; a++) {
         // In toggle mode only the first button and the key toggle; a second
         // button (Modern's bumpers) is a plain hold, so it pages menus once.
@@ -750,6 +832,8 @@ bool read_pad(DolPadState* state) {
         int v = live_value(pad, inputs[0]);
         const int held = live_value(pad, inputs[1]);
         if (key_down(g_bindings[a].key) && !(fast && g_bindings[a].key == SDL_SCANCODE_TAB))
+            v = 255;
+        if (mouse_down(g_bindings[a].mouse))
             v = 255;
         const bool toggles = !tome && toggle_mode(a);
         if (!toggles)
@@ -856,6 +940,20 @@ std::string key_label(int action) {
     return name != nullptr && name[0] != '\0' ? name : "?";
 }
 
+std::string mouse_label(int action) {
+    const int m = g_bindings[action].mouse;
+    static const char* const kNames[] = {"", "Left button", "Middle button", "Right button", "Back button",
+                                         "Forward button"};
+    if (m <= 0)
+        return "-";
+    if (m < 6)
+        return kNames[m];
+    if (m < kWheelUp)
+        return "Mouse " + std::to_string(m);
+    static const char* const kWheel[] = {"Wheel up", "Wheel down", "Wheel left", "Wheel right"};
+    return kWheel[m - kWheelUp];
+}
+
 namespace {
 std::string glyph_img(const std::string& file, const std::string& alt) {
     // Paths are relative to res/ui/menu.rml: the ink versions, drawn for the
@@ -919,6 +1017,21 @@ std::string key_glyph(int action) {
     if (file.empty())
         return "<span class=\"keycap\">" + key_label(action) + "</span>";
     return glyph_img(file, key_label(action));
+}
+
+std::string mouse_glyph(int action) {
+    const int m = g_bindings[action].mouse;
+    static const char* const kIcons[] = {"", "mouse_left", "mouse_scroll", "mouse_right", "mouse_side_back",
+                                         "mouse_side_forward"};
+    if (m <= 0)
+        return "<span class=\"unbound\">-</span>";
+    if (m < 6)
+        return glyph_img(std::string("kb/") + kIcons[m], mouse_label(action));
+    if (m == kWheelUp || m == kWheelDown)
+        return glyph_img(m == kWheelUp ? "kb/mouse_scroll_up" : "kb/mouse_scroll_down", mouse_label(action));
+    // Buttons past the fifth and the wheel's sides: the mouse and a name.
+    const std::string name = m < kWheelUp ? std::to_string(m) : m == kWheelLeft ? "Wheel left" : "Wheel right";
+    return glyph_img("kb/mouse", mouse_label(action)) + "<span class=\"keycap\">" + name + "</span>";
 }
 
 std::string glyph_set() {
@@ -1054,12 +1167,15 @@ void begin_capture(int action) {
         custom_from(g_layout);  // start Custom from what is in use
         g_layout = kCustom;
     }
+    watch_mouse();
     g_capture = action;
     g_capture_armed = false;
     g_capture_deadline = SDL_GetTicks() + 6000;
+    g_capture_mouse = g_mouse_presses.load(std::memory_order_relaxed);
 }
 
 bool capturing() { return g_capture >= 0; }
+bool mouse_bound_recently() { return g_mouse_bound_at != 0 && SDL_GetTicks() - g_mouse_bound_at < 500; }
 int capture_action() { return g_capture; }
 
 bool poll_capture() {
@@ -1075,6 +1191,15 @@ bool poll_capture() {
             if (pressed == kNone)
                 pressed = n;
         }
+    }
+    // A mouse button or a turn of the wheel since the capture began (the click
+    // that chose the row went down before it).
+    if (g_mouse_presses.load(std::memory_order_relaxed) != g_capture_mouse) {
+        g_bindings[g_capture].mouse = g_mouse_last.load(std::memory_order_relaxed);
+        g_mouse_bound_at = SDL_GetTicks();
+        g_capture = -1;
+        save();
+        return true;
     }
     if (!g_capture_armed) {
         // Wait for the button that started the capture to be let go.

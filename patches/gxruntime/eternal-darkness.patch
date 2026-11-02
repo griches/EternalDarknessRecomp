@@ -10599,7 +10599,7 @@ index 02adbe1..bcc38f3 100644
  }
  
 diff --git a/graphics/aurora/lib/rmlui.cpp b/graphics/aurora/lib/rmlui.cpp
-index 50dbb71..00e161b 100644
+index 50dbb71..50019cf 100644
 --- a/graphics/aurora/lib/rmlui.cpp
 +++ b/graphics/aurora/lib/rmlui.cpp
 @@ -51,10 +51,10 @@ Rml::Vector2i dimensions_from_viewport(const gfx::Viewport& viewport) noexcept {
@@ -10616,6 +10616,28 @@ index 50dbb71..00e161b 100644
  }
  
  void sync_context_metrics(Rml::Vector2i dimensions) noexcept {
+@@ -390,6 +390,21 @@ void set_input_type(InputType type) noexcept {
+ }
+ 
+ void handle_event(SDL_Event& event) noexcept {
++  // AURORA_MOUSE_LOG=1 (testing): what becomes of the mouse's events.
++  static const bool mouseLog = std::getenv("AURORA_MOUSE_LOG") != nullptr;
++  if (mouseLog && (event.type == SDL_EVENT_MOUSE_MOTION || event.type == SDL_EVENT_MOUSE_BUTTON_DOWN)) {
++    static unsigned n = 0;
++    const bool motion = event.type == SDL_EVENT_MOUSE_MOTION;
++    const float x = motion ? event.motion.x : event.button.x, y = motion ? event.motion.y : event.button.y;
++    if (!motion || n++ % 20 == 0) {
++      const MappedPoint mapped = map_window_point_to_content(x, y);
++      Rml::Element* hover = g_context != nullptr ? g_context->GetHoverElement() : nullptr;
++      std::fprintf(stderr, "[mouse] %s window %.0f,%.0f -> content %.0f,%.0f inside %d context %d imgui %d hover %s\n",
++                   motion ? "move" : "click", x, y, mapped.position.x, mapped.position.y, mapped.inside,
++                   g_context != nullptr, g_context != nullptr && imgui::wants_capture_event(event),
++                   hover != nullptr ? (hover->GetId().empty() ? hover->GetTagName().c_str() : hover->GetId().c_str()) : "-");
++    }
++  }
+   if (g_context == nullptr || imgui::wants_capture_event(event)) {
+     return;
+   }
 diff --git a/graphics/aurora/lib/webgpu/gpu.cpp b/graphics/aurora/lib/webgpu/gpu.cpp
 index 7aff76e..4b3892f 100644
 --- a/graphics/aurora/lib/webgpu/gpu.cpp

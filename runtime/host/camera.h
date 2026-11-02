@@ -18,6 +18,11 @@ int camera_mode(void);
 // while it turns the camera, whether the player is aiming (R held), and
 // whether the game is in play (not a cutscene or the Tome).
 void camera_set_stick(float x, float y, bool aiming, bool play);
+// First person mouse look: whether the mouse should turn the view now (first
+// person, in play, the Tome shut), and the pointer's movement in pixels from
+// the main thread (frontend.cpp), used at the camera's next update.
+bool camera_mouse_look(void);
+void camera_add_mouse(float dx, float dy);
 // From hle.c: the player object's pointer, at r13 + offset (0: not found).
 void camera_set_player_offset(int offset);
 // From hle.c: the game's own line test against the room's walls, floors and

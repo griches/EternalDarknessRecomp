@@ -65,6 +65,8 @@ body.spread .page {
 	right: 13dp;
 	bottom: 13dp;
 	border: 1dp #7a201266;
+	/* It lies over the whole page: without this the mouse lands on it, not the rows. */
+	pointer-events: none;
 }
 
 #emblem,
@@ -183,6 +185,16 @@ body.branded #heading {
 	font-size: 18dp;
 	color: #6a4a2a;
 	text-align: center;
+}
+
+/* The build, small and faint in the corner. */
+#version {
+	position: absolute;
+	right: 20dp;
+	bottom: 18dp;
+	font-size: 13dp;
+	color: #a0866080;
+	pointer-events: none;
 }
 
 #hint {

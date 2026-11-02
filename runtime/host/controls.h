@@ -85,6 +85,9 @@ void capture_key(int sdl_scancode);
 bool capturing();
 int capture_action();
 
+// Whether the game's own menu (inventory, Tome) is open.
+bool game_menu_open();
+
 }  // namespace controls
 #endif
 

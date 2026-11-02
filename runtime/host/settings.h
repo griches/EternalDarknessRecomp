@@ -40,7 +40,8 @@ typedef struct {
     int stick_deadzone[3];  // percent of the stick's travel ignored, per layout
     bool vibration;
     int camera;           // 0 the game's own, 2 third person, 3 first person (camera.h)
-    bool invert_first_person;  // first person: stick up looks down
+    bool invert_first_person;  // first person: stick (and mouse) up looks down
+    int mouse_sensitivity;     // first person mouse look, 1..20
     char controls_custom[512];  // custom bindings (controls.cpp format)
     char disc[1024];      // last disc image chosen in the launcher
 } Settings;

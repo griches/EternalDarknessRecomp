@@ -12,6 +12,7 @@
 #include "host/report.h"
 #include "host/settings.h"
 #include "host/texpack.h"
+#include "ed_build_id.h"
 
 #include <aurora/gfx.h>
 #include <aurora/imgui.h>
@@ -913,12 +914,20 @@ void build_controls() {
     g_rows.push_back(deadzone);
 
     Row invert{"Invert first-person look", on_off(g_settings.invert_first_person)};
-    invert.note = "On: pushing up looks down, in the First person camera only.";
+    invert.note = "On: pushing the stick or the mouse up looks down, in the First person camera only.";
     invert.change = [](int) {
         g_settings.invert_first_person = !g_settings.invert_first_person;
         settings_save();
     };
     g_rows.push_back(invert);
+
+    Row sensitivity{"Mouse sensitivity", std::to_string(g_settings.mouse_sensitivity)};
+    sensitivity.note = "How far the mouse turns the First person camera.";
+    sensitivity.change = [](int dir) {
+        g_settings.mouse_sensitivity = std::clamp(g_settings.mouse_sensitivity + dir, 1, 20);
+        settings_save();
+    };
+    g_rows.push_back(sensitivity);
 
     g_rows.push_back(vibration_row());
 
@@ -1483,6 +1492,8 @@ bool ensure_ui() {
                      res.c_str());
         return false;
     }
+    if (Rml::Element* version = g_doc->GetElementById("version"); version != nullptr)
+        version->SetInnerRML(std::string("Version ") + ED_BUILD_VERSION);
     context->GetRootElement()->AddEventListener(Rml::EventId::Keydown, &g_key_listener);
     Rml::Element* menu = g_doc->GetElementById("book");
     menu->AddEventListener(Rml::EventId::Click, &g_listener);
@@ -1492,9 +1503,54 @@ bool ensure_ui() {
     return true;
 }
 
+// First person: the mouse turns the view. While it does, the pointer is held
+// in the window and hidden (relative mode); a menu (ours or the game's), the
+// Tome, photo mode or another window having focus lets it go.
+// ED_MOUSE_TEST=after_ms,for_ms,dx,dy (testing): moves the "mouse" by dx,dy
+// each frame for for_ms, after_ms in, while it would turn the view.
+SDL_Window* g_mouse_window = nullptr;
+
+void update_mouse_look(bool menu) {
+    const bool want = !menu && camera_mouse_look() && !controls::game_menu_open() && !frontend_photo_active();
+    SDL_Window* focus = SDL_GetKeyboardFocus();
+    const bool grab = want && focus != nullptr;
+    float dx = 0.f, dy = 0.f;
+    if (grab && g_mouse_window == nullptr) {
+        SDL_SetWindowRelativeMouseMode(focus, true);
+        g_mouse_window = focus;
+        SDL_GetRelativeMouseState(&dx, &dy);  // movement from before is not a look
+        dx = dy = 0.f;
+    } else if (!grab && g_mouse_window != nullptr) {
+        SDL_SetWindowRelativeMouseMode(g_mouse_window, false);
+        g_mouse_window = nullptr;
+    } else if (g_mouse_window != nullptr) {
+        SDL_GetRelativeMouseState(&dx, &dy);
+    }
+    static Uint64 test_from = 0, test_until = 0;
+    static float test_dx = 0.f, test_dy = 0.f;
+    static const bool test = [] {
+        const char* t = std::getenv("ED_MOUSE_TEST");
+        unsigned long after = 0, span = 0;
+        if (t == nullptr || std::sscanf(t, "%lu,%lu,%f,%f", &after, &span, &test_dx, &test_dy) != 4)
+            return false;
+        test_from = SDL_GetTicks() + after;
+        test_until = test_from + span;
+        return true;
+    }();
+    if (test && want && SDL_GetTicks() >= test_from && SDL_GetTicks() < test_until) {
+        dx += test_dx;
+        dy += test_dy;
+    }
+    if (want && (dx != 0.f || dy != 0.f))
+        camera_add_mouse(dx, dy);
+}
+
 // The mouse pointer hides after two seconds without moving or clicking, in the
 // game and the menus, and shows again as soon as the mouse moves.
-void update_cursor() {
+void update_cursor(bool menu) {
+    update_mouse_look(menu);
+    if (g_mouse_window != nullptr)
+        return;  // hidden by relative mode
     static float last_x = -1.f, last_y = -1.f;
     static Uint64 moved_at = 0;
     static bool shown = true;
@@ -1530,7 +1586,7 @@ bool run_menu() {
     g_input.poll(pressed);
     bool open = true;
     while (!g_close) {
-        update_cursor();
+        update_cursor(true);
         if (controls::capturing()) {
             const bool done = controls::poll_capture();
             if (done || !controls::capturing()) {
@@ -2556,7 +2612,7 @@ extern "C" void frontend_frame(void) {
     update_fast_forward_prompt();
     insanity_frame();
     controls::light_frame();
-    update_cursor();
+    update_cursor(false);
     static bool menu_was_held = false;
     bool held[kButtonCount];
     read_buttons(held);

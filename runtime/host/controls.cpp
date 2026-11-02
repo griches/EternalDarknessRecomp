@@ -14,6 +14,7 @@
 #include <SDL3/SDL_hints.h>
 #include <SDL3/SDL_joystick.h>
 #include <SDL3/SDL_keyboard.h>
+#include <SDL3/SDL_mouse.h>
 #include <SDL3/SDL_scancode.h>
 #include <SDL3/SDL_timer.h>
 
@@ -27,6 +28,8 @@
 #include <mutex>
 #include <string>
 #include <vector>
+
+extern "C" int hle_game_mode(void);  // hle.c: 2 while in play
 
 namespace controls {
 namespace {
@@ -273,6 +276,50 @@ void drive_virtual_pad() {
                                        down[n] ? SDL_JOYSTICK_AXIS_MAX : SDL_JOYSTICK_AXIS_MIN);
         else
             SDL_SetJoystickVirtualButton(g_virtual, kButtons[n], down[n]);
+    }
+}
+
+// The mouse in the game's own menus (the title screens, the inventory and
+// Tome: anywhere but play, where a click would act): the left button is A,
+// the right B, and the wheel steps up and down. Not while the mouse turns the
+// first person view, nor when the pointer is outside the window.
+std::atomic<int> g_wheel{0};
+
+bool SDLCALL wheel_watch(void*, SDL_Event* event) {
+    if (event->type == SDL_EVENT_MOUSE_WHEEL && event->wheel.y != 0.0f)
+        g_wheel.fetch_add(event->wheel.y > 0.0f ? 1 : -1, std::memory_order_relaxed);
+    return true;
+}
+
+void mouse_to_pad(DolPadState& s) {
+    static const bool watching = SDL_AddEventWatch(wheel_watch, nullptr);
+    (void)watching;
+    static int wheel_frames = 0, wheel_dir = 0;
+    const bool menus = g_game_menu.load(std::memory_order_relaxed) || hle_game_mode() != 2;
+    if (!menus || camera_mouse_look() || SDL_GetMouseFocus() == nullptr) {
+        g_wheel.store(0, std::memory_order_relaxed);
+        wheel_frames = 0;
+        return;
+    }
+    const SDL_MouseButtonFlags buttons = SDL_GetMouseState(nullptr, nullptr);
+    if (buttons & SDL_BUTTON_LMASK)
+        s.button |= 0x0100;  // A
+    if (buttons & SDL_BUTTON_RMASK)
+        s.button |= 0x0200;  // B
+    // Each notch: up or down held for four reads, then let go for two, so
+    // the game sees one step.
+    if (wheel_frames == 0) {
+        const int w = g_wheel.load(std::memory_order_relaxed);
+        if (w != 0) {
+            wheel_dir = w > 0 ? 1 : -1;
+            g_wheel.fetch_sub(wheel_dir, std::memory_order_relaxed);
+            wheel_frames = 6;
+        }
+    }
+    if (wheel_frames > 0) {
+        if (wheel_frames > 2)
+            s.button |= wheel_dir > 0 ? 0x0008 : 0x0004;  // d-pad up / down
+        wheel_frames--;
     }
 }
 
@@ -731,6 +778,7 @@ bool read_pad(DolPadState* state) {
             s.button |= kGcButton[a];
         }
     }
+    mouse_to_pad(s);
     s.analog_a = (s.button & 0x0100) ? 255 : 0;
     s.analog_b = (s.button & 0x0200) ? 255 : 0;
     // C-stick: right stick or TFGH.
@@ -1156,6 +1204,8 @@ extern "C" bool controls_fast_forward(void) {
 extern "C" bool controls_take_debug_request(void) {
     return controls::g_debug_request.exchange(false, std::memory_order_relaxed);
 }
+
+bool controls::game_menu_open() { return g_game_menu.load(std::memory_order_relaxed); }
 
 extern "C" void controls_set_game_menu(bool open) {
     if (controls::g_game_menu.exchange(open, std::memory_order_relaxed) != open)

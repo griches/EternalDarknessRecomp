@@ -21,5 +21,6 @@
 		</div>
 	</div>
 	<div id="hint"></div>
+	<div id="version"></div>
 </body>
 </rml>

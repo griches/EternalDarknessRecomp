@@ -21,6 +21,7 @@
 #include "host/settings.h"
 
 #include <math.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -197,6 +198,20 @@ void camera_set_stick(float x, float y, bool aiming, bool play) {
 }
 
 bool camera_takes_stick(void) { return camera_mode() != CAMERA_ORIGINAL; }
+
+/* The mouse's movement since the camera last used it, in 1/16 pixels (it
+ * arrives on the main thread, the camera runs on the game thread). */
+static _Atomic int g_mouse_dx, g_mouse_dy;
+
+void camera_add_mouse(float dx, float dy) {
+    atomic_fetch_add(&g_mouse_dx, (int)lroundf(dx * 16.0f));
+    atomic_fetch_add(&g_mouse_dy, (int)lroundf(dy * 16.0f));
+}
+
+static void take_mouse(float* dx, float* dy) {
+    *dx = (float)atomic_exchange(&g_mouse_dx, 0) / 16.0f;
+    *dy = (float)atomic_exchange(&g_mouse_dy, 0) / 16.0f;
+}
 
 float camera_stick_turn(void) {
     return camera_mode() != CAMERA_ORIGINAL && !g_aiming ? g_turn : 0.0f;
@@ -1218,6 +1233,10 @@ static float g_fp_yaw, g_fp_pitch;
 
 static void first_person(Vec3 eye, Vec3 target, Vec3 focus, Vec3 player, Vec3 k, bool step, bool still,
                          Vec3* new_eye, Vec3* new_target) {
+    // The mouse's movement since the last frame: used below in play, dropped
+    // while aiming holds the view (it would jump when the aim is let go).
+    float mx, my;
+    take_mouse(&mx, &my);
     // A little ahead of the head along the view.
     Vec3 head = add(add(player, scale(k, FP_HEIGHT)), scale(yaw_dir(g_fp_yaw, k), FP_AHEAD));
     // Better, at the player's own height, from their skeleton.
@@ -1269,6 +1288,12 @@ static void first_person(Vec3 eye, Vec3 target, Vec3 focus, Vec3 player, Vec3 k,
             g_fp_yaw = remainderf(g_fp_yaw - g_stick_x * YAW_RATE * dt, 2.0f * PI);
             const float look_y = g_settings.invert_first_person ? -g_stick_y : g_stick_y;
             g_fp_pitch = clampf(g_fp_pitch + look_y * PITCH_RATE * dt, -1.2f, 1.2f);
+            // The mouse: right turns right, up looks up (down with the invert
+            // option), at the sensitivity chosen (5: about 0.14 degrees a pixel).
+            const float per_pixel = 0.0005f * (float)g_settings.mouse_sensitivity;
+            const float mouse_up = -my * per_pixel;
+            g_fp_yaw = remainderf(g_fp_yaw - mx * per_pixel, 2.0f * PI);
+            g_fp_pitch = clampf(g_fp_pitch + (g_settings.invert_first_person ? -mouse_up : mouse_up), -1.2f, 1.2f);
         }
         float px = g_s_pivot.x, py = g_s_pivot.y, pz = g_s_pivot.z;
         spring(&px, &g_s_pivot_v.x, head.x, SMOOTH_FOLLOW, 3000.0f);
@@ -1311,6 +1336,8 @@ static float g_move_x, g_move_y;
 static bool g_menu_open;  // camera_set_menu
 
 void camera_set_menu(bool open) { g_menu_open = open; }
+
+bool camera_mouse_look(void) { return camera_mode() == CAMERA_FIRST_PERSON && g_play && !g_menu_open; }
 
 void camera_set_move(float x, float y) {
     g_move_x = x;

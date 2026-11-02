@@ -43,6 +43,7 @@ Settings g_settings = {
     .vibration = true,
     .camera = 0,
     .invert_first_person = false,
+    .mouse_sensitivity = 5,
     .controls_custom = "",
     .disc = "",
 };
@@ -141,6 +142,8 @@ void settings_load(void) {
         }
         else if (strcmp(key, "invert_first_person") == 0)
             g_settings.invert_first_person = n != 0;
+        else if (strcmp(key, "mouse_sensitivity") == 0)
+            g_settings.mouse_sensitivity = clamp_int(n, 1, 20);
         else if (strcmp(key, "vibration") == 0)
             g_settings.vibration = n != 0;
         else if (strcmp(key, "camera") == 0)
@@ -187,6 +190,7 @@ void settings_save(void) {
         fprintf(f, "stick_deadzone_%s = %d\n", kLayoutKeys[i], g_settings.stick_deadzone[i]);
     fprintf(f, "vibration = %d\n", g_settings.vibration ? 1 : 0);
     fprintf(f, "invert_first_person = %d\n", g_settings.invert_first_person ? 1 : 0);
+    fprintf(f, "mouse_sensitivity = %d\n", g_settings.mouse_sensitivity);
     fprintf(f, "camera = %d\n", g_settings.camera);
     fprintf(f, "controls_custom = %s\n", g_settings.controls_custom);
     fprintf(f, "disc = %s\n", g_settings.disc);

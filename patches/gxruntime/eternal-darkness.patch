@@ -5665,10 +5665,10 @@ index 7af8fca..4c14e34 100644
    else
 diff --git a/graphics/aurora/lib/gfx/glow.cpp b/graphics/aurora/lib/gfx/glow.cpp
 new file mode 100644
-index 0000000..fe1b12c
+index 0000000..50b0adb
 --- /dev/null
 +++ b/graphics/aurora/lib/gfx/glow.cpp
-@@ -0,0 +1,878 @@
+@@ -0,0 +1,880 @@
 +#include "glow.hpp"
 +
 +#include "../webgpu/gpu_prof.hpp"
@@ -5832,10 +5832,10 @@ index 0000000..fe1b12c
 +  let p = (uv - 0.5) * vec2f(dims.x / max(dims.y, 1.0), 1.0);
 +  return abs(length(p) - 0.07) < 0.018;
 +}
-+fn in_box(uv: vec2f) -> bool {
++fn in_box(uv: vec2f, half: f32) -> bool {
 +  let dims = vec2f(textureDimensions(efb_texture));
 +  let p = abs((uv - 0.5) * vec2f(dims.x / max(dims.y, 1.0), 1.0));
-+  return p.x < 0.16 && p.y < 0.16;
++  return p.x < half && p.y < half;
 +}
 +fn tap(uv: vec2f, t: vec2f, x: f32, y: f32) -> vec3f {
 +  return textureSampleLevel(src, samp, uv + t * vec2f(x, y), 0.0).rgb;
@@ -5848,11 +5848,12 @@ index 0000000..fe1b12c
 +}
 +@fragment fn present(in: VOut) -> @location(0) vec4f {
 +  let pattern = i32(params.d.w);
-+  if (pattern == 1) {
++  if (pattern == 1 && in_box(in.uv, 0.19)) {
 +    // Peak: the box at the chosen peak, the ring at the most a signal can
-+    // ask for; the ring disappears once the box reaches what the display shows.
++    // ask for; the ring disappears once the box reaches what the display
++    // shows. A black border round it; the game's picture beyond.
 +    var n = 0.0;
-+    if (in_box(in.uv)) {
++    if (in_box(in.uv, 0.16)) {
 +      n = select(params.d.y, 10000.0, ring(in.uv));
 +    }
 +    return vec4f(encode_out(vec3f(n)), 1.0);
@@ -5879,7 +5880,8 @@ index 0000000..fe1b12c
 +    }
 +    return vec4f(encode_out(black_level(to_linear(vec3f(v))) * params.d.x), 1.0);
 +  }
-+  let c = textureSample(efb_texture, efb_sampler, in.uv).rgb;
++  // No derivatives: the peak box above branches on the position first.
++  let c = textureSampleLevel(efb_texture, efb_sampler, in.uv, 0.0).rgb;
 +  let g = tent(in.uv) * params.a.x * params.c.y;
 +  // The scene's highlights (never the HUD: they are taken before it) shine
 +  // up to c.w past their SDR level.

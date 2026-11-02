@@ -1414,7 +1414,20 @@ void go_back() {
     }
 }
 
-// Mouse: hovering selects a row, clicking activates it.
+// Mouse: hovering selects a row, clicking activates it. A click arrives while
+// a frame is being presented (Aurora's event poll), so it is only noted here
+// and acted on by run_menu after that frame: a row that runs a screen of its
+// own (Calibrate HDR) would otherwise present inside the present and hang.
+int g_clicked_row = -1;
+// Changing a value over the game: the page fades and the dimming lifts for a
+// moment, to see what the change does.
+Uint64 g_peek_until = 0;
+
+void note_value_change() {
+    if (g_doc != nullptr && g_doc->IsClassSet("overlay"))
+        g_peek_until = SDL_GetTicks() + 1500;
+}
+
 class MenuListener final : public Rml::EventListener {
 public:
     void ProcessEvent(Rml::Event& event) override {
@@ -1446,8 +1459,7 @@ public:
             if (controls::mouse_bound_recently())
                 return;
             g_selected = index;
-            activate_selected();
-            build_rows();
+            g_clicked_row = index;
         }
     }
 };
@@ -1586,6 +1598,7 @@ static Uint64 g_test_close_at = 0;
 
 bool run_menu() {
     g_close = false;
+    g_clicked_row = -1;  // a click left over from a menu before
     build_rows();
     g_doc->Show(Rml::ModalFlag::None, Rml::FocusFlag::Document);
     // Ignore whatever is still held from before the menu opened.
@@ -1622,10 +1635,21 @@ bool run_menu() {
             Row& r = g_rows[g_selected];
             if (r.change && (r.enabled || r.browse)) {
                 r.change(pressed[kLeft] ? -1 : +1);
+                note_value_change();
                 dirty = true;
             }
         }
-        if (pressed[kAccept]) {
+        if (g_clicked_row >= 0 && !pressed[kAccept]) {
+            g_selected = g_clicked_row;
+            g_clicked_row = -1;
+            if (g_selected < static_cast<int>(g_rows.size()) && g_rows[g_selected].change)
+                note_value_change();
+            activate_selected();
+            dirty = true;
+        } else if (pressed[kAccept]) {
+            g_clicked_row = -1;
+            if (g_selected < static_cast<int>(g_rows.size()) && g_rows[g_selected].change)
+                note_value_change();
             activate_selected();
             dirty = true;
         } else if (pressed[kBack] || (pressed[kMenu] && (g_screen == Screen::InGame || g_screen == Screen::Debug))) {
@@ -1654,6 +1678,9 @@ bool run_menu() {
         }
         if (insanity::menu_frame(g_screen == Screen::InGame))
             dirty = true;
+        const bool peek = SDL_GetTicks() < g_peek_until;
+        if (peek != g_doc->IsClassSet("peek"))
+            g_doc->SetClass("peek", peek);
         if (dirty)
             build_rows();
         if (!dol_aurora_ui_frame()) {
@@ -2615,6 +2642,7 @@ extern "C" void frontend_frame(void) {
     if (calibration_test_at != 0 && SDL_GetTicks() >= calibration_test_at && ensure_ui()) {
         calibration_test_at = 0;
         g_calibration_test_until = SDL_GetTicks() + 4000;
+        g_in_game = true;  // as from the pause menu: over the game's picture
         run_hdr_calibration(calibration_test_step);
     }
     update_fps_counter();

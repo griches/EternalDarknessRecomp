@@ -26,6 +26,16 @@ body.overlay {
 	decorator: none;
 }
 
+/* A value just changed over the game: see the game through the page. */
+body.overlay.peek {
+	background-color: #00000000;
+}
+
+body.peek #book,
+body.peek #hint {
+	opacity: 0.18;
+}
+
 #book {
 	display: flex;
 	padding: 6dp;

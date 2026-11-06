@@ -84,6 +84,11 @@ bool camera_pad_buttons(struct CPUState* cpu, unsigned buttons);
 // Whether the game's Tome (its own menu) is open: what the player holds is then
 // left as the game has it (the Tome shows the inventory's things itself).
 void camera_set_menu(bool open);
+// The game made a picture of its last frame to fade from (hle.c, its XFB
+// reader): the Tome photo it fades into the room after a load. The view stays
+// the game's own while its camera holds that shot, so the room lines up with
+// the photo, then eases over (third and first person).
+void camera_hold_shot(void);
 // What the player holds set as the camera has them drawn for the frame's
 // draws (from the camera), and the game's own put back once they are done
 // (hle.c, GXSetDrawDone) or before a state is saved: the game's logic and a

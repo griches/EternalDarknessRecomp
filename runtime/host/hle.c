@@ -5073,6 +5073,9 @@ static void hle_xfb_reader_notify(CPUState* cpu) {
 #else
     (void)cpu;
 #endif
+    // Faded into the room after a load (the Tome photo): the camera options
+    // keep the game's shot until the photo has gone.
+    camera_hold_shot();
 }
 
 static void install_xfb_reader_sync(CPUState* cpu) {

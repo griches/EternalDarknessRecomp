@@ -1532,6 +1532,21 @@ void camera_held_end(CPUState* cpu) {
  * frame, whose bytes 40..63 it never uses (the eye and target written there
  * are read once, by LookAt). The world's up is the camera's up vector (+Z in
  * this game). */
+/* The game's shot held after it made a picture of its last frame to fade
+ * from (camera_hold_shot): frames left (-1: none), and the shot as it was at
+ * the first frame in play. The Tome photo after a load fades over 300 frames
+ * with the game's camera still, which then swings round the player: the hold
+ * ends when it moves, or after SHOT_HOLD_MAX frames. */
+#define SHOT_HOLD_MAX 420
+static int g_shot_frames = -1;
+static bool g_shot_seen;
+static Vec3 g_shot_eye, g_shot_target;
+
+void camera_hold_shot(void) {
+    g_shot_frames = SHOT_HOLD_MAX;
+    g_shot_seen = false;
+}
+
 void camera_look_at(CPUState* cpu) {
     g_cpu = cpu;
     if (!g_log_checked) {
@@ -1592,6 +1607,22 @@ void camera_look_at(CPUState* cpu) {
             fprintf(stderr, "[camera] %s from frame %llu\n", camera_mode_name(mode), frame);
         g_last_mode = mode;
     }
+    // The game's shot held (camera_hold_shot): counted in play, until its
+    // camera moves.
+    if (step && g_shot_frames >= 0 && g_play && have_player) {
+        if (!g_shot_seen) {
+            g_shot_seen = true;
+            g_shot_eye = eye;
+            g_shot_target = target;
+        }
+        const bool moved = length(sub(eye, g_shot_eye)) > 1.0f || length(sub(target, g_shot_target)) > 1.0f;
+        if (moved || --g_shot_frames < 0) {
+            g_shot_frames = -1;
+            if (g_log)
+                fprintf(stderr, "[camera] the game's shot held until frame %llu%s\n", frame,
+                        moved ? " (its camera moved)" : "");
+        }
+    }
     if (mode == CAMERA_ORIGINAL) {
         g_turn = 0.0f;
         g_view_active = false;
@@ -1630,7 +1661,11 @@ void camera_look_at(CPUState* cpu) {
         // game's zoom as they walk up to a thing is left to the prompt.
         const bool known = g_looking_known >= 0;
         const bool zoom = g_zoomed && !g_zooming_out && (mode != CAMERA_FIRST_PERSON || !known);
-        const bool handing = g_examining || (known && g_looking_known != 0) || zoom;
+        // Holding the game's shot: its view from the start, no easing in.
+        const bool shot = g_shot_frames >= 0 && g_shot_seen;
+        if (shot)
+            g_hand_progress = 1.0f;
+        const bool handing = g_examining || (known && g_looking_known != 0) || zoom || shot;
         const float time = mode == CAMERA_FIRST_PERSON ? FP_HAND_TIME : SWEEP_TIME;
         g_hand_progress = clampf(g_hand_progress + (handing ? 1.0f : -1.0f) / (60.0f * time), 0.0f, 1.0f);
         g_hand = mode == CAMERA_FIRST_PERSON
